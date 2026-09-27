@@ -42,6 +42,36 @@ def head(ws: Workspace) -> str:
     return git.out(["rev-parse", "HEAD"], ws.path)
 
 
+def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: int) -> tuple[bool, str]:
+    """Run ``cmd`` in ``ws``, or reuse the cached result for the same (workspace,
+    HEAD sha, command) if the tree was clean when that result was cached. A
+    dirty tree always runs fresh and is never cached, since the result then
+    reflects more than just the commit at ``sha``."""
+    sha = head(ws)
+    dirty = bool(git.dirty_files(ws.path))
+    if not dirty:
+        cached = db.get_check(ws.id, sha, cmd)
+        if cached is not None:
+            return bool(cached.ok), cached.output or ""
+    ok, out = autopilot.run_check(cmd, ws.path, env, timeout)
+    if not dirty:
+        db.set_check(ws.id, sha, cmd, ok, out)
+    return ok, out
+
+
+def check_summary(db: DB, ws: Workspace, cfg: RepoConfig) -> str:
+    """Run each of ``cfg.checks`` (cached by sha) and produce a short pass/fail
+    summary for a reviewer, with output only for the ones that failed."""
+    if not cfg.checks:
+        return ""
+    env = workspaces.workspace_env(ws)
+    lines = []
+    for cmd in cfg.checks:
+        ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
+        lines.append(f"PASS `{cmd}`" if ok else f"FAIL `{cmd}`\n{out}")
+    return "\n".join(lines)
+
+
 def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Report:
     r = Report()
     dirty = git.dirty_files(ws.path)
@@ -64,14 +94,14 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Rep
             )
         r.passed.append(f"review approved {sha[:8]}")
 
-    if cfg.pre_commit and (problem := _pre_commit(ws, cfg)):
+    if cfg.pre_commit and (problem := _pre_commit(db, ws, cfg)):
         return r.fail(problem)
     if cfg.pre_commit and _has_pre_commit(ws) and shutil.which("pre-commit"):
         r.passed.append("pre-commit passed")
 
     env = workspaces.workspace_env(ws)
     for cmd in cfg.checks:
-        ok, out = autopilot.run_check(cmd, ws.path, env, cfg.check_timeout)
+        ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
         if not ok:
             return r.fail(f"Check failed in {ws.branch}:\n{out}\nSend this to the worker to fix.")
         r.passed.append(f"`{cmd}` passed")
@@ -84,14 +114,14 @@ def _has_pre_commit(ws: Workspace) -> bool:
     return (Path(ws.path) / ".pre-commit-config.yaml").is_file()
 
 
-def _pre_commit(ws: Workspace, cfg: RepoConfig) -> str | None:
+def _pre_commit(db: DB, ws: Workspace, cfg: RepoConfig) -> str | None:
     """Run pre-commit over the files the branch changes. Returns a problem, or None."""
     if not _has_pre_commit(ws) or not shutil.which("pre-commit"):
         return None
     base = workspaces.require_base(ws)
     start = git.merge_base(ws.path, git.base_ref(ws.path, base))
-    ok, out = autopilot.run_check(
-        f"pre-commit run --from-ref {start} --to-ref HEAD", ws.path,
+    ok, out = run_checked(
+        db, ws, f"pre-commit run --from-ref {start} --to-ref HEAD",
         workspaces.workspace_env(ws), cfg.check_timeout,
     )
     if ok:

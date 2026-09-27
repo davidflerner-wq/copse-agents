@@ -18,6 +18,7 @@ import time
 import uuid
 
 from copse import git, tmux, workspaces
+from copse.config import RepoConfig
 from copse.db import DB, Agent, Workspace
 from copse.profiles import load_profile
 from copse.providers import LaunchContext, get_provider
@@ -127,6 +128,7 @@ def spawn(
         id=agent_id, workspace_id=ws.id, profile=profile.name, provider=provider.name,
         parent_id=parent_id, mode=mode, status="starting", tmux_window="",
         result=None, created_at=time.time(), task=prompt, headless=int(headless) or None,
+        done_when=done_when,
     )
     db.add_agent(agent)
     if autopilot:
@@ -733,16 +735,53 @@ def delegate(
     return agent, ws
 
 
+TASK_TRIM = 2000  # a worker's task can be long; the reviewer needs the gist, not the whole thing
+
+
+def workspace_worker(db: DB, ws: Workspace) -> Agent | None:
+    """The worker whose task produced the code in ``ws``, if any: the earliest
+    handoff/assign agent in the workspace (excludes reviewers, which run there
+    too). Used to give a reviewer the original task and finish line."""
+    workers = [a for a in db.list_agents(ws.id) if a.mode in ("handoff", "assign")]
+    return workers[0] if workers else None
+
+
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str,
-                   focus: str | None = None, checks: list[str] | None = None) -> Agent:
+                   focus: str | None = None, cfg: RepoConfig | None = None) -> Agent:
     """Start a reviewer in a worker's workspace. Its verdict is recorded for
-    the merge gate and forwarded to ``caller`` as a message."""
+    the merge gate and forwarded to ``caller`` as a message.
+
+    The repo's ``cfg.checks`` are run once here (cached by sha) and handed to
+    the reviewer as a pass/fail summary, instead of asking it to run them
+    itself. If the workspace already has a review at an earlier commit, the
+    reviewer is pointed at just what changed since then."""
+    from copse import gates
+
     base = ws.base_branch or "the base branch"
     task = (f"Review the changes on branch `{ws.branch}` (workspace {ws.id}) against `{base}`: "
             f"run `git diff $(git merge-base HEAD {base})` or use the copse workspace_diff tool. "
             "Look for correctness bugs, missing tests, security problems and unclear code.")
-    if checks:
-        task += " Also run: " + "; ".join(f"`{c}`" for c in checks) + "."
+
+    worker = workspace_worker(db, ws)
+    if worker and worker.task:
+        task += f"\n\nThe worker's original task:\n{worker.task.strip()[:TASK_TRIM]}"
+    if worker and worker.done_when:
+        task += f"\n\nIts finish line: {worker.done_when.strip()}"
+
+    if cfg:
+        summary = gates.check_summary(db, ws, cfg)
+        if summary:
+            task += f"\n\nChecks (already run for you; don't run the whole suite yourself):\n{summary}"
+
+    prev = db.last_review(ws.id)
+    sha = gates.head(ws)
+    if prev and prev.sha != sha:
+        task += (
+            f"\n\nA previous review at {prev.sha[:8]} found:\n{(prev.summary or '').strip()}\n\n"
+            f"Focus on what changed since then (`git diff {prev.sha}..HEAD`), plus a final sanity "
+            "pass over the rest; you don't need to re-review it from scratch."
+        )
+
     if focus:
         task += f"\n\nFocus: {focus}"
     return spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,

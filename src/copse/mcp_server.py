@@ -289,7 +289,9 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
 def request_review(workspace: str, focus: str | None = None) -> str:
     """Start a reviewer agent on a worker's branch. It doesn't edit code; its
     verdict arrives as a message and is recorded for merge_workspace, which
-    only accepts an approval of the branch's current commit. focus: anything
+    only accepts an approval of the branch's current commit. The repo's
+    checks are run once here and handed to the reviewer as a pass/fail
+    summary, so it isn't re-running the whole suite itself. focus: anything
     the reviewer should look at especially."""
     db = DB()
     caller, _ = _caller(db)
@@ -297,7 +299,7 @@ def request_review(workspace: str, focus: str | None = None) -> str:
     if ws.kind != "worktree":
         return "Only a worker's workspace (its own branch and worktree) can be reviewed this way."
     cfg = load_repo_config(ws.repo_root)
-    reviewer = agents.request_review(db, caller, ws, cfg.reviewer, focus, cfg.checks)
+    reviewer = agents.request_review(db, caller, ws, cfg.reviewer, focus, cfg)
     return (f"Reviewer {reviewer.id} ({reviewer.profile}/{reviewer.provider}) is reviewing "
             f"{ws.branch}. Its verdict will arrive as a message.")
 

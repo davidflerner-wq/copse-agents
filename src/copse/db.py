@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS agents (
     task TEXT,                     -- the prompt it was started with (for resuming)
     session_ref TEXT,              -- the CLI's own session id (claude --resume)
     stop_blocked INTEGER,          -- copse's Stop hook just kept it going (for CLIs that don't say)
-    headless INTEGER               -- runs `claude -p` turn by turn (agents.run_headless)
+    headless INTEGER,              -- runs `claude -p` turn by turn (agents.run_headless)
+    done_when TEXT                 -- the finish line it was given, if any (for review context)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -89,6 +90,18 @@ CREATE TABLE IF NOT EXISTS reviews (
     summary TEXT,
     created_at REAL NOT NULL
 );
+-- A check command's result at one commit, so gates.run and request_review
+-- don't re-run the same command against the same tree. Only written when the
+-- tree was clean at that sha (see gates.run_checked).
+CREATE TABLE IF NOT EXISTS check_cache (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    sha TEXT NOT NULL,
+    command TEXT NOT NULL,
+    ok INTEGER NOT NULL,
+    output TEXT,                   -- the tail of the command's output
+    created_at REAL NOT NULL,
+    PRIMARY KEY (workspace_id, sha, command)
+);
 """
 
 
@@ -123,6 +136,7 @@ class Agent:
     session_ref: str | None = None
     stop_blocked: int | None = None
     headless: int | None = None
+    done_when: str | None = None
 
 
 @dataclass
@@ -164,6 +178,16 @@ class Review:
 
 
 @dataclass
+class CheckResult:
+    workspace_id: str
+    sha: str
+    command: str
+    ok: int
+    output: str | None
+    created_at: float
+
+
+@dataclass
 class Message:
     id: int
     agent_id: str
@@ -199,7 +223,8 @@ class DB:
         """Bring databases created by older versions up to the current schema."""
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(agents)")}
         for col, kind in (("status_since", "REAL"), ("task", "TEXT"), ("session_ref", "TEXT"),
-                          ("stop_blocked", "INTEGER"), ("headless", "INTEGER")):
+                          ("stop_blocked", "INTEGER"), ("headless", "INTEGER"),
+                          ("done_when", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
 
@@ -255,10 +280,10 @@ class DB:
             c.execute(
                 "INSERT INTO agents (id, workspace_id, profile, provider, parent_id, mode, "
                 "status, tmux_window, result, created_at, status_since, task, session_ref, "
-                "headless) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "headless, done_when) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (a.id, a.workspace_id, a.profile, a.provider, a.parent_id, a.mode,
                  a.status, a.tmux_window, a.result, a.created_at,
-                 a.status_since or a.created_at, a.task, a.session_ref, a.headless),
+                 a.status_since or a.created_at, a.task, a.session_ref, a.headless, a.done_when),
             )
 
     def get_agent(self, agent_id: str) -> Agent | None:
@@ -436,3 +461,30 @@ class DB:
             (workspace_id, sha),
         ).fetchone()
         return _load(Review, row) if row else None
+
+    def last_review(self, workspace_id: str) -> Review | None:
+        """The most recent review of ``workspace_id`` at any sha, for incremental
+        re-review: compare its sha against the current HEAD to see what's new."""
+        row = self.conn.execute(
+            "SELECT * FROM reviews WHERE workspace_id=? ORDER BY id DESC LIMIT 1",
+            (workspace_id,),
+        ).fetchone()
+        return _load(Review, row) if row else None
+
+    # -- check cache -----------------------------------------------------------
+
+    def get_check(self, workspace_id: str, sha: str, command: str) -> CheckResult | None:
+        row = self.conn.execute(
+            "SELECT * FROM check_cache WHERE workspace_id=? AND sha=? AND command=?",
+            (workspace_id, sha, command),
+        ).fetchone()
+        return _load(CheckResult, row) if row else None
+
+    def set_check(self, workspace_id: str, sha: str, command: str, ok: bool, output: str) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO check_cache (workspace_id, sha, command, ok, output, created_at) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(workspace_id, sha, command) DO UPDATE SET "
+                "ok=excluded.ok, output=excluded.output, created_at=excluded.created_at",
+                (workspace_id, sha, command, int(ok), output, time.time()),
+            )
