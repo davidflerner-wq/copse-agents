@@ -159,3 +159,15 @@ def test_wait_for_worker_leaves_assign_workers_running(db, ws, monkeypatch):
     monkeypatch.setattr(agents, "kill", lambda db, aid: killed.append(aid))
     assert "ok" in mcp_server._await_worker(db, "w2", wait_seconds=0)
     assert killed == []
+
+
+def test_codex_command_preapproves_only_copse_tools(monkeypatch):
+    from copse.providers import Codex
+
+    monkeypatch.setenv("COPSE_CODEX_BIN", "/opt/codex")
+    argv = Codex().command(LaunchContext("abc", load_profile("developer"), "do it"))
+    assert argv[0] == "/opt/codex"
+    assert 'mcp_servers.copse.default_tools_approval_mode="approve"' in argv
+    assert any('COPSE_AGENT_ID = "abc"' in a for a in argv)
+    assert argv[-1].endswith("do it")  # profile prompt leads the first message
+    assert not any("dangerously" in a or "full-auto" in a for a in argv)

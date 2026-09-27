@@ -130,18 +130,35 @@ class ClaudeCode(Provider):
                 tmux.send_keys(target, "Down")
 
 
+# The ChatGPT desktop app bundles the Codex CLI without putting it on PATH.
+CODEX_BUNDLED = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
+
+
+def codex_binary() -> str:
+    """COPSE_CODEX_BIN, else `codex` on PATH, else the ChatGPT app's copy."""
+    import shutil
+
+    explicit = os.environ.get("COPSE_CODEX_BIN")
+    if explicit:
+        return explicit
+    return shutil.which("codex") or (CODEX_BUNDLED if os.path.exists(CODEX_BUNDLED) else "codex")
+
+
 class Codex(Provider):
     name = "codex"
 
     def command(self, ctx: LaunchContext) -> list[str]:
         spec = mcp_server_spec(ctx.agent_id)
         argv = [
-            "codex",
+            codex_binary(),
             "-c", f"mcp_servers.copse.command={json.dumps(spec['command'])}",
             "-c", f"mcp_servers.copse.args={json.dumps(spec['args'])}",
             "-c", "mcp_servers.copse.env=" + "{" + ", ".join(
                 f"{k} = {json.dumps(v)}" for k, v in spec["env"].items()
             ) + "}",
+            # Pre-approve copse's own tools (report_result, send_message, ...),
+            # like --allowedTools mcp__copse for Claude Code. Nothing else.
+            "-c", 'mcp_servers.copse.default_tools_approval_mode="approve"',
         ]
         if ctx.profile.model:
             argv += ["--model", ctx.profile.model]
@@ -150,6 +167,27 @@ class Codex(Provider):
         if first:
             argv.append(first)
         return argv
+
+    TRUST_DIALOG = re.compile(r"Trust this folder\?", re.I)
+    TRUST_SELECTED = re.compile(r"›\s*1\.\s*Trust and continue")
+
+    def after_launch(self, target: str) -> None:
+        # Same situation as Claude Code: a new worktree of the user's own repo.
+        # Codex saves this trust for the repository root in ~/.codex/config.toml.
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            time.sleep(0.5)
+            try:
+                screen = tmux.capture(target, lines=60)
+            except tmux.TmuxError:
+                return
+            if self.TRUST_DIALOG.search(screen):
+                if self.TRUST_SELECTED.search(screen):
+                    tmux.send_keys(target, "Enter")
+                    return
+                tmux.send_keys(target, "Up")
+            elif "›" in screen and ("context left" in screen or "Esc to interrupt" in screen):
+                return
 
 
 class Shell(Provider):
