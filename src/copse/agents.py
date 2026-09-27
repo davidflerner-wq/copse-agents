@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import time
 import uuid
 
@@ -95,6 +96,18 @@ def spawn(
         raise
     db.update_agent(agent_id, tmux_window=target)
     agent.tmux_window = target
+    if mode == "interactive":
+        # When this chat ends, end its window (and the dashboard beside it)
+        # instead of leaving a dead pane behind; see ended().
+        from copse.providers import copse_invocation
+
+        env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in agent_env(ws, agent_id).items()
+                              if k in ("COPSE_HOME", "COPSE_TMUX_SOCKET"))
+        cmd = " ".join(shlex.quote(a) for a in [*copse_invocation(), "_ended", agent_id])
+        try:
+            tmux.on_pane_exit(target, f"{env_prefix} {cmd}".strip())
+        except tmux.TmuxError:
+            pass
     if watch_pane:
         # The dashboard for this repo, under the agent in the same window.
         # Best effort: a failed split must not fail the agent it sits beside.
@@ -121,6 +134,21 @@ def get(db: DB, agent_id: str) -> Agent:
             return matches[0]
         raise AgentError(f"no agent {agent_id!r}")
     return agent
+
+
+def ended(db: DB, agent_id: str) -> None:
+    """An interactive agent's process exited: close its window (agent pane
+    plus dashboard). If that leaves only the session's idle starter shell,
+    end the whole tmux session, so an attached terminal drops back to its
+    prompt. Workers it started keep running."""
+    agent = db.get_agent(agent_id)
+    if agent is None:
+        return
+    db.set_status(agent_id, "exited")
+    ws = db.get_workspace(agent.workspace_id)
+    tmux.kill_window(agent.tmux_window)
+    if ws and set(tmux.windows(ws.tmux_session)) <= {"shell"}:
+        tmux.kill_session(ws.tmux_session)
 
 
 def find_running(db: DB, ws: Workspace, profile: str) -> Agent | None:

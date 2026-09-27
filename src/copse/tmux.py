@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -55,6 +56,18 @@ def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[
     # Keep the agent's pane around after it exits so its output can be read.
     _tmux("set-option", "-p", "-t", target, "remain-on-exit", "on", check=False)
     return target
+
+
+def on_pane_exit(target: str, shell_command: str) -> None:
+    """Run ``shell_command`` (via tmux run-shell) when the process in pane
+    ``target`` exits. Needs remain-on-exit on that pane, which makes tmux
+    fire pane-died instead of closing the pane silently."""
+    _tmux("set-hook", "-p", "-t", target, "pane-died", f"run-shell -b {shlex.quote(shell_command)}")
+
+
+def windows(session: str) -> list[str]:
+    proc = _tmux("list-windows", "-t", f"={session}", "-F", "#{window_name}", check=False)
+    return proc.stdout.split() if proc.returncode == 0 else []
 
 
 def split_below(target: str, cwd: str, command: list[str], env: dict[str, str],

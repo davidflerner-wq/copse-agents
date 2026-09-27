@@ -50,8 +50,27 @@ def _attach(ws: Workspace, window: str | None = None) -> None:
         tmux.select_window(window)
     if os.environ.get("TMUX"):
         subprocess.run([*tmux._base(), "switch-client", "-t", window or f"={ws.tmux_session}"])
-    else:
-        os.execvp("tmux", tmux.attach_command(ws.tmux_session))
+        return
+    subprocess.run(tmux.attach_command(ws.tmux_session))
+    _after_detach(ws)
+
+
+def _after_detach(ws: Workspace) -> None:
+    """Back at the user's own prompt: say what happened and what's still running."""
+    from copse import scratch
+
+    db = DB()
+    if tmux.has_session(ws.tmux_session):
+        typer.echo("Detached; everything is still running. Run `copse` here to reopen.")
+        return
+    typer.echo("copse session ended.")
+    others = [a for w in db.find_workspaces(ws.repo_root) for a in db.list_agents(w.id)
+              if a.status != "exited" and agents.is_alive(a)]
+    if others:
+        typer.echo(f"  {len(others)} worker agent(s) still running: `copse watch` to check on them, "
+                   f"`copse rm <workspace>` to stop one.")
+    if scratch.is_scratch(ws.path) and not scratch.transferred_to(ws.path):
+        typer.echo(f"  Scratch work is saved in {ws.path}; `copse transfer <repo>` moves it into a repo.")
 
 
 def _run(fn, *args, **kwargs):
@@ -498,6 +517,11 @@ def hook(event: str) -> None:
     out = agents.hook_main(DB(), agent_id, event, sys.stdin.read())
     if out:
         typer.echo(out)
+
+
+@app.command("_ended", hidden=True)
+def ended_cmd(agent_id: str) -> None:
+    agents.ended(DB(), agent_id)
 
 
 @app.command("_flush", hidden=True)
