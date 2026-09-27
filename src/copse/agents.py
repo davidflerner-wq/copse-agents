@@ -91,6 +91,22 @@ def spawn(
     return agent
 
 
+def _pause_when_done(agent_id: str, argv: list[str]) -> list[str]:
+    """Wrap an interactive agent's command so that, when it exits for any
+    reason, copse pauses its session from inside the same pane. This doesn't
+    rely on tmux hooks, which some tmux builds don't fire reliably. The
+    wrapper survives Ctrl-C (a trap *handler* resets in the child, so the CLI
+    keeps its normal Ctrl-C behaviour), and errors go to hooks.log instead of
+    vanishing."""
+    from copse.config import copse_home
+    from copse.providers import copse_invocation
+
+    log = shlex.quote(str(copse_home() / "hooks.log"))
+    ended = " ".join(shlex.quote(a) for a in [*copse_invocation(), "_ended", agent_id])
+    script = f'trap : INT; "$@"; code=$?; {ended} >>{log} 2>&1; exit $code'
+    return ["/bin/sh", "-c", script, "copse-agent", *argv]
+
+
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             resume: str | None, watch_pane: bool, background_setup: bool = False) -> None:
     """Start (or restart) ``agent``'s CLI in a new tmux window of ``ws``."""
@@ -103,26 +119,16 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     db.set_status(agent.id, status)
     agent.status = status
 
+    argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume))
+    if agent.mode == "interactive":
+        argv = _pause_when_done(agent.id, argv)
     tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
     target = tmux.new_window(
-        ws.tmux_session, f"{profile.name}-{agent.id[:4]}", ws.path,
-        provider.command(LaunchContext(agent.id, profile, prompt, resume=resume)),
+        ws.tmux_session, f"{profile.name}-{agent.id[:4]}", ws.path, argv,
         agent_env(ws, agent.id),
     )
     db.update_agent(agent.id, tmux_window=target)
     agent.tmux_window = target
-    if agent.mode == "interactive":
-        # When this chat ends, pause the session instead of leaving a dead
-        # pane behind; see ended().
-        from copse.providers import copse_invocation
-
-        env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in agent_env(ws, agent.id).items()
-                              if k in ("COPSE_HOME", "COPSE_TMUX_SOCKET"))
-        cmd = " ".join(shlex.quote(a) for a in [*copse_invocation(), "_ended", agent.id])
-        try:
-            tmux.on_pane_exit(target, f"{env_prefix} {cmd}".strip())
-        except tmux.TmuxError:
-            pass
     if watch_pane:
         # The dashboard for this repo, under the agent in the same window.
         # Best effort: a failed split must not fail the agent it sits beside.
@@ -176,23 +182,33 @@ def pause(db: DB, root_id: str) -> list[Agent]:
 
     Worktrees, branches, queued messages and each CLI's own session stay; the
     processes stop, so nothing keeps acting while nobody's watching. Agents
-    that already reported are left marked done. Returns the agents paused."""
-    paused, sessions = [], set()
+    that already reported are left marked done. Returns the agents paused.
+
+    Records every status first and closes windows last: this can run inside
+    one of the windows it closes (see _pause_when_done)."""
+    paused, sessions, windows = [], set(), []
     for a in tree(db, root_id):
         ws = db.get_workspace(a.workspace_id)
         if ws:
             sessions.add(ws.tmux_session)
         if a.tmux_window:
-            # Dead or alive: a dead pane (the chat that just exited) would
-            # otherwise hold the window, and the session, open.
-            tmux.kill_window(a.tmux_window)
+            windows.append(a.tmux_window)
         if a.mode != "interactive" and a.result is not None:
             db.set_status(a.id, "done")
         else:
             db.set_status(a.id, "paused")
             paused.append(a)
+    for w in windows:
+        # Dead or alive: a dead pane (the chat that just exited) would
+        # otherwise hold the window, and the session, open.
+        tmux.kill_window(w)
+    root = db.get_agent(root_id)
+    root_ws = db.get_workspace(root.workspace_id) if root else None
     for session in sessions:
-        if set(tmux.windows(session)) <= {"shell"}:
+        # The chat's own session always closes, so an attached terminal gets
+        # its prompt back every time. Workers' sessions close once they hold
+        # nothing but the idle starter shell.
+        if (root_ws and session == root_ws.tmux_session) or set(tmux.windows(session)) <= {"shell"}:
             tmux.kill_session(session)
     return paused
 
@@ -241,6 +257,11 @@ def ended(db: DB, agent_id: str) -> None:
     its whole session. The chat's window, dashboard and workers stop; their
     work is kept for `copse --continue`."""
     agent = db.get_agent(agent_id)
+    for _ in range(20):  # a CLI that exits instantly can beat the window id to the DB
+        if agent is None or agent.tmux_window:
+            break
+        time.sleep(0.1)
+        agent = db.get_agent(agent_id)
     if agent is None or agent.status in ("paused", "done"):
         return
     pause(db, agent_id)

@@ -637,6 +637,10 @@ def after_launch_cmd(agent_id: str) -> None:
 
 @app.command("_ended", hidden=True)
 def ended_cmd(agent_id: str) -> None:
+    import signal
+
+    # Runs inside the window it's about to close; don't die with it.
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
     agents.ended(DB(), agent_id)
 
 

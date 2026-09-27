@@ -235,3 +235,15 @@ def test_worker_panes_stay_after_exit_for_their_output(db, ws):
         assert "last-words" in tmux.capture(a.tmux_window)
     finally:
         tmux.kill_session(ws.tmux_session)
+
+
+@pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
+def test_chat_exit_closes_its_session_even_with_extra_windows(db, ws):
+    a = agents.spawn(db, ws, "developer", provider_name="shell", watch_pane=True)
+    tmux._tmux("new-window", "-d", "-t", f"={ws.tmux_session}:", "-n", "extra")  # something the user opened
+    tmux.send_keys(a.tmux_window, "exit", "Enter")
+    deadline = time.time() + 30
+    while time.time() < deadline and tmux.has_session(ws.tmux_session):
+        time.sleep(0.2)
+    assert not tmux.has_session(ws.tmux_session)
+    assert db.get_agent(a.id).status == "paused"

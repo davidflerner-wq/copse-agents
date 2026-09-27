@@ -165,6 +165,7 @@ PALETTE_256 = {
     "alert": 215,     # amber: needs you
     "bad": 174,       # dusty rose: stopped
     "dim": 245,       # slate
+    "trunk": 94,      # brown: the logo's trunk
     "text": 255,
     "select_bg": 237, # subtle row highlight
 }
@@ -183,12 +184,14 @@ def _styles() -> dict[str, int]:
         pairs = [("accent", p["accent"], -1), ("busy", p["busy"], -1), ("ok", p["ok"], -1),
                  ("alert", p["alert"], -1), ("bad", p["bad"], -1), ("dim", p["dim"], -1),
                  ("normal", p["text"], -1), ("select", p["text"], p["select_bg"]),
+                 ("trunk", p["trunk"], -1),
                  ("bar", p["accent"], p["select_bg"])]
     else:
         pairs = [("accent", curses.COLOR_MAGENTA, -1), ("busy", curses.COLOR_MAGENTA, -1),
                  ("ok", curses.COLOR_GREEN, -1), ("alert", curses.COLOR_YELLOW, -1),
                  ("bad", curses.COLOR_RED, -1), ("dim", -1, -1), ("normal", -1, -1),
                  ("select", curses.COLOR_WHITE, curses.COLOR_BLUE),
+                 ("trunk", curses.COLOR_YELLOW, -1),
                  ("bar", curses.COLOR_MAGENTA, curses.COLOR_BLUE)]
     for i, (name, fg, bg) in enumerate(pairs, start=1):
         curses.init_pair(i, fg, bg)
@@ -246,7 +249,7 @@ def _draw_logo(stdscr, w: int, styles: dict[str, int]) -> int:
     clock = time.strftime("%H:%M")
     for y, (tree, word) in enumerate(LOGO):
         trunk = y == len(LOGO) - 1
-        stdscr.addnstr(y, 1, tree, w - 2, styles["dim"] if trunk else styles["accent"])
+        stdscr.addnstr(y, 1, tree, w - 2, styles.get("trunk", styles["accent"]) if trunk else styles["accent"])
         if word and w > len(tree) + len(word) + 2:
             stdscr.addnstr(y, 1 + len(tree), word, len(word), styles["bold"])
     if w > len(clock) + 16:

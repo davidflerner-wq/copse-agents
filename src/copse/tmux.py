@@ -58,13 +58,6 @@ def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[
     return target
 
 
-def on_pane_exit(target: str, shell_command: str) -> None:
-    """Run ``shell_command`` (via tmux run-shell) when the process in pane
-    ``target`` exits. Needs remain-on-exit on that pane, which makes tmux
-    fire pane-died instead of closing the pane silently."""
-    _tmux("set-hook", "-p", "-t", target, "pane-died", f"run-shell -b {shlex.quote(shell_command)}")
-
-
 def windows(session: str) -> list[str]:
     proc = _tmux("list-windows", "-t", f"={session}", "-F", "#{window_name}", check=False)
     return proc.stdout.split() if proc.returncode == 0 else []
