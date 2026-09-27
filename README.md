@@ -183,13 +183,13 @@ servers don't collide. Agents also get `COPSE_AGENT_ID`.
 ## Agent profiles
 
 Markdown files with frontmatter. copse looks in `.copse/agents/`, then
-`~/.copse/agents/`, then its built-ins (`supervisor`, `developer`, `reviewer`):
+`~/.copse/agents/`, then its built-ins (`supervisor`, `developer`, `reviewer`, `subagent`):
 
 ```markdown
 ---
 name: frontend
 description: React/TypeScript specialist
-provider: claude          # claude | codex | antigravity | shell
+provider: claude          # claude | codex | antigravity | shell | subagent
 model: sonnet             # optional
 permission_mode: acceptEdits   # optional, Claude Code only
 ---
@@ -205,6 +205,70 @@ common test/build commands: `pytest`, `uv run`, `npm/pnpm/yarn test|run`,
 commands. Note that `npm run`, `make`, and `uv run` execute whatever the repo
 defines, so only point workers at repos you trust. Override the list in
 `.copse/agents/developer.md`.
+
+### Cheap workers
+
+By default a Claude Code worker loads everything your own `claude` does: your
+plugins, MCP servers and `~/.claude/CLAUDE.md`. That context is re-read on every
+turn and can be most of a worker's input tokens. These optional fields (Claude
+Code only, all off by default) trim it:
+
+| Field | Passes | Effect |
+|---|---|---|
+| `strict_mcp: true` | `--strict-mcp-config` | Only copse's MCP server loads; your other MCP servers don't. |
+| `setting_sources: project,local` | `--setting-sources` | Skips your user settings (`~/.claude`: plugins, hooks, `CLAUDE.md`). copse's own hooks come through `--settings`, which is always applied. |
+| `effort: low` | `--effort` | `low`, `medium`, `high`, `xhigh` or `max`. |
+| `headless: true` | `claude -p` | No interactive TUI; each turn is one `claude -p` run (see below). |
+
+```markdown
+---
+name: cheap
+description: Small, well-specified edits at low cost
+provider: claude
+model: sonnet
+effort: low
+strict_mcp: true
+setting_sources: project,local   # no user plugins or ~/.claude/CLAUDE.md
+headless: true
+permission_mode: acceptEdits
+allowed_tools: Bash(git add:*), Bash(git commit:*), Bash(git status:*), Bash(git diff:*), Bash(uv run:*), Bash(pytest:*)
+---
+You are a developer agent running under copse. Implement the task, run the
+tests, commit, and report.
+```
+
+**Headless workers** still run in a tmux window, where a small copse runner
+starts `claude -p` for the task, then `claude -p --resume <session>` for each
+message sent to the worker while it's idle. Messages sent mid-turn are handed
+over when the turn ends, as for any Claude worker, and so is the reminder to call
+`report_result`. The window shows each turn's prompt and final answer (`copse
+agent peek`). If `claude` exits with an error, the worker stops, and `handoff`
+reports the error. Differences from an interactive worker:
+
+- Nothing can answer a permission prompt, so any tool not covered by
+  `permission_mode` and `allowed_tools` is refused rather than waiting for you.
+  A headless worker never shows as `waiting`.
+- You can't attach and type into it. Talk to it with `copse send` or `send_message`.
+- A `done_when` finish line is added to the task, without `/goal` (an interactive command).
+
+Blank values and anything after ` #` are ignored, so frontmatter can carry comments.
+
+### Subagent workers
+
+The built-in `subagent` profile (`provider: subagent`) gives a Claude Code
+supervisor copse's worktree and branch handling for work done by its **own**
+subagent (its Agent tool), with no separate `claude` process. `handoff` or
+`assign` with it creates the workspace and returns immediately. The reply
+contains the worktree path, the branch, the agent id and a ready-made prompt
+for the Agent tool. That prompt tells the subagent to work only in that
+directory, commit there and end with a summary. The supervisor then calls
+`complete_subagent(agent_id, result)`. The worker shows as working until then
+and done after. `workspace_diff`, `request_review`, `merge_workspace` and
+`remove_workspace` work as usual. copse can't message a subagent, and
+`send_message` says so. Worktrees live under `~/.copse/worktrees/`, outside the
+supervisor's own directory. Unless the supervisor runs with permission to edit
+there (`--add-dir ~/.copse/worktrees`, or `additionalDirectories` in Claude
+Code settings), the subagent's edits ask for approval.
 
 ## Google Antigravity
 
