@@ -96,7 +96,12 @@ def apply_theme(session: str) -> None:
         "window-active-style": f"bg={t['bg']}",
         "message-style": f"bg={t['accent']},fg={t['text']}",
         "mode-style": f"bg={t['accent']},fg={t['text']}",
+        # Wheel scrolling and click-to-focus between the sidebar and the chat.
+        "mouse": "on",
     }
+    # Lets Claude Code notice when its pane gains or loses focus (it asks for
+    # this). Server-wide in tmux, and harmless for other sessions.
+    _tmux("set-option", "-s", "focus-events", "on", check=False)
     # set-option doesn't accept the "=name" exact-match form other commands do.
     for key, value in opts.items():
         _tmux("set-option", "-t", session, key, value, check=False)

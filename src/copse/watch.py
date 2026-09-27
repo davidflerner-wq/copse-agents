@@ -100,7 +100,44 @@ def _wrap(text: str, width: int, indent: str) -> list[str]:
                          subsequent_indent=indent) or [indent]
 
 
+def _agent_title(a: dict, ws: dict, parent_ws: dict | None) -> str:
+    """A worker is best known by its branch; an agent sharing its parent's
+    checkout (or a top-level one) by its role."""
+    if parent_ws is not None and ws["id"] != parent_ws["id"]:
+        title = ws["branch"]
+    else:
+        title = a["profile"].replace("-", " ").capitalize()
+    if a["provider"] != "claude":
+        title += f" ({a['provider']})"
+    return title
+
+
+def _detail(a: dict, ws: dict, now: float, show_git: bool) -> str:
+    """One short line under an agent: status and age, then only what's
+    worth a glance (queued messages, commits ahead, files changed)."""
+    _, label = STATUS_LABEL.get(a["status"], ("·", a["status"]))
+    if a["status"] == "idle" and a.get("reported"):
+        label = "done"
+    since = a.get("status_since")
+    parts = [label + (f" {ago(now - since)}" if since else "")]
+    if a.get("pending"):
+        parts.append(f"{plural(a['pending'], 'message')} queued")
+    if show_git:
+        marks = []
+        if ws.get("ahead"):
+            marks.append(f"↑{ws['ahead']}")
+        if ws.get("behind"):
+            marks.append(f"↓{ws['behind']}")
+        if ws.get("dirty"):
+            marks.append(f"✎{ws['dirty']}")
+        if marks:
+            parts.append(" ".join(marks))
+    return " · ".join(parts)
+
+
 def render(snap: list[dict], now: float, width: int = 80) -> list[Line]:
+    """Sessions as branch trees: each chat at the trunk, the workers it started
+    hanging off it as branches."""
     agents_ = [a for ws in snap for a in ws["agents"]]
     lines = [Line(summary(snap), "alert" if any(a["status"] == "waiting" for a in agents_) else "bold")]
     if snap:
@@ -110,29 +147,48 @@ def render(snap: list[dict], now: float, width: int = 80) -> list[Line]:
         for t in _wrap("Nothing running yet. Start an agent with `copse new <branch>`.", width, ""):
             lines.append(Line(t, "dim"))
         return lines
+
+    where = {a["id"]: ws for ws in snap for a in ws["agents"]}
+    kids: dict[str, list[dict]] = {}
+    roots = []
     for ws in snap:
-        title = ws["branch"] + ("  (your checkout)" if ws.get("name") == "root" else "")
-        lines.append(Line(title, "bold", workspace=ws))
-        if (info := git_summary(ws)):
-            lines += [Line(t, "dim", workspace=ws) for t in _wrap(info, width, "  ")]
-        if not ws["agents"]:
-            lines.append(Line("  no agents", "dim", workspace=ws))
         for a in ws["agents"]:
-            icon, label = STATUS_LABEL.get(a["status"], ("·", a["status"]))
-            if a["status"] == "idle" and a.get("reported"):
-                icon, label = "✓", "done"
-            name = a["profile"].replace("-", " ").capitalize()
-            if a["provider"] != "claude":
-                name += f" ({a['provider']})"
-            lines.append(Line(f"  {icon} {name}", STATUS_STYLE.get(a["status"], "normal"),
-                              agent=a, workspace=ws))
-            since = a.get("status_since")
-            detail = [label + (f" for {ago(now - since)}" if since else "")]
-            if a.get("pending"):
-                detail.append(f"{plural(a['pending'], 'message')} queued")
-            detail.append(a["id"][:6])
-            lines += [Line(t, "dim", workspace=ws) for t in _wrap(" · ".join(detail), width, "    ")]
+            if a.get("parent_id") in where:
+                kids.setdefault(a["parent_id"], []).append(a)
+            else:
+                roots.append(a)
+
+    def branch(a: dict, parent_ws: dict | None, lead: str, last: bool, top: bool) -> None:
+        ws = where[a["id"]]
+        children = kids.get(a["id"], [])
+        icon, _ = STATUS_LABEL.get(a["status"], ("·", a["status"]))
+        if a["status"] == "idle" and a.get("reported"):
+            icon = "✓"
+        if top:
+            joint, cont = ("─┬─" if children else "───"), (" │   " if children else "     ")
+        else:
+            joint, cont = ("└─" if last else "├─"), ("    " if last else "│   ")
+        head = f"{lead}{joint}{icon} {_agent_title(a, ws, parent_ws)}"
+        lines.append(Line(head[:width], STATUS_STYLE.get(a["status"], "normal"), agent=a, workspace=ws))
+        under = lead + cont
+        detail = _detail(a, ws, now, show_git=not top)
+        lines.extend(Line(t, "dim", workspace=ws) for t in _wrap(detail, width, under))
+        for i, child in enumerate(children):
+            branch(child, ws, lead + ("  " if top else cont), i == len(children) - 1, False)
+
+    for a in roots:
+        ws = where[a["id"]]
+        title = ws["branch"] + ("  (your checkout)" if ws.get("name") == "root" else "")
+        lines.append(Line(title[:width], "bold", workspace=ws))
+        if (info := git_summary(ws)) and ws.get("name") != "root":
+            lines += [Line(t, "dim", workspace=ws) for t in _wrap(info, width, " ")]
+        branch(a, None, "", True, True)
         lines.append(Line(""))
+    for ws in snap:
+        if not ws["agents"]:
+            lines.append(Line(ws["branch"][:width], "bold", workspace=ws))
+            lines.append(Line(" no agents", "dim", workspace=ws))
+            lines.append(Line(""))
     return lines
 
 
@@ -233,6 +289,34 @@ def _peek(stdscr, agent: dict, styles: dict[str, int]) -> None:
     stdscr.timeout(int(REFRESH_SECONDS * 1000))
 
 
+LOGO = [  # a copse: a small stand of trees
+    ("   ▲    ▲", ""),
+    ("  ▲▲▲ ▲ ▲▲▲  ", "copse"),
+    (" ▲▲▲▲▲▲▲▲▲▲▲", ""),
+    ("    ┃    ┃", ""),
+]
+
+
+def _draw_logo(stdscr, w: int, styles: dict[str, int]) -> int:
+    """The trees-and-wordmark header. Returns the first free row."""
+    clock = time.strftime("%H:%M")
+    for y, (trees, word) in enumerate(LOGO):
+        stdscr.addnstr(y, 1, trees, w - 2, styles["accent"] if "▲" in trees else styles["dim"])
+        if word and w > len(trees) + len(word) + 2:
+            stdscr.addnstr(y, 1 + len(trees), word, len(word), styles["bold"])
+    if w > len(clock) + 16:
+        stdscr.addnstr(0, w - 1 - len(clock), clock, len(clock), styles["dim"])
+    stdscr.addnstr(len(LOGO), 1, "─" * max(0, w - 3), w - 2, styles["dim"])
+    return len(LOGO) + 1
+
+
+def _draw_compact_logo(stdscr, w: int, styles: dict[str, int]) -> int:
+    """One-line header for short panes."""
+    stdscr.addnstr(0, 1, "▲▲ copse", w - 2, styles["accent"])
+    stdscr.addnstr(1, 1, "─" * max(0, w - 3), w - 2, styles["dim"])
+    return 2
+
+
 def _loop(stdscr, repo_root: str | None) -> None:
     curses.curs_set(0)
     styles = _styles()
@@ -252,12 +336,8 @@ def _loop(stdscr, repo_root: str | None) -> None:
         help_ = [t for text in (HELP_IN_TMUX if os.environ.get("TMUX") else HELP)
                  for t in _wrap(text, w - 1, "")]
         stdscr.erase()
-        clock = time.strftime("%H:%M")
-        stdscr.addnstr(0, 1, "◆ copse", w - 2, styles["accent"])
-        if w > len(clock) + 11:
-            stdscr.addnstr(0, w - 1 - len(clock), clock, len(clock), styles["dim"])
-        stdscr.addnstr(1, 1, "─" * max(0, w - 3), w - 2, styles["dim"])
-        for y, (i, ln) in enumerate(enumerate(lines[: h - 4 - len(help_)]), start=2):
+        top = _draw_logo(stdscr, w, styles) if h >= 18 else _draw_compact_logo(stdscr, w, styles)
+        for y, (i, ln) in enumerate(enumerate(lines[: h - top - 1 - len(help_)]), start=top):
             attr = styles.get(ln.style, curses.A_NORMAL)
             if rows and i == rows[selected]:
                 # A purple bar and a subtle highlight, not inverted colours.

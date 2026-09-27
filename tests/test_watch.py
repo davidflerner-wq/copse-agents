@@ -21,8 +21,8 @@ def test_waiting_agents_stand_out():
     assert lines[0].text == "1 needs you · 1 working" and lines[0].style == "alert"
     assert lines[1].text == "2 agents in 1 workspace"
     i = next(i for i, ln in enumerate(lines) if ln.agent and ln.agent["status"] == "waiting")
-    assert lines[i].style == "alert" and lines[i].text.startswith("  ◆ ")
-    assert lines[i + 1].text.strip().startswith("needs you for 1m")
+    assert lines[i].style == "alert" and "◆ Developer" in lines[i].text
+    assert lines[i + 1].text.strip().startswith("needs you 1m")
     assert any("2 ahead · 1 behind main · 3 files changed" in ln.text for ln in lines)
 
 
@@ -74,3 +74,16 @@ def test_old_databases_are_migrated(tmp_path):
     assert a.status_since is None and a.status == "idle"
     db.set_status("a", "processing")
     assert db.get_agent("a").status_since is not None
+
+
+def test_workers_hang_off_their_supervisor_as_branches():
+    root = ws([agent("idle", id="boss0001", profile="supervisor", mode="interactive")],
+              id="repo/root", name="root", branch="main", ahead=None)
+    w1 = ws([agent("processing", id="w1aaaaaa", parent_id="boss0001")], id="repo/a", branch="feat/csv")
+    w2 = ws([agent("waiting", id="w2bbbbbb", parent_id="boss0001")], id="repo/b", branch="feat/settings")
+    text = [ln.text for ln in watch.render([root, w1, w2], now=1090, width=30)]
+    assert text[3] == "main  (your checkout)"
+    assert text[4].startswith("─┬─○ Supervisor")
+    assert any(t.startswith("  ├─● feat/csv") for t in text)
+    assert any(t.startswith("  └─◆ feat/settings") for t in text)
+    assert all(len(t) <= 30 for t in text)
