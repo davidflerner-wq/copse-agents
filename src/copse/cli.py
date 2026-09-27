@@ -63,12 +63,8 @@ def _after_detach(ws: Workspace) -> None:
     if tmux.has_session(ws.tmux_session):
         typer.echo("Detached; everything is still running. Run `copse` here to reopen.")
         return
-    typer.echo("copse session ended.")
-    others = [a for w in db.find_workspaces(ws.repo_root) for a in db.list_agents(w.id)
-              if a.status != "exited" and agents.is_alive(a)]
-    if others:
-        typer.echo(f"  {len(others)} worker agent(s) still running: `copse watch` to check on them, "
-                   f"`copse rm <workspace>` to stop one.")
+    typer.echo("copse session paused: nothing is running, and all work is saved.")
+    typer.echo("  `copse continue` picks it up where you left off; `copse` starts fresh.")
     if scratch.is_scratch(ws.path) and not scratch.transferred_to(ws.path):
         typer.echo(f"  Scratch work is saved in {ws.path}; `copse transfer <repo>` moves it into a repo.")
 
@@ -156,26 +152,130 @@ def start(
     provider: Optional[str] = typer.Option(None),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the copse watch dashboard in a pane under the agent."),
-    new: bool = typer.Option(False, "--new", help="Start another agent even if one is already running here."),
 ) -> None:
-    """Open a chat with an agent in the current checkout (default: a supervisor),
-    with the dashboard of every agent in this repo beneath it. If one is already
-    running here, reopen it instead of starting another (--new to force)."""
+    """Start a fresh chat with an agent here (default: a supervisor), with the
+    dashboard of every agent in this repo beneath it. A session still running
+    here is paused first; `copse continue` brings paused sessions back."""
+    from copse import sessions
+
     db = DB()
-    ws = _here_or_scratch(db, new)
-    running = agents.find_running(db, ws, agent) if not new and not prompt else None
-    if running:
-        typer.echo(f"↺ reopening {running.profile} agent {running.id} in {ws.id}")
-        a = running
-    else:
-        a = _run(agents.spawn, db, ws, agent, prompt=prompt, provider_name=provider,
-                 watch_pane=watch)
-        typer.echo(f"✓ {a.profile} agent {a.id} in {ws.id} ({ws.branch})")
+    ws = _here_or_scratch(db, reuse_scratch=False)
+    _pause_running(db, ws)
+    sessions.enforce(db, ws.repo_root)
+    a = _run(agents.spawn, db, ws, agent, prompt=prompt, provider_name=provider,
+             watch_pane=watch)
+    typer.echo(f"✓ {a.profile} agent {a.id} in {ws.id} ({ws.branch})")
     if attach:
         _attach(ws, a.tmux_window)
 
 
-def _here_or_scratch(db: DB, new: bool) -> Workspace:
+def _pause_running(db: DB, ws: Workspace) -> None:
+    """At most one live session per checkout: pause any that's still running."""
+    for a in db.list_agents(ws.id):
+        if a.mode == "interactive" and a.status not in ("paused", "done") and agents.is_alive(a):
+            agents.pause(db, a.id)
+            typer.echo(f"Paused the session that was still running here ({a.id}); "
+                       f"`copse continue {a.id}` brings it back.")
+
+
+def _describe(s) -> str:
+    workers = len(s.members) - 1
+    ago = _ago(time.time() - s.paused_at)
+    what = f", {workers} worker(s)" if workers else ""
+    branches = f": {', '.join(s.branches[:3])}" + (" …" if len(s.branches) > 3 else "") if s.branches else ""
+    return f"{s.root.id}  paused {ago} ago{what}{branches}"
+
+
+def _ago(seconds: float) -> str:
+    if seconds < 3600:
+        return f"{max(1, int(seconds // 60))}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+@app.command("continue")
+def continue_cmd(
+    session_id: Optional[str] = typer.Argument(None, help="Session to resume (default: the most recent)."),
+    attach: bool = typer.Option(True, "--attach/--no-attach"),
+) -> None:
+    """Pick up a paused session: the chat and its workers resume where they stopped."""
+    from copse import scratch, sessions
+
+    db = DB()
+    cwd = os.getcwd()
+    try:
+        git.main_repo_root(cwd)
+        ws = _run(workspaces.adopt_root, db, cwd)
+    except git.GitError:
+        ws = scratch.for_origin(db, cwd)
+        if ws is None:
+            _fail("no scratch session started from this folder to continue; run `copse` to start one")
+    available = sessions.paused(db, ws.repo_root)
+    if not available:
+        live = agents.find_running(db, ws, "supervisor")
+        if live and attach:
+            typer.echo(f"Session {live.id} is already running; reopening it.")
+            _attach(ws, live.tmux_window)
+            return
+        _fail("no paused sessions here. Run `copse` to start a fresh one.")
+    if session_id:
+        matches = [s for s in available if s.root.id.startswith(session_id)]
+        if len(matches) != 1:
+            _fail(f"no single paused session matches {session_id!r}. Available:\n  "
+                  + "\n  ".join(_describe(s) for s in available))
+        chosen = matches[0]
+    else:
+        chosen = available[0]
+    others = [s for s in available if s.root.id != chosen.root.id]
+    _pause_running(db, ws)
+    resumed = _run(agents.resume, db, chosen.root.id)
+    typer.secho(f"↺ continuing {_describe(chosen)} ({len(resumed)} agent(s) restarted)", fg="green")
+    if others:
+        typer.echo("Other paused sessions (copse continue <id>):")
+        for s in others:
+            typer.echo(f"  {_describe(s)}")
+    if attach:
+        root = db.get_agent(chosen.root.id)
+        _attach(chosen.workspace, root.tmux_window)
+
+
+@app.command("sessions")
+def sessions_cmd() -> None:
+    """List paused sessions in this repo, with the disk their worktrees use."""
+    from copse import sessions
+
+    db = DB()
+    root = _run(git.main_repo_root, os.getcwd())
+    found = sessions.paused(db, root)
+    if not found:
+        typer.echo("no paused sessions")
+        return
+    for s in found:
+        size = sum(sessions.disk_usage(w.path) for w in {db.get_workspace(m.workspace_id) for m in s.members[1:]} - {None}
+                   if w and w.kind == "worktree" and os.path.isdir(w.path))
+        typer.echo(f"{_describe(s)}  ({size / 1e6:.0f} MB in worktrees)")
+    typer.echo(f"Keeps the newest {sessions.KEEP} for up to {sessions.MAX_AGE_DAYS} days. `copse prune` cleans up now.")
+
+
+@app.command()
+def prune() -> None:
+    """Apply the retention rules now: drop paused sessions beyond the newest few or
+    older than a week, and old scratch sessions with nothing left to transfer.
+    Never merges or deletes branches; worktrees with uncommitted changes stay."""
+    from copse import sessions
+
+    db = DB()
+    dropped = 0
+    try:
+        dropped = sessions.enforce(db, git.main_repo_root(os.getcwd()))
+    except git.GitError:
+        pass
+    removed = sessions.prune_scratch(db)
+    typer.echo(f"dropped {dropped} paused session(s), removed {removed} old scratch session(s)")
+
+
+def _here_or_scratch(db: DB, reuse_scratch: bool) -> Workspace:
     """This checkout, or (outside any git repo) a scratch session for this folder."""
     from copse import scratch
 
@@ -183,7 +283,7 @@ def _here_or_scratch(db: DB, new: bool) -> Workspace:
     try:
         git.main_repo_root(cwd)
     except git.GitError:
-        existing = None if new else scratch.for_origin(db, cwd)
+        existing = scratch.for_origin(db, cwd) if reuse_scratch else None
         if existing:
             typer.echo(f"↺ scratch session {existing.id}")
             return existing
@@ -247,10 +347,16 @@ def transfer(
 
 
 @app.callback(invoke_without_command=True)
-def default(ctx: typer.Context) -> None:
-    """Bare `copse`: open the supervisor chat here (a scratch session outside git)."""
+def default(
+    ctx: typer.Context,
+    cont: bool = typer.Option(False, "--continue", "-c", help="Pick up the most recent paused session instead of starting fresh."),
+) -> None:
+    """Bare `copse`: a fresh supervisor chat here (a scratch session outside git)."""
     if ctx.invoked_subcommand is None:
-        start(agent="supervisor", prompt=None, provider=None, attach=True, watch=True, new=False)
+        if cont:
+            continue_cmd(session_id=None, attach=True)
+        else:
+            start(agent="supervisor", prompt=None, provider=None, attach=True, watch=True)
 
 
 @app.command("ls")

@@ -27,6 +27,8 @@ STATUS_STYLE = {
     "idle": "ok",
     "waiting": "alert",
     "exited": "bad",
+    "paused": "dim",
+    "done": "ok",
 }
 
 # How each status reads on screen: (icon, label).

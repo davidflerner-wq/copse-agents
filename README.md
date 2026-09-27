@@ -43,7 +43,16 @@ copse
 That's it. `copse` opens a supervisor chat (Claude Code) in your repo, with the
 live dashboard of every agent underneath, in one tmux window. Tell the supervisor
 what you want. It splits the work between workers, each on its own branch, then
-reviews and merges their branches. Run `copse` again later to reopen the same chat.
+reviews and merges their branches.
+
+**Closing and coming back.** Quitting the supervisor's chat pauses the whole
+session: its workers stop too, and everything is kept (branches, worktrees,
+queued messages, and each agent's Claude conversation). `copse continue` (or
+`copse -c`) picks up the most recent paused session and lists the others by id
+(`copse continue <id>`). Plain `copse` always starts fresh. `copse sessions` lists
+what's paused. copse keeps the newest 3 paused sessions per repo for up to 7 days;
+cleanup never merges anything or deletes branches, and worktrees with uncommitted
+changes are kept.
 
 **Not in a git repo?** `copse` still works. It starts a *scratch session*: a
 fresh git repo under `~/.copse/scratch/`, and nothing is created in the folder you ran
@@ -67,8 +76,10 @@ copse rm fix-login                          # keeps the branch
 | | |
 |---|---|
 | `copse new BRANCH [-b BASE] [-a PROFILE] [-p PROMPT]` | worktree + branch + agent |
-| `copse` | open (or reopen) the supervisor chat here, dashboard underneath |
-| `copse start [-a PROFILE] [-p PROMPT] [--new] [--no-watch]` | the same, with options |
+| `copse` | a fresh supervisor chat here, dashboard alongside |
+| `copse continue [ID]` / `copse -c` | resume a paused session (default: the most recent) |
+| `copse sessions` / `copse prune` | list paused sessions / apply the retention rules now |
+| `copse start [-a PROFILE] [-p PROMPT] [--no-watch]` | the same, with options |
 | `copse transfer [REPO] [--from SESSION] [-b BRANCH]` | move a scratch session's work into a real repo |
 | `copse ls [--all]` | workspaces and agents |
 | `copse watch [--all] [--once]` | live dashboard: agent status, who's waiting on you, queued messages; enter attaches, `p` peeks |

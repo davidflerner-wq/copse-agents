@@ -10,6 +10,7 @@ nothing ever types into a terminal while the agent is mid-turn.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import time
@@ -73,37 +74,48 @@ def spawn(
     if prompt and mode in ("handoff", "assign"):
         prompt += WORKER_FOOTER.format(agent_id=agent_id, branch=ws.branch)
 
-    # Record the agent before launching: its hooks may fire within milliseconds.
-    status = "processing" if prompt else "starting"
-    if not provider.uses_hooks:
-        status = "unknown"
     agent = Agent(
         id=agent_id, workspace_id=ws.id, profile=profile.name, provider=provider.name,
-        parent_id=parent_id, mode=mode, status=status, tmux_window="",
-        result=None, created_at=time.time(),
+        parent_id=parent_id, mode=mode, status="starting", tmux_window="",
+        result=None, created_at=time.time(), task=prompt,
     )
     db.add_agent(agent)
-
-    env = agent_env(ws, agent_id)
     try:
-        tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
-        target = tmux.new_window(
-            ws.tmux_session, f"{profile.name}-{agent_id[:4]}", ws.path,
-            provider.command(LaunchContext(agent_id, profile, prompt)), env,
-        )
+        _launch(db, agent, ws, prompt=prompt, resume=None, watch_pane=watch_pane)
     except Exception:
         db.delete_agent(agent_id)
         raise
-    db.update_agent(agent_id, tmux_window=target)
+    return agent
+
+
+def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
+            resume: str | None, watch_pane: bool) -> None:
+    """Start (or restart) ``agent``'s CLI in a new tmux window of ``ws``."""
+    profile = load_profile(agent.profile, ws.repo_root)
+    provider = get_provider(agent.provider)
+    # Recorded before launching: the agent's hooks may fire within milliseconds.
+    status = "processing" if prompt else "starting"
+    if not provider.uses_hooks:
+        status = "unknown"
+    db.set_status(agent.id, status)
+    agent.status = status
+
+    tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
+    target = tmux.new_window(
+        ws.tmux_session, f"{profile.name}-{agent.id[:4]}", ws.path,
+        provider.command(LaunchContext(agent.id, profile, prompt, resume=resume)),
+        agent_env(ws, agent.id),
+    )
+    db.update_agent(agent.id, tmux_window=target)
     agent.tmux_window = target
-    if mode == "interactive":
-        # When this chat ends, end its window (and the dashboard beside it)
-        # instead of leaving a dead pane behind; see ended().
+    if agent.mode == "interactive":
+        # When this chat ends, pause the session instead of leaving a dead
+        # pane behind; see ended().
         from copse.providers import copse_invocation
 
-        env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in agent_env(ws, agent_id).items()
+        env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in agent_env(ws, agent.id).items()
                               if k in ("COPSE_HOME", "COPSE_TMUX_SOCKET"))
-        cmd = " ".join(shlex.quote(a) for a in [*copse_invocation(), "_ended", agent_id])
+        cmd = " ".join(shlex.quote(a) for a in [*copse_invocation(), "_ended", agent.id])
         try:
             tmux.on_pane_exit(target, f"{env_prefix} {cmd}".strip())
         except tmux.TmuxError:
@@ -122,7 +134,80 @@ def spawn(
     if provider.name == "shell" and prompt:
         tmux.paste(target, prompt)
     provider.after_launch(target)
-    return agent
+
+
+# -- sessions: pause and continue ----------------------------------------------
+
+RESUME_NOTE = (
+    "\n\n(You were paused and have just been restarted. Before continuing, check "
+    "`git status` and `git log` in your working directory to see what you already did.)"
+)
+
+
+def tree(db: DB, root_id: str) -> list[Agent]:
+    """``root_id`` and every agent it started, directly or indirectly."""
+    out, queue = [], [root_id]
+    while queue:
+        a = db.get_agent(queue.pop(0))
+        if a is None:
+            continue
+        out.append(a)
+        queue.extend(c.id for c in db.children(a.id))
+    return out
+
+
+def pause(db: DB, root_id: str) -> list[Agent]:
+    """Stop a supervisor and everything it started, keeping their work.
+
+    Worktrees, branches, queued messages and each CLI's own session stay; the
+    processes stop, so nothing keeps acting while nobody's watching. Agents
+    that already reported are left marked done. Returns the agents paused."""
+    paused, sessions = [], set()
+    for a in tree(db, root_id):
+        ws = db.get_workspace(a.workspace_id)
+        if ws:
+            sessions.add(ws.tmux_session)
+        if a.tmux_window:
+            # Dead or alive: a dead pane (the chat that just exited) would
+            # otherwise hold the window, and the session, open.
+            tmux.kill_window(a.tmux_window)
+        if a.mode != "interactive" and a.result is not None:
+            db.set_status(a.id, "done")
+        else:
+            db.set_status(a.id, "paused")
+            paused.append(a)
+    for session in sessions:
+        if set(tmux.windows(session)) <= {"shell"}:
+            tmux.kill_session(session)
+    return paused
+
+
+def latest_paused(db: DB, ws: Workspace) -> Agent | None:
+    """The most recently paused interactive agent (session root) in ``ws``."""
+    roots = [a for a in db.list_agents(ws.id) if a.mode == "interactive" and a.status == "paused"]
+    return max(roots, key=lambda a: a.status_since or 0, default=None)
+
+
+def resume(db: DB, root_id: str, *, watch_pane: bool = True) -> list[Agent]:
+    """Bring a paused session back: the supervisor and its paused workers
+    restart in their own workspaces. Claude Code picks up its previous
+    conversation (--resume); other CLIs restart on their original task."""
+    resumed = []
+    for a in tree(db, root_id):
+        if a.status != "paused":
+            continue
+        ws = db.get_workspace(a.workspace_id)
+        if ws is None or not os.path.isdir(ws.path):
+            continue
+        provider = get_provider(a.provider)
+        ref = a.session_ref if provider.name == "claude" and a.session_ref else None
+        if ref and not provider.can_resume(ref):
+            ref = None  # nothing was ever said in it: start that agent fresh
+        prompt = None if ref else ((a.task + RESUME_NOTE) if a.task else None)
+        _launch(db, a, ws, prompt=prompt, resume=ref,
+                watch_pane=watch_pane and a.id == root_id)
+        resumed.append(a)
+    return resumed
 
 
 def get(db: DB, agent_id: str) -> Agent:
@@ -137,18 +222,13 @@ def get(db: DB, agent_id: str) -> Agent:
 
 
 def ended(db: DB, agent_id: str) -> None:
-    """An interactive agent's process exited: close its window (agent pane
-    plus dashboard). If that leaves only the session's idle starter shell,
-    end the whole tmux session, so an attached terminal drops back to its
-    prompt. Workers it started keep running."""
+    """An interactive agent's CLI exited (the person closed the chat): pause
+    its whole session. The chat's window, dashboard and workers stop; their
+    work is kept for `copse --continue`."""
     agent = db.get_agent(agent_id)
-    if agent is None:
+    if agent is None or agent.status in ("paused", "done"):
         return
-    db.set_status(agent_id, "exited")
-    ws = db.get_workspace(agent.workspace_id)
-    tmux.kill_window(agent.tmux_window)
-    if ws and set(tmux.windows(ws.tmux_session)) <= {"shell"}:
-        tmux.kill_session(ws.tmux_session)
+    pause(db, agent_id)
 
 
 def find_running(db: DB, ws: Workspace, profile: str) -> Agent | None:
@@ -341,6 +421,9 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
     agent = db.get_agent(agent_id)
     if agent is None:
         return None
+    sid = payload.get("session_id")
+    if sid and sid != agent.session_ref:
+        db.update_agent(agent_id, session_ref=str(sid))
 
     if event == "session-start":
         db.set_status(agent_id, "idle", only_if="starting")

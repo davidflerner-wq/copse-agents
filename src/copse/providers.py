@@ -40,6 +40,7 @@ class LaunchContext:
     agent_id: str
     profile: Profile
     initial_prompt: str | None
+    resume: str | None = None   # the CLI's session id to continue, if it supports that
 
 
 class Provider:
@@ -63,6 +64,16 @@ class ClaudeCode(Provider):
     uses_hooks = True
 
     TRUST_DIALOG = re.compile(r"(one you trust|trust (this|the files in this) folder)", re.I)
+
+    @staticmethod
+    def can_resume(session_id: str) -> bool:
+        """Claude Code saves a conversation only once something was said in it,
+        as <config>/projects/<project>/<session id>.jsonl. Resuming one that
+        was never saved exits at once with "No conversation found"."""
+        import glob
+
+        config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+        return bool(glob.glob(os.path.join(glob.escape(config), "projects", "*", f"{glob.escape(session_id)}.jsonl")))
     YES_SELECTED = re.compile(r"[❯>]\s*(\d+\.\s*)?Yes, I trust", re.I)
 
     def _hook(self, event: str) -> list[dict]:
@@ -94,7 +105,9 @@ class ClaudeCode(Provider):
             argv += ["--model", ctx.profile.model]
         if ctx.profile.permission_mode:
             argv += ["--permission-mode", ctx.profile.permission_mode]
-        if ctx.initial_prompt:
+        if ctx.resume:
+            argv += ["--resume", ctx.resume]
+        elif ctx.initial_prompt:
             argv.append(ctx.initial_prompt)
         return argv
 

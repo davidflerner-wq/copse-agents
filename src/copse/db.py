@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS agents (
     tmux_window TEXT NOT NULL,
     result TEXT,
     created_at REAL NOT NULL,
-    status_since REAL              -- when status last changed
+    status_since REAL,             -- when status last changed
+    task TEXT,                     -- the prompt it was started with (for resuming)
+    session_ref TEXT               -- the CLI's own session id (claude --resume)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,6 +82,8 @@ class Agent:
     result: str | None
     created_at: float
     status_since: float | None = None
+    task: str | None = None
+    session_ref: str | None = None
 
 
 @dataclass
@@ -109,8 +113,9 @@ class DB:
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(agents)")}
-        if "status_since" not in cols:
-            self.conn.execute("ALTER TABLE agents ADD COLUMN status_since REAL")
+        for col, kind in (("status_since", "REAL"), ("task", "TEXT"), ("session_ref", "TEXT")):
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -163,11 +168,11 @@ class DB:
         with self.tx() as c:
             c.execute(
                 "INSERT INTO agents (id, workspace_id, profile, provider, parent_id, mode, "
-                "status, tmux_window, result, created_at, status_since) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "status, tmux_window, result, created_at, status_since, task, session_ref) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (a.id, a.workspace_id, a.profile, a.provider, a.parent_id, a.mode,
                  a.status, a.tmux_window, a.result, a.created_at,
-                 a.status_since or a.created_at),
+                 a.status_since or a.created_at, a.task, a.session_ref),
             )
 
     def get_agent(self, agent_id: str) -> Agent | None:

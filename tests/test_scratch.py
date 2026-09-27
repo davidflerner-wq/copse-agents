@@ -65,7 +65,7 @@ def test_bare_copse_outside_git_uses_a_scratch_session(db, elsewhere, monkeypatc
     from copse import cli
 
     monkeypatch.chdir(elsewhere)
-    ws = cli._here_or_scratch(db, new=False)
+    ws = cli._here_or_scratch(db, reuse_scratch=False)
     assert scratch.is_scratch(ws.path)
-    assert cli._here_or_scratch(db, new=False).id == ws.id  # same folder -> same session
-    assert cli._here_or_scratch(db, new=True).id != ws.id
+    assert cli._here_or_scratch(db, reuse_scratch=True).id == ws.id  # continue: same session
+    assert cli._here_or_scratch(db, reuse_scratch=False).id != ws.id  # plain copse: fresh

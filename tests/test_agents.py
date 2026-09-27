@@ -205,7 +205,7 @@ def test_find_running_reuses_a_live_interactive_agent(db, ws):
 
 
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
-def test_interactive_agent_exit_ends_its_session(db, ws):
+def test_interactive_agent_exit_pauses_its_session(db, ws):
     a = agents.spawn(db, ws, "developer", provider_name="shell", watch_pane=True)
     assert tmux.has_session(ws.tmux_session)
     tmux.send_keys(a.tmux_window, "exit", "Enter")
@@ -213,7 +213,7 @@ def test_interactive_agent_exit_ends_its_session(db, ws):
     while time.time() < deadline and tmux.has_session(ws.tmux_session):
         time.sleep(0.2)
     assert not tmux.has_session(ws.tmux_session)
-    assert db.get_agent(a.id).status == "exited"
+    assert db.get_agent(a.id).status == "paused"
 
 
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
