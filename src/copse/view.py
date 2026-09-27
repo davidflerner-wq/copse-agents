@@ -79,5 +79,5 @@ def autopilot_entry(db: DB, repo_root: str | None) -> dict | None:
         "milestones": [{"position": m.position, "title": m.title, "status": m.status,
                         "check": m.check_cmd} for m in db.milestones(root.id)],
         "usage": autopilot.usage(),
-        "workers": len(autopilot.active_workers(db, root.id)),
+        "workers": len(autopilot.working_workers(db, root.id)),
     }
