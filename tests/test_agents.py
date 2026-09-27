@@ -213,7 +213,15 @@ def test_interactive_agent_exit_pauses_its_session(db, ws):
     deadline = time.time() + 30
     while time.time() < deadline and tmux.has_session(ws.tmux_session):
         time.sleep(0.2)
-    assert not tmux.has_session(ws.tmux_session)
+    diag = ""
+    if tmux.has_session(ws.tmux_session):
+        hooks = tmux._tmux("show-hooks", "-p", "-t", a.tmux_window, check=False)
+        panes = tmux._tmux("list-panes", "-s", "-t", ws.tmux_session, "-F",
+                           "#{window_name} #{pane_id} dead=#{pane_dead} cmd=#{pane_current_command}", check=False)
+        diag = (f"status={db.get_agent(a.id).status} windows={tmux.windows(ws.tmux_session)}\n"
+                f"hooks={hooks.stdout.strip()!r} {hooks.stderr.strip()!r}\npanes={panes.stdout.strip()!r}\n"
+                f"screen={tmux.capture(a.tmux_window)[-400:]!r}")
+    assert not tmux.has_session(ws.tmux_session), diag
     assert db.get_agent(a.id).status == "paused"
 
 
