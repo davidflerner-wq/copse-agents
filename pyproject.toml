@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hmlerner/copse-agents"
+Homepage = "https://pawdelta.com/copse/"
 Repository = "https://github.com/hmlerner/copse-agents"
 Issues = "https://github.com/hmlerner/copse-agents/issues"
 

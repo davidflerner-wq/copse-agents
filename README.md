@@ -1,6 +1,6 @@
 # copse
 
-*Published on PyPI as `copse-agents`; the command is `copse`. This project is
+*[pawdelta.com/copse](https://pawdelta.com/copse/) · Published on PyPI as `copse-agents`; the command is `copse`. This project is
 unrelated to the Copse desktop app at copse.dev.*
 
 A supervisor for your coding agents. copse runs Claude Code and Codex
