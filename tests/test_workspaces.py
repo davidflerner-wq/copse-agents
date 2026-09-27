@@ -96,6 +96,15 @@ def test_sync_conflict_reports_files(db, repo):
         git.sync(ws.path, "main")
 
 
+def test_dirty_files_reports_a_modified_tracked_file_whole(db, repo):
+    # An edit to a tracked file is " M app.py" in porcelain, with a blank first
+    # status column. Every other dirty-file test here uses a new file, which is
+    # "?? path" and hides a mis-parse of that column.
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    open(os.path.join(ws.path, "app.py"), "a").write("print('more')\n")
+    assert git.dirty_files(ws.path) == ["app.py"]
+
+
 def test_remove_refuses_dirty_and_keeps_branch(db, repo):
     ws = workspaces.create(db, str(repo), "feature").workspace
     open(os.path.join(ws.path, "wip.txt"), "w").write("wip")
