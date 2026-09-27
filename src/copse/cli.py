@@ -680,6 +680,10 @@ def agent_peek(agent_id: str, lines: int = typer.Option(40, "--lines", "-n")) ->
     """Print the last lines of an agent's terminal."""
     db = DB()
     a = _run(agents.get, db, agent_id)
+    if not a.tmux_window:
+        typer.secho(f"{a.id} has no terminal (it runs as its supervisor's own subagent)"
+                    if not agents.runs_process(a) else f"{a.id} has no terminal", fg="red", err=True)
+        raise typer.Exit(1)
     typer.echo(tmux.capture(a.tmux_window, lines=lines).rstrip())
 
 

@@ -401,7 +401,9 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if ms and all(m.status == "passed" for m in ms):
         db.update_autopilot(agent.id, state="done")
         return None
-    if active_workers(db, agent.id):
+    from copse import agents
+
+    if any(agents.runs_process(a) for a in active_workers(db, agent.id)):
         return None  # their results arrive as messages and wake it up
     ws = db.get_workspace(agent.workspace_id)
     cfg = load_repo_config(ws.repo_root) if ws else RepoConfig()
@@ -419,9 +421,17 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
 
 
 def nudge(db: DB, ap: Autopilot, cfg: RepoConfig) -> str:
+    from copse import agents
+
+    # Subagent workers send no message when done; the supervisor records them.
+    open_subagents = [a.id for a in active_workers(db, ap.root_id) if not agents.runs_process(a)]
+    pending = ""
+    if open_subagents:
+        pending = ("Subagent work not yet recorded: when each of your subagents finishes, call "
+                   f"complete_subagent for {', '.join(open_subagents)}.\n\n")
     return (
         "[copse autopilot] The goal isn't reached yet, and no workers are running.\n"
-        f"{progress(db, ap.root_id)}\n\n"
+        f"{progress(db, ap.root_id)}\n\n{pending}"
         "Keep going without waiting for the user: plan the next tasks for the first "
         f"unverified milestone and assign workers (at most {cfg.max_agents or 'any number'} "
         "at once), get finished branches reviewed and merged, and call check_milestone. "

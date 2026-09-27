@@ -1,5 +1,6 @@
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -96,8 +97,20 @@ def test_progress_resets_the_nudge_count(db, root, monkeypatch):
 def test_running_workers_let_the_supervisor_idle(db, root, monkeypatch):
     agent, _ = root
     with_goal(db)
-    monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: ["w"])
+    monkeypatch.setattr(autopilot, "active_workers",
+                        lambda db, rid: [SimpleNamespace(id="w", provider="claude")])
     assert autopilot.on_stop(db, agent, {}) is None
+
+
+def test_open_subagent_workers_dont_let_the_supervisor_idle(db, root, monkeypatch):
+    # A subagent worker sends no message when done, so waiting would stall.
+    agent, _ = root
+    with_goal(db)
+    monkeypatch.setattr(autopilot, "active_workers",
+                        lambda db, rid: [SimpleNamespace(id="sub1", provider="subagent")])
+    out = autopilot.on_stop(db, agent, {})
+    assert out and out["decision"] == "block"
+    assert "complete_subagent for sub1" in out["reason"]
 
 
 def test_need_user_blocks_until_they_reply(db, root, monkeypatch):

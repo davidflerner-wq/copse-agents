@@ -56,6 +56,9 @@ class Provider:
     # how long to give it after its input box appears.
     prompt_after_ready = False
     ready_delay = 3
+    # False for providers whose work happens outside copse (see Subagent):
+    # no process, no tmux window; the caller records the result itself.
+    launches_process = True
 
     def warmup(self, profile: Profile) -> str | None:
         """A message to send before the first prompt, for CLIs that need a
@@ -339,7 +342,25 @@ class Shell(Provider):
         return [os.environ.get("SHELL", "/bin/sh")]
 
 
-PROVIDERS: dict[str, Provider] = {p.name: p for p in (ClaudeCode(), Codex(), Antigravity(), Shell())}
+class Subagent(Provider):
+    """The supervisor's own Claude Code subagent (its Agent tool) does the work.
+
+    copse still makes the workspace (worktree and branch) and the agent record,
+    so diff, review gates, merge and cleanup work as for any worker, but it
+    starts nothing: the handoff/assign reply hands the supervisor a prompt for
+    its Agent tool, and the supervisor records the outcome with
+    complete_subagent. See agents.subagent_brief."""
+
+    name = "subagent"
+    launches_process = False
+
+    def command(self, ctx: LaunchContext) -> list[str]:
+        raise RuntimeError("the subagent provider doesn't launch a process")
+
+
+PROVIDERS: dict[str, Provider] = {
+    p.name: p for p in (ClaudeCode(), Codex(), Antigravity(), Shell(), Subagent())
+}
 
 
 def get_provider(name: str) -> Provider:

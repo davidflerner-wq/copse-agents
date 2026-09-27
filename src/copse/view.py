@@ -31,7 +31,9 @@ def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False) -> dict:
 
 
 def agent_entry(db: DB, a: Agent, *, detail: bool = False) -> dict:
-    if agents.is_alive(a):
+    if not agents.runs_process(a):
+        status = a.status  # a supervisor's own subagent: no terminal to check
+    elif agents.is_alive(a):
         a = agents.reconcile(db, a, samples=1)
         status = a.status
     else:

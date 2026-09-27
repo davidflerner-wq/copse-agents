@@ -22,7 +22,9 @@ mcp = MCPServer(
         "worktree. Delegate with `handoff` (wait for the result) or `assign` (continue "
         "working; the result arrives later as a message). Review a worker's branch with "
         "`workspace_diff`, integrate it with `merge_workspace`, clean up with "
-        "`remove_workspace`. Workers must finish by calling `report_result`. In an autopilot "
+        "`remove_workspace`. Workers must finish by calling `report_result`. A `subagent` "
+        "profile starts no process: the reply gives you a worktree and a prompt for your "
+        "own Agent tool; record the outcome with `complete_subagent`. In an autopilot "
         "session, track the goal with `set_goal`, `get_progress` and `check_milestone`, and "
         "get branches approved with `request_review` before merging."
     ),
@@ -69,6 +71,12 @@ def _await_worker(db: DB, worker_id: str, wait_seconds: int) -> str:
     worker = agents.get(db, worker_id)
     wws = db.get_workspace(worker.workspace_id)
     isolated = bool(wws and wws.kind == "worktree")
+    if not agents.runs_process(worker):
+        # Nothing of copse's to wait on: the caller's own subagent does it.
+        if worker.result is None:
+            return agents.subagent_brief(worker, wws) if wws else f"Worker {worker.id} has no workspace."
+        tail = f"\n\n{_summary(db, wws)}" if isolated and wws else ""
+        return f"Worker {worker.id} finished.\n\n{worker.result}{tail}"
     try:
         result = agents.wait_for_result(db, worker.id, wait_seconds)
     except agents.StillRunning as e:
@@ -114,10 +122,12 @@ async def handoff(
     def run() -> str:
         db = DB()
         caller, ws = _caller(db)
-        worker, _ = agents.delegate(
+        worker, wws = agents.delegate(
             db, caller, ws, agent_profile, task, "handoff", isolate=isolate, branch=branch,
             done_when=done_when,
         )
+        if not agents.runs_process(worker):
+            return agents.subagent_brief(worker, wws)
         return _await_worker(db, worker.id, wait_seconds)
 
     return await asyncio.to_thread(run)
@@ -154,6 +164,8 @@ async def assign(
             db, caller, ws, agent_profile, task, "assign", isolate=isolate, branch=branch,
             done_when=done_when,
         )
+        if not agents.runs_process(worker):
+            return agents.subagent_brief(worker, wws)
         text = f"Started worker {worker.id} ({worker.profile}) in workspace {wws.id} on branch {wws.branch}."
         u = autopilot.usage()
         if u and u["used"] >= load_repo_config(wws.repo_root).usage_limit - 15:
@@ -180,6 +192,27 @@ def report_result(result: str) -> str:
     if not caller:
         return "Not running as a copse agent; nothing to report to."
     return agents.report_result(db, caller.id, result)
+
+
+@mcp.tool()
+def complete_subagent(agent_id: str, result: str) -> str:
+    """Record the outcome of a task you ran in your own subagent (a worker
+    whose profile uses the `subagent` provider): pass the agent id from the
+    handoff/assign reply and the subagent's summary. The worker then shows as
+    done; review, merge and remove its workspace as usual."""
+    db = DB()
+    try:
+        agent = agents.complete_subagent(db, agent_id, result)
+    except agents.AgentError as e:
+        return str(e)
+    ws = db.get_workspace(agent.workspace_id)
+    if not ws:
+        return f"Recorded the result of {agent.id}."
+    text = f"Recorded the result of {agent.id}."
+    if ws.kind == "worktree":
+        text += (f"\n\n{_summary(db, ws)}\n\nReview with workspace_diff(\"{ws.id}\"), then "
+                 "merge_workspace and remove_workspace.")
+    return text
 
 
 @mcp.tool()

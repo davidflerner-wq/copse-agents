@@ -43,6 +43,20 @@ summary of your findings (most severe first, each with file:line and a fix).
 """
 
 
+SUBAGENT_FOOTER = """
+
+---
+Work only in `{path}`: a git worktree on branch `{branch}` that is yours alone.
+Your shell may start in another directory, so begin every Bash command with
+`cd {path} && ` (or use `git -C {path}`), and give file tools absolute paths
+under that directory. Don't change files anywhere else, and don't switch branches.
+When you have finished:
+1. Commit your work there on `{branch}` with a clear message (do not push or merge).
+2. Don't call any copse tools. End with a concise summary: what you changed,
+   anything left undone, and anything the supervisor should check.
+"""
+
+
 class AgentError(RuntimeError):
     pass
 
@@ -91,7 +105,14 @@ def spawn(
     # Headless is a Claude Code mode; other CLIs ignore the profile field.
     headless = bool(profile.headless and provider.name == "claude")
 
-    if prompt and mode in ("handoff", "assign"):
+    if not provider.launches_process:
+        if mode not in ("handoff", "assign"):
+            raise AgentError(
+                f"profile {profile.name!r} uses the {provider.name} provider, which runs in "
+                "a supervisor's own Agent tool: use it through the copse handoff or assign tools"
+            )
+        prompt = subagent_prompt(profile.prompt, prompt or "", ws, done_when)
+    elif prompt and mode in ("handoff", "assign"):
         if done_when:
             prompt += f"\n\nFinish line: {done_when.strip()}"
         prompt += WORKER_FOOTER.format(agent_id=agent_id, branch=ws.branch)
@@ -181,6 +202,12 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     """Start (or restart) ``agent``'s CLI in a new tmux window of ``ws``."""
     profile = _profile_for(db, agent, ws)
     provider = get_provider(agent.provider)
+    if not provider.launches_process:
+        # Nothing to start: the caller's own subagent does the work.
+        status = "done" if agent.result is not None else "processing"
+        db.set_status(agent.id, status)
+        agent.status = status
+        return
     if agent.headless:
         _launch_headless(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane)
         return
@@ -440,7 +467,18 @@ def find_running(db: DB, ws: Workspace, profile: str) -> Agent | None:
     return None
 
 
+def runs_process(agent: Agent) -> bool:
+    """False for agents whose work happens outside copse (the subagent provider)."""
+    from copse.providers import PROVIDERS
+
+    provider = PROVIDERS.get(agent.provider)
+    return provider is None or provider.launches_process
+
+
 def is_alive(agent: Agent) -> bool:
+    if not runs_process(agent):
+        # No process to watch: it's at work until its result is recorded.
+        return agent.result is None and agent.status not in ("paused", "done")
     return bool(agent.tmux_window) and tmux.window_alive(agent.tmux_window)
 
 
@@ -456,6 +494,12 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None) ->
     """Deliver now if the agent is idle; otherwise queue until it is.
     Returns ``"delivered"`` or ``"queued"``."""
     agent = get(db, to_id)
+    if not runs_process(agent):
+        raise AgentError(
+            f"agent {agent.id} is a subagent run by its supervisor's own Agent tool, so copse "
+            "can't message it. Its supervisor can continue it with that tool, or start a new "
+            f"subagent in the same worktree; then record the outcome with complete_subagent."
+        )
     if not is_alive(agent):
         raise AgentError(f"agent {agent.id} is not running")
     provider = get_provider(agent.provider)
@@ -516,6 +560,53 @@ def flush(db: DB, agent_id: str) -> bool:
     assert agent is not None
     tmux.paste(agent.tmux_window, msg.body)
     return True
+
+
+# -- subagent provider -------------------------------------------------------------
+
+
+def subagent_prompt(profile_prompt: str, task: str, ws: Workspace, done_when: str | None) -> str:
+    """What the supervisor passes to its Agent tool for a subagent worker."""
+    parts = [profile_prompt.strip(), "Task:\n" + task.strip()]
+    if done_when:
+        parts.append(f"Finish line: {done_when.strip()}")
+    body = "\n\n".join(p for p in parts if p)
+    return body + SUBAGENT_FOOTER.format(path=ws.path, branch=ws.branch)
+
+
+def subagent_brief(agent: Agent, ws: Workspace) -> str:
+    """The handoff/assign reply for a subagent worker: what the caller does next."""
+    base = f" (cut from {ws.base_branch})" if ws.base_branch else ""
+    return (
+        f"copse made workspace {ws.id} for agent {agent.id} ({agent.profile}) but started no "
+        "process: your own subagent does this task.\n"
+        f"  path:   {ws.path}\n"
+        f"  branch: {ws.branch}{base}\n"
+        f"  agent:  {agent.id}\n\n"
+        "Next:\n"
+        "1. Run it with your Agent tool (a general-purpose subagent), passing the prompt "
+        "between the markers exactly as written. With several tasks, you can run their "
+        "subagents in parallel.\n"
+        f"2. When it returns, call complete_subagent(agent_id=\"{agent.id}\", result=<its "
+        "summary>). Until then copse shows it as working.\n"
+        f"3. Review with workspace_diff(\"{ws.id}\"), then merge_workspace and "
+        "remove_workspace as for any worker.\n\n"
+        f"----- prompt for your Agent tool -----\n{agent.task}\n----- end of prompt -----"
+    )
+
+
+def complete_subagent(db: DB, agent_id: str, result: str) -> Agent:
+    """Record a subagent worker's outcome: it shows as done, and its workspace
+    is reviewed, merged and removed like any other."""
+    agent = get(db, agent_id)
+    if runs_process(agent):
+        raise AgentError(
+            f"agent {agent.id} runs its own {agent.provider} process; it reports with "
+            "report_result itself"
+        )
+    db.set_result(agent.id, result)
+    db.set_status(agent.id, "done")
+    return db.get_agent(agent.id) or agent
 
 
 def report_result(db: DB, agent_id: str, result: str) -> str:
