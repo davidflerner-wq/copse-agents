@@ -209,7 +209,8 @@ def test_interactive_agent_exit_pauses_its_session(db, ws):
     a = agents.spawn(db, ws, "developer", provider_name="shell", watch_pane=True)
     assert tmux.has_session(ws.tmux_session)
     tmux.send_keys(a.tmux_window, "exit", "Enter")
-    deadline = time.time() + 10
+    # The pane-died hook starts a fresh Python process; slow CI runners need time.
+    deadline = time.time() + 30
     while time.time() < deadline and tmux.has_session(ws.tmux_session):
         time.sleep(0.2)
     assert not tmux.has_session(ws.tmux_session)
