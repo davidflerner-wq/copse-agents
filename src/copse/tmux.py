@@ -42,16 +42,31 @@ def ensure_session(session: str, cwd: str, env: dict[str, str]) -> None:
 
 
 def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[str, str]) -> str:
-    """Open a window running ``command``. Returns a stable target (``@<id>``)."""
+    """Open a window running ``command``. Returns the agent's PANE id (``%<n>``),
+    not the window's: a window can hold more than one pane (e.g. the watch
+    dashboard beside a supervisor), and keys sent to a window go to whichever
+    pane happens to be active."""
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
     proc = _tmux(
-        "new-window", "-d", "-P", "-F", "#{window_id}", "-t", f"={session}:",
+        "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"={session}:",
         "-n", name, "-c", cwd, *env_args, "--", *command,
     )
     target = proc.stdout.strip()
-    # Keep the pane around after the agent exits so its output can be read.
-    _tmux("set-option", "-w", "-t", target, "remain-on-exit", "on", check=False)
+    # Keep the agent's pane around after it exits so its output can be read.
+    _tmux("set-option", "-p", "-t", target, "remain-on-exit", "on", check=False)
     return target
+
+
+def split_below(target: str, cwd: str, command: list[str], env: dict[str, str],
+                lines: int = 14) -> str:
+    """Open a pane under ``target`` running ``command``, keeping focus on
+    ``target``. Returns the new pane's id."""
+    env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
+    proc = _tmux(
+        "split-window", "-d", "-v", "-l", str(lines), "-P", "-F", "#{pane_id}",
+        "-t", target, "-c", cwd, *env_args, "--", *command,
+    )
+    return proc.stdout.strip()
 
 
 def window_alive(target: str) -> bool:
@@ -97,4 +112,7 @@ def attach_command(session: str, window: str | None = None) -> list[str]:
 
 
 def select_window(target: str) -> None:
+    """Focus the window holding ``target`` and, for a pane id, that pane."""
     _tmux("select-window", "-t", target, check=False)
+    if target.startswith("%"):
+        _tmux("select-pane", "-t", target, check=False)

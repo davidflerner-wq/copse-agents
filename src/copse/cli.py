@@ -45,7 +45,7 @@ def _attach(ws: Workspace, window: str | None = None) -> None:
     if window:
         tmux.select_window(window)
     if os.environ.get("TMUX"):
-        subprocess.run(["tmux", "switch-client", "-t", f"={ws.tmux_session}"])
+        subprocess.run([*tmux._base(), "switch-client", "-t", window or f"={ws.tmux_session}"])
     else:
         os.execvp("tmux", tmux.attach_command(ws.tmux_session))
 
@@ -130,11 +130,13 @@ def start(
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p"),
     provider: Optional[str] = typer.Option(None),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
+    watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the copse watch dashboard in a pane under the agent."),
 ) -> None:
-    """Start an agent in the current checkout (default: a supervisor)."""
+    """Start an agent in the current checkout (default: a supervisor), with the
+    dashboard of every agent in this repo beneath it."""
     db = DB()
     ws = _run(workspaces.adopt_root, db, os.getcwd())
-    a = _run(agents.spawn, db, ws, agent, prompt=prompt, provider_name=provider)
+    a = _run(agents.spawn, db, ws, agent, prompt=prompt, provider_name=provider, watch_pane=watch)
     typer.echo(f"✓ {a.profile} agent {a.id} in {ws.id} ({ws.branch})")
     if attach:
         _attach(ws, a.tmux_window)

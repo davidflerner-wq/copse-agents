@@ -171,3 +171,22 @@ def test_codex_command_preapproves_only_copse_tools(monkeypatch):
     assert any('COPSE_AGENT_ID = "abc"' in a for a in argv)
     assert argv[-1].endswith("do it")  # profile prompt leads the first message
     assert not any("dangerously" in a or "full-auto" in a for a in argv)
+
+
+@pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
+def test_watch_pane_shares_the_window_and_messages_reach_the_agent(db, ws):
+    a = agents.spawn(db, ws, "developer", provider_name="shell", watch_pane=True)
+    try:
+        assert a.tmux_window.startswith("%")  # a pane, not a window
+        panes = tmux._tmux("list-panes", "-t", a.tmux_window, "-F", "#{pane_id}").stdout.split()
+        assert len(panes) == 2 and a.tmux_window in panes
+        # Even with the dashboard pane focused, messages go to the agent's pane.
+        other = next(p for p in panes if p != a.tmux_window)
+        tmux._tmux("select-pane", "-t", other)
+        agents.send_message(db, a.id, "echo reached-$COPSE_AGENT_ID")
+        deadline = time.time() + 5
+        while time.time() < deadline and f"reached-{a.id}" not in tmux.capture(a.tmux_window):
+            time.sleep(0.2)
+        assert f"reached-{a.id}" in tmux.capture(a.tmux_window)
+    finally:
+        tmux.kill_session(ws.tmux_session)

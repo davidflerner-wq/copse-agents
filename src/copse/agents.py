@@ -63,6 +63,7 @@ def spawn(
     provider_name: str | None = None,
     parent_id: str | None = None,
     mode: str = "interactive",
+    watch_pane: bool = False,
 ) -> Agent:
     profile = load_profile(profile_name, ws.repo_root)
     provider = get_provider(provider_name or profile.provider)
@@ -94,6 +95,16 @@ def spawn(
         raise
     db.update_agent(agent_id, tmux_window=target)
     agent.tmux_window = target
+    if watch_pane:
+        # The dashboard for this repo, under the agent in the same window.
+        # Best effort: a failed split must not fail the agent it sits beside.
+        from copse.providers import copse_invocation
+
+        try:
+            tmux.split_below(target, ws.path, [*copse_invocation(), "watch"],
+                             workspaces.workspace_env(ws))
+        except tmux.TmuxError:
+            pass
 
     if provider.name == "shell" and prompt:
         tmux.paste(target, prompt)

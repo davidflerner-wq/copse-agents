@@ -111,6 +111,7 @@ def print_once(db: DB, repo_root: str | None, color: bool) -> str:
 # -- interactive ---------------------------------------------------------------
 
 HELP = "↑/↓ select   enter attach   p peek   r refresh   q quit"
+HELP_IN_TMUX = "↑/↓ select   enter jump to agent (prefix L to come back)   p peek   q quit"
 
 
 def _styles() -> dict[str, int]:
@@ -137,7 +138,7 @@ def _attach(agent: dict, ws: dict, db: DB) -> None:
     tmux.select_window(agent["window"])
     curses.endwin()
     if os.environ.get("TMUX"):
-        subprocess.run(["tmux", "switch-client", "-t", agent["window"]])
+        subprocess.run([*tmux._base(), "switch-client", "-t", agent["window"]])
     else:
         subprocess.run(tmux.attach_command(record.tmux_session))
 
@@ -183,7 +184,7 @@ def _loop(stdscr, repo_root: str | None) -> None:
             if rows and i == rows[selected]:
                 attr |= curses.A_REVERSE
             stdscr.addnstr(y, 0, ln.text, w - 1, attr)
-        stdscr.addnstr(h - 1, 0, HELP, w - 1, styles["dim"])
+        stdscr.addnstr(h - 1, 0, HELP_IN_TMUX if os.environ.get("TMUX") else HELP, w - 1, styles["dim"])
         stdscr.refresh()
 
         key = stdscr.getch()
