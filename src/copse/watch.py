@@ -36,8 +36,10 @@ STATUS_LABEL = {
     "processing": ("●", "working"),
     "starting": ("◌", "starting up"),
     "idle": ("○", "idle"),
-    "waiting": ("!", "needs you"),
+    "waiting": ("◆", "needs you"),
     "exited": ("✕", "stopped"),
+    "paused": ("‖", "paused"),
+    "done": ("✓", "done"),
 }
 
 
@@ -154,19 +156,49 @@ HELP = ["↑↓ ⏎ open  p peek  q quit"]
 HELP_IN_TMUX = [*HELP, "prefix L: back from agent"]
 
 
+# PawDelta palette as xterm-256 colours (closest matches): indigo accent,
+# soft green / amber / rose for states, slate greys for secondary text.
+PALETTE_256 = {
+    "accent": 105,    # ~#818cf8 indigo-light
+    "busy": 141,      # soft purple: working
+    "ok": 79,         # soft green: idle / done
+    "alert": 215,     # amber: needs you
+    "bad": 174,       # dusty rose: stopped
+    "dim": 245,       # slate
+    "text": 255,
+    "select_bg": 237, # subtle row highlight
+}
+
+
 def _styles() -> dict[str, int]:
-    attrs = {"normal": curses.A_NORMAL, "bold": curses.A_BOLD, "dim": curses.A_DIM}
-    if curses.has_colors():
-        curses.use_default_colors()
-        for i, (name, color) in enumerate(
-            [("busy", curses.COLOR_CYAN), ("ok", curses.COLOR_GREEN),
-             ("alert", curses.COLOR_YELLOW), ("bad", curses.COLOR_RED)], start=1):
-            curses.init_pair(i, color, -1)
-            attrs[name] = curses.color_pair(i)
-        attrs["alert"] |= curses.A_BOLD
-    else:
+    attrs = {"normal": curses.A_NORMAL, "bold": curses.A_BOLD, "dim": curses.A_DIM,
+             "accent": curses.A_BOLD, "select": curses.A_REVERSE, "bar": curses.A_BOLD}
+    if not curses.has_colors():
         attrs.update(busy=curses.A_NORMAL, ok=curses.A_NORMAL,
                      alert=curses.A_BOLD, bad=curses.A_DIM)
+        return attrs
+    curses.use_default_colors()
+    if curses.COLORS >= 256:
+        p = PALETTE_256
+        pairs = [("accent", p["accent"], -1), ("busy", p["busy"], -1), ("ok", p["ok"], -1),
+                 ("alert", p["alert"], -1), ("bad", p["bad"], -1), ("dim", p["dim"], -1),
+                 ("normal", p["text"], -1), ("select", p["text"], p["select_bg"]),
+                 ("bar", p["accent"], p["select_bg"])]
+    else:
+        pairs = [("accent", curses.COLOR_MAGENTA, -1), ("busy", curses.COLOR_MAGENTA, -1),
+                 ("ok", curses.COLOR_GREEN, -1), ("alert", curses.COLOR_YELLOW, -1),
+                 ("bad", curses.COLOR_RED, -1), ("dim", -1, -1), ("normal", -1, -1),
+                 ("select", curses.COLOR_WHITE, curses.COLOR_BLUE),
+                 ("bar", curses.COLOR_MAGENTA, curses.COLOR_BLUE)]
+    for i, (name, fg, bg) in enumerate(pairs, start=1):
+        curses.init_pair(i, fg, bg)
+        attrs[name] = curses.color_pair(i)
+    attrs["accent"] |= curses.A_BOLD
+    attrs["bold"] = attrs["normal"] | curses.A_BOLD
+    attrs["alert"] |= curses.A_BOLD
+    attrs["bar"] |= curses.A_BOLD
+    if curses.COLORS < 256:
+        attrs["dim"] |= curses.A_DIM
     return attrs
 
 
@@ -221,16 +253,21 @@ def _loop(stdscr, repo_root: str | None) -> None:
                  for t in _wrap(text, w - 1, "")]
         stdscr.erase()
         clock = time.strftime("%H:%M")
-        stdscr.addnstr(0, 0, "COPSE", w - 1, styles["bold"])
-        if w > len(clock) + 7:
+        stdscr.addnstr(0, 1, "◆ copse", w - 2, styles["accent"])
+        if w > len(clock) + 11:
             stdscr.addnstr(0, w - 1 - len(clock), clock, len(clock), styles["dim"])
-        for y, (i, ln) in enumerate(enumerate(lines[: h - 3 - len(help_)]), start=2):
+        stdscr.addnstr(1, 1, "─" * max(0, w - 3), w - 2, styles["dim"])
+        for y, (i, ln) in enumerate(enumerate(lines[: h - 4 - len(help_)]), start=2):
             attr = styles.get(ln.style, curses.A_NORMAL)
             if rows and i == rows[selected]:
-                attr |= curses.A_REVERSE
-            stdscr.addnstr(y, 0, ln.text, w - 1, attr)
+                # A purple bar and a subtle highlight, not inverted colours.
+                stdscr.addnstr(y, 0, "▌", 1, styles["bar"])
+                stdscr.addnstr(y, 1, ln.text.ljust(w - 2), w - 2,
+                               styles["select"] | (attr & curses.A_BOLD))
+                continue
+            stdscr.addnstr(y, 1, ln.text, w - 2, attr)
         for y, text in enumerate(help_, start=h - len(help_)):
-            stdscr.addnstr(y, 0, text, w - 1, styles["dim"])
+            stdscr.addnstr(y, 1, text, w - 2, styles["dim"])
         stdscr.refresh()
 
         key = stdscr.getch()

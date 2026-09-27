@@ -126,10 +126,11 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         from copse.providers import copse_invocation
 
         try:
-            tmux.split_below(target, ws.path, [*copse_invocation(), "watch"],
-                             workspaces.workspace_env(ws))
+            tmux.split_left(target, ws.path, [*copse_invocation(), "watch", "--sidebar"],
+                            workspaces.workspace_env(ws))
         except tmux.TmuxError:
             pass
+    tmux.apply_theme(ws.tmux_session)
 
     if provider.name == "shell" and prompt:
         tmux.paste(target, prompt)

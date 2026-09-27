@@ -21,7 +21,7 @@ def test_waiting_agents_stand_out():
     assert lines[0].text == "1 needs you · 1 working" and lines[0].style == "alert"
     assert lines[1].text == "2 agents in 1 workspace"
     i = next(i for i, ln in enumerate(lines) if ln.agent and ln.agent["status"] == "waiting")
-    assert lines[i].style == "alert" and lines[i].text.startswith("  ! ")
+    assert lines[i].style == "alert" and lines[i].text.startswith("  ◆ ")
     assert lines[i + 1].text.strip().startswith("needs you for 1m")
     assert any("2 ahead · 1 behind main · 3 files changed" in ln.text for ln in lines)
 

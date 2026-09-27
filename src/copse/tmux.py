@@ -70,6 +70,61 @@ def windows(session: str) -> list[str]:
     return proc.stdout.split() if proc.returncode == 0 else []
 
 
+# PawDelta palette (pawdelta.com): near-black ground, indigo accent, slate text.
+THEME = {
+    "bg": "#0a0b0f", "bg2": "#111318", "line": "#1f2230",
+    "accent": "#6366f1", "accent_light": "#818cf8",
+    "text": "#f1f5f9", "muted": "#64748b", "muted2": "#94a3b8",
+}
+
+
+def apply_theme(session: str) -> None:
+    """Style one copse session (never the person's global tmux config)."""
+    t = THEME
+    opts = {
+        "status-style": f"bg={t['bg2']},fg={t['muted2']}",
+        "status-left": f"#[bg={t['accent']},fg={t['text']},bold] copse #[bg={t['bg2']},fg={t['accent']}] ",
+        "status-left-length": "20",
+        "status-right": f"#[fg={t['muted']}]#{{session_name}}  %H:%M ",
+        "status-right-length": "60",
+        "window-status-format": f"#[fg={t['muted']}] #W ",
+        "window-status-current-format": f"#[fg={t['accent_light']},bold] #W ",
+        "pane-border-style": f"fg={t['line']}",
+        "pane-active-border-style": f"fg={t['accent']}",
+        "pane-border-lines": "single",
+        "window-style": f"bg={t['bg']}",
+        "window-active-style": f"bg={t['bg']}",
+        "message-style": f"bg={t['accent']},fg={t['text']}",
+        "mode-style": f"bg={t['accent']},fg={t['text']}",
+    }
+    # set-option doesn't accept the "=name" exact-match form other commands do.
+    for key, value in opts.items():
+        _tmux("set-option", "-t", session, key, value, check=False)
+    for key in ("window-style", "window-active-style", "pane-border-style",
+                "pane-active-border-style", "pane-border-lines", "mode-style",
+                "window-status-format", "window-status-current-format"):
+        # window options: set on every window of the session
+        for win in _tmux("list-windows", "-t", f"={session}", "-F", "#{window_id}", check=False).stdout.split():
+            _tmux("set-option", "-w", "-t", win, key, opts[key], check=False)
+
+
+def split_left(target: str, cwd: str, command: list[str], env: dict[str, str],
+               columns: int = 30) -> str:
+    """Open a narrow pane to the LEFT of ``target`` running ``command``,
+    keeping focus on ``target``. Returns the new pane's id."""
+    env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
+    proc = _tmux(
+        "split-window", "-d", "-h", "-b", "-l", str(columns), "-P", "-F", "#{pane_id}",
+        "-t", target, "-c", cwd, *env_args, "--", *command,
+    )
+    pane = proc.stdout.strip()
+    # tmux grows every pane proportionally when a client attaches at a bigger
+    # size; keep the sidebar at its width whenever the window is resized.
+    _tmux("set-hook", "-w", "-t", target, "window-resized",
+          f"resize-pane -t {pane} -x {columns}", check=False)
+    return pane
+
+
 def split_below(target: str, cwd: str, command: list[str], env: dict[str, str],
                 lines: int = 14) -> str:
     """Open a pane under ``target`` running ``command``, keeping focus on

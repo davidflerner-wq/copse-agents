@@ -398,6 +398,7 @@ def list_cmd(
 def watch(
     all_repos: bool = typer.Option(False, "--all", help="Every repo, not just this one."),
     once: bool = typer.Option(False, "--once", help="Print one snapshot and exit."),
+    sidebar: bool = typer.Option(False, "--sidebar", hidden=True),
 ) -> None:
     """Live dashboard of workspaces and agents (highlights agents waiting on you)."""
     from copse import watch as watch_mod
