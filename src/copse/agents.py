@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import time
 import uuid
 
@@ -66,6 +67,7 @@ def spawn(
     parent_id: str | None = None,
     mode: str = "interactive",
     watch_pane: bool = False,
+    background_setup: bool = False,
 ) -> Agent:
     profile = load_profile(profile_name, ws.repo_root)
     provider = get_provider(provider_name or profile.provider)
@@ -81,7 +83,8 @@ def spawn(
     )
     db.add_agent(agent)
     try:
-        _launch(db, agent, ws, prompt=prompt, resume=None, watch_pane=watch_pane)
+        _launch(db, agent, ws, prompt=prompt, resume=None, watch_pane=watch_pane,
+                background_setup=background_setup)
     except Exception:
         db.delete_agent(agent_id)
         raise
@@ -89,7 +92,7 @@ def spawn(
 
 
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
-            resume: str | None, watch_pane: bool) -> None:
+            resume: str | None, watch_pane: bool, background_setup: bool = False) -> None:
     """Start (or restart) ``agent``'s CLI in a new tmux window of ``ws``."""
     profile = load_profile(agent.profile, ws.repo_root)
     provider = get_provider(agent.provider)
@@ -134,7 +137,18 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
 
     if provider.name == "shell" and prompt:
         tmux.paste(target, prompt)
-    provider.after_launch(target)
+    if background_setup:
+        # Startup dialogs (folder trust) are handled by a detached helper so
+        # the person gets their terminal immediately.
+        from copse.providers import copse_invocation
+
+        subprocess.Popen(
+            [*copse_invocation(), "_after-launch", agent.id],
+            start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env={**os.environ, **agent_env(ws, agent.id)},
+        )
+    else:
+        provider.after_launch(target)
 
 
 # -- sessions: pause and continue ----------------------------------------------
@@ -206,7 +220,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True) -> list[Agent]:
             ref = None  # nothing was ever said in it: start that agent fresh
         prompt = None if ref else ((a.task + RESUME_NOTE) if a.task else None)
         _launch(db, a, ws, prompt=prompt, resume=ref,
-                watch_pane=watch_pane and a.id == root_id)
+                watch_pane=watch_pane and a.id == root_id, background_setup=True)
         resumed.append(a)
     return resumed
 

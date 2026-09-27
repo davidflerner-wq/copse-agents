@@ -64,6 +64,9 @@ class ClaudeCode(Provider):
     uses_hooks = True
 
     TRUST_DIALOG = re.compile(r"(one you trust|trust (this|the files in this) folder)", re.I)
+    # Claude Code's input box, across versions: the "❯" prompt line, the old
+    # "? for shortcuts" hint, or a turn already running.
+    READY = re.compile(r"^\s*❯|\? for shortcuts|esc to interrupt|⏵⏵", re.M)
 
     @staticmethod
     def can_resume(session_id: str) -> bool:
@@ -134,7 +137,7 @@ class ClaudeCode(Provider):
             except tmux.TmuxError:
                 return
             if not self.TRUST_DIALOG.search(screen):
-                if "? for shortcuts" in screen or "esc to interrupt" in screen:
+                if self.READY.search(screen):
                     return
                 continue
             if self.YES_SELECTED.search(screen):

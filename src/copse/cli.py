@@ -163,7 +163,7 @@ def start(
     _pause_running(db, ws)
     sessions.enforce(db, ws.repo_root)
     a = _run(agents.spawn, db, ws, agent, prompt=prompt, provider_name=provider,
-             watch_pane=watch)
+             watch_pane=watch, background_setup=True)
     typer.echo(f"✓ {a.profile} agent {a.id} in {ws.id} ({ws.branch})")
     if attach:
         _attach(ws, a.tmux_window)
@@ -624,6 +624,15 @@ def hook(event: str) -> None:
     out = agents.hook_main(DB(), agent_id, event, sys.stdin.read())
     if out:
         typer.echo(out)
+
+
+@app.command("_after-launch", hidden=True)
+def after_launch_cmd(agent_id: str) -> None:
+    from copse.providers import get_provider
+
+    a = DB().get_agent(agent_id)
+    if a and a.tmux_window:
+        get_provider(a.provider).after_launch(a.tmux_window)
 
 
 @app.command("_ended", hidden=True)
