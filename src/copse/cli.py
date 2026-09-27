@@ -728,6 +728,12 @@ def after_launch_cmd(agent_id: str) -> None:
         agents.ready(db, agent_id)
 
 
+@app.command("_headless", hidden=True)
+def headless_cmd(agent_id: str, resume: Optional[str] = typer.Option(None)) -> None:
+    """A headless worker's pane: runs its `claude -p` turns (agents.run_headless)."""
+    raise typer.Exit(agents.run_headless(DB(), agent_id, resume))
+
+
 @app.command("_ended", hidden=True)
 def ended_cmd(agent_id: str) -> None:
     import signal

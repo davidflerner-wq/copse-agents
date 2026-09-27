@@ -88,12 +88,16 @@ def spawn(
     profile = load_profile(profile_name, ws.repo_root)
     provider = get_provider(provider_name or profile.provider)
     agent_id = new_id()
+    # Headless is a Claude Code mode; other CLIs ignore the profile field.
+    headless = bool(profile.headless and provider.name == "claude")
 
     if prompt and mode in ("handoff", "assign"):
         if done_when:
             prompt += f"\n\nFinish line: {done_when.strip()}"
         prompt += WORKER_FOOTER.format(agent_id=agent_id, branch=ws.branch)
-        if done_when and provider.name == "claude":
+        if done_when and provider.name == "claude" and not headless:
+            # /goal is an interactive command; headless workers get the finish
+            # line above and the Stop hook's reminder to report.
             prompt = pilot.worker_goal(prompt, done_when, ws.branch) or prompt
     elif prompt and mode == "review":
         prompt += REVIEW_FOOTER.format(agent_id=agent_id, branch=ws.branch)
@@ -101,7 +105,7 @@ def spawn(
     agent = Agent(
         id=agent_id, workspace_id=ws.id, profile=profile.name, provider=provider.name,
         parent_id=parent_id, mode=mode, status="starting", tmux_window="",
-        result=None, created_at=time.time(), task=prompt,
+        result=None, created_at=time.time(), task=prompt, headless=int(headless) or None,
     )
     db.add_agent(agent)
     if autopilot:
@@ -134,9 +138,8 @@ def _pause_when_done(agent_id: str, argv: list[str]) -> list[str]:
     return ["/bin/sh", "-c", script, "copse-agent", *argv]
 
 
-def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
-            resume: str | None, watch_pane: bool, background_setup: bool = False) -> None:
-    """Start (or restart) ``agent``'s CLI in a new tmux window of ``ws``."""
+def _profile_for(db: DB, agent: Agent, ws: Workspace):
+    """``agent``'s profile as launched: autopilot sessions add their guide."""
     from dataclasses import replace
 
     from copse import autopilot as pilot
@@ -145,7 +148,42 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     profile = load_profile(agent.profile, ws.repo_root)
     if db.get_autopilot(agent.id):
         profile = replace(profile, prompt=profile.prompt + pilot.guide(load_repo_config(ws.repo_root)))
+    if agent.headless:
+        profile = replace(profile, headless=True)
+    return profile
+
+
+def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str],
+                 watch_pane: bool) -> str:
+    """Run ``argv`` for ``agent`` in a new window of ``ws``'s tmux session."""
+    if agent.mode == "interactive":
+        argv = _pause_when_done(agent.id, argv)
+    tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
+    target = tmux.new_window(ws.tmux_session, name, ws.path, argv, agent_env(ws, agent.id))
+    db.update_agent(agent.id, tmux_window=target)
+    agent.tmux_window = target
+    if watch_pane:
+        # The dashboard for this repo, under the agent in the same window.
+        # Best effort: a failed split must not fail the agent it sits beside.
+        from copse.providers import copse_invocation
+
+        try:
+            tmux.split_left(target, ws.path, [*copse_invocation(), "watch", "--sidebar"],
+                            workspaces.workspace_env(ws))
+        except tmux.TmuxError:
+            pass
+    tmux.apply_theme(ws.tmux_session)
+    return target
+
+
+def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
+            resume: str | None, watch_pane: bool, background_setup: bool = False) -> None:
+    """Start (or restart) ``agent``'s CLI in a new tmux window of ``ws``."""
+    profile = _profile_for(db, agent, ws)
     provider = get_provider(agent.provider)
+    if agent.headless:
+        _launch_headless(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane)
+        return
     if provider.prompt_after_ready:
         # Typed in once it's ready, after any warm-up message.
         for text in ((provider.warmup(profile) if not resume else None), prompt):
@@ -160,26 +198,7 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     agent.status = status
 
     argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path))
-    if agent.mode == "interactive":
-        argv = _pause_when_done(agent.id, argv)
-    tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
-    target = tmux.new_window(
-        ws.tmux_session, f"{profile.name}-{agent.id[:4]}", ws.path, argv,
-        agent_env(ws, agent.id),
-    )
-    db.update_agent(agent.id, tmux_window=target)
-    agent.tmux_window = target
-    if watch_pane:
-        # The dashboard for this repo, under the agent in the same window.
-        # Best effort: a failed split must not fail the agent it sits beside.
-        from copse.providers import copse_invocation
-
-        try:
-            tmux.split_left(target, ws.path, [*copse_invocation(), "watch", "--sidebar"],
-                            workspaces.workspace_env(ws))
-        except tmux.TmuxError:
-            pass
-    tmux.apply_theme(ws.tmux_session)
+    target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane)
 
     if provider.name == "shell" and prompt:
         tmux.paste(target, prompt)
@@ -196,6 +215,103 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     else:
         provider.after_launch(target)
         ready(db, agent.id)
+
+
+# -- headless workers (claude -p) ------------------------------------------------
+#
+# A headless worker runs `claude -p`: one turn per process, no TUI. So that the
+# rest of copse can treat it like any other agent, its tmux pane runs a small
+# runner (``copse _headless``) that stays up between turns:
+#
+# - the first prompt, and every message sent while no turn is running, go to
+#   the agent's inbox; the runner takes the oldest and runs
+#   `claude -p --resume <session> <message>` (the first turn gets a fresh
+#   --session-id, so the conversation is known without relying on hooks);
+# - messages that arrive mid-turn are delivered by the Stop hook, exactly as
+#   for interactive Claude Code (it keeps the -p process going);
+# - hooks report status and results as usual; the runner marks the agent idle
+#   when a turn's process exits;
+# - if claude exits with an error, the runner exits too. The pane stays (with
+#   claude's error in it) and is dead, which is how copse notices any agent
+#   died: wait_for_result reports its last lines, the dashboard shows it
+#   stopped, and send_message refuses.
+
+HEADLESS_CONTINUE = (
+    "You were paused and have just been restarted. Check `git status` and `git log` "
+    "in your working directory to see what you already did, then continue your task."
+)
+
+
+def _launch_headless(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
+                     resume: str | None, watch_pane: bool) -> None:
+    from copse.providers import copse_invocation
+
+    if prompt:
+        db.enqueue(agent.id, prompt, None)
+    elif resume and agent.mode in REPORTING_MODES and agent.result is None:
+        # An interactive chat resumes onto its input box; a headless worker
+        # needs a turn to pick its task back up.
+        db.enqueue(agent.id, HEADLESS_CONTINUE, None)
+    status = "processing" if db.pending_count(agent.id) else "idle"
+    db.set_status(agent.id, status)
+    agent.status = status
+    argv = [*copse_invocation(), "_headless", agent.id, *(["--resume", resume] if resume else [])]
+    _open_window(db, agent, ws, f"{agent.profile}-{agent.id[:4]}", argv, watch_pane)
+
+
+def _preview(text: str, lines: int = 6) -> str:
+    rows = text.strip().splitlines()
+    return "\n".join(rows[:lines] + (["..."] if len(rows) > lines else []))
+
+
+def run_headless(db: DB, agent_id: str, resume: str | None = None, *,
+                 poll: float = 0.5, exit_when_idle: bool = False) -> int:
+    """The loop in a headless worker's pane (see above). Returns claude's exit
+    code when a turn fails, or 0 once the agent is gone. ``exit_when_idle``
+    (for tests) returns as soon as there's nothing left to run."""
+    from copse.providers import LaunchContext
+
+    agent = db.get_agent(agent_id)
+    ws = db.get_workspace(agent.workspace_id) if agent else None
+    if agent is None or ws is None:
+        return 0
+    provider = get_provider(agent.provider)
+    session = resume
+    turn = 0
+    while True:
+        agent = db.get_agent(agent_id)
+        if agent is None:
+            return 0
+        msg = db.pop_pending(agent_id)
+        if msg is None:
+            if exit_when_idle:
+                return 0
+            time.sleep(poll)
+            continue
+        turn += 1
+        db.set_status(agent_id, "processing")
+        new_session = None
+        if not session:
+            new_session = str(uuid.uuid4())
+            db.update_agent(agent_id, session_ref=new_session)
+        ctx = LaunchContext(agent_id, _profile_for(db, agent, ws), msg.body, resume=session,
+                            cwd=ws.path, session_id=new_session)
+        print(f"\n── copse: turn {turn} ──\n{_preview(msg.body)}\n", flush=True)
+        try:
+            code = subprocess.call(provider.command(ctx), cwd=ws.path, stdin=subprocess.DEVNULL)
+        except OSError as e:
+            print(f"copse: couldn't start {provider.name}: {e}", flush=True)
+            code = 127
+        session = session or new_session
+        agent = db.get_agent(agent_id)
+        if agent is None:
+            return 0
+        session = agent.session_ref or session
+        if code != 0:
+            print(f"\n── copse: claude exited with code {code}; this worker has stopped ──", flush=True)
+            return code
+        db.set_status(agent_id, "idle", only_if="processing")
+        print("── copse: turn finished; waiting for messages ──", flush=True)
 
 
 def ready(db: DB, agent_id: str) -> None:
@@ -344,6 +460,11 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None) ->
         raise AgentError(f"agent {agent.id} is not running")
     provider = get_provider(agent.provider)
     text = format_message(db, body, sender_id)
+    if agent.headless:
+        # Its runner starts the next turn with this, or the Stop hook hands it
+        # over if a turn is still running.
+        db.enqueue(agent.id, text, sender_id)
+        return "delivered" if agent.status == "idle" else "queued"
     if not provider.uses_hooks:
         tmux.paste(agent.tmux_window, text)
         return "delivered"
@@ -359,8 +480,8 @@ def reconcile(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> Agent
     stays 'waiting' until the tool finishes. The screen must agree across
     ``samples`` reads before we override the hooks."""
     provider = get_provider(agent.provider)
-    if not provider.uses_hooks or agent.status not in ("processing", "waiting"):
-        return agent
+    if agent.headless or not provider.uses_hooks or agent.status not in ("processing", "waiting"):
+        return agent  # a headless pane shows output, not a TUI to read
     seen = set()
     for i in range(samples):
         if i:
@@ -382,6 +503,9 @@ def reconcile(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> Agent
 def flush(db: DB, agent_id: str) -> bool:
     """If the agent is idle, type its oldest pending message. Returns True if
     something was delivered."""
+    agent = db.get_agent(agent_id)
+    if agent is None or agent.headless:
+        return False  # its runner takes messages from the inbox itself
     if db.pending_count(agent_id) == 0 or not db.claim_idle(agent_id):
         return False
     msg = db.pop_pending(agent_id)
@@ -549,7 +673,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
 
     if event == "session-start":
         db.set_status(agent_id, "idle", only_if="starting")
-        if db.pending_count(agent_id):
+        if db.pending_count(agent_id) and not agent.headless:
             # Claude Code hasn't drawn its input box yet; deliver shortly after,
             # from a detached process so this hook returns immediately.
             import subprocess

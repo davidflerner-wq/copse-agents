@@ -42,6 +42,7 @@ class LaunchContext:
     initial_prompt: str | None
     resume: str | None = None   # the CLI's session id to continue, if it supports that
     cwd: str | None = None      # the workspace it runs in
+    session_id: str | None = None  # a new session's id, for CLIs that let copse choose it
 
 
 class Provider:
@@ -154,6 +155,8 @@ class ClaudeCode(Provider):
             argv += ["--model", ctx.profile.model]
         if ctx.profile.permission_mode:
             argv += ["--permission-mode", ctx.profile.permission_mode]
+        if ctx.session_id and not ctx.resume:
+            argv += ["--session-id", ctx.session_id]
         if ctx.resume:
             argv += ["--resume", ctx.resume]
             if p.headless and ctx.initial_prompt:

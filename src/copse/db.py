@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS agents (
     status_since REAL,             -- when status last changed
     task TEXT,                     -- the prompt it was started with (for resuming)
     session_ref TEXT,              -- the CLI's own session id (claude --resume)
-    stop_blocked INTEGER           -- copse's Stop hook just kept it going (for CLIs that don't say)
+    stop_blocked INTEGER,          -- copse's Stop hook just kept it going (for CLIs that don't say)
+    headless INTEGER               -- runs `claude -p` turn by turn (agents.run_headless)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,6 +122,7 @@ class Agent:
     task: str | None = None
     session_ref: str | None = None
     stop_blocked: int | None = None
+    headless: int | None = None
 
 
 @dataclass
@@ -197,7 +199,7 @@ class DB:
         """Bring databases created by older versions up to the current schema."""
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(agents)")}
         for col, kind in (("status_since", "REAL"), ("task", "TEXT"), ("session_ref", "TEXT"),
-                          ("stop_blocked", "INTEGER")):
+                          ("stop_blocked", "INTEGER"), ("headless", "INTEGER")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
 
@@ -252,11 +254,11 @@ class DB:
         with self.tx() as c:
             c.execute(
                 "INSERT INTO agents (id, workspace_id, profile, provider, parent_id, mode, "
-                "status, tmux_window, result, created_at, status_since, task, session_ref) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "status, tmux_window, result, created_at, status_since, task, session_ref, "
+                "headless) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (a.id, a.workspace_id, a.profile, a.provider, a.parent_id, a.mode,
                  a.status, a.tmux_window, a.result, a.created_at,
-                 a.status_since or a.created_at, a.task, a.session_ref),
+                 a.status_since or a.created_at, a.task, a.session_ref, a.headless),
             )
 
     def get_agent(self, agent_id: str) -> Agent | None:

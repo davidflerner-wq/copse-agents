@@ -163,6 +163,8 @@ def render(snap: list[dict], now: float, width: int = 80, pilot: dict | None = N
             name = a["profile"].replace("-", " ").capitalize()
             if a["provider"] != "claude":
                 name += f" ({a['provider']})"
+            elif a.get("headless"):
+                name += " (headless)"
             lines.append(Line(f"  {icon} {name}", STATUS_STYLE.get(a["status"], "normal"),
                               agent=a, workspace=ws))
             since = a.get("status_since")

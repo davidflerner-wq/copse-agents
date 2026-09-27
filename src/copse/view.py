@@ -45,6 +45,7 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False) -> dict:
             pending=db.pending_count(a.id),
             reported=a.result is not None,
             window=a.tmux_window,
+            headless=bool(a.headless),
         )
     return entry
 
