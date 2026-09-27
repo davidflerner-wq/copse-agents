@@ -59,7 +59,7 @@ def workspace_env(ws: Workspace) -> dict[str, str]:
         env["COPSE_BASE_BRANCH"] = ws.base_branch
     if ws.port_base is not None:
         env["COPSE_PORT_BASE"] = str(ws.port_base)
-    for key in ("COPSE_HOME", "COPSE_TMUX_SOCKET"):
+    for key in ("COPSE_HOME", "COPSE_TMUX_SOCKET", "COPSE_CLAUDE_BIN"):
         if key in os.environ:
             env[key] = os.environ[key]
     return env

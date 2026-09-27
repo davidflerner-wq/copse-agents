@@ -247,3 +247,51 @@ def test_chat_exit_closes_its_session_even_with_extra_windows(db, ws):
         time.sleep(0.2)
     assert not tmux.has_session(ws.tmux_session)
     assert db.get_agent(a.id).status == "paused"
+
+
+def test_claude_command_defaults_are_unchanged():
+    argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "do the thing"))
+    for flag in ("-p", "--strict-mcp-config", "--setting-sources", "--effort"):
+        assert flag not in argv
+    assert argv[:2] == ["claude", "--settings"]
+
+
+def test_claude_command_emits_lightweight_flags():
+    from dataclasses import replace
+
+    profile = replace(load_profile("developer"), strict_mcp=True,
+                      setting_sources=["project", "local"], effort="low")
+    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
+    assert "--strict-mcp-config" in argv
+    assert argv[argv.index("--setting-sources") + 1] == "project,local"
+    assert argv[argv.index("--effort") + 1] == "low"
+    assert "-p" not in argv and argv[-1] == "do the thing"
+    # copse's own hooks and MCP server are still passed explicitly.
+    assert "--settings" in argv and "--mcp-config" in argv
+
+
+def test_headless_claude_command_runs_one_turn_with_print():
+    from dataclasses import replace
+
+    profile = replace(load_profile("developer"), headless=True)
+    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
+    assert argv[1] == "-p" and argv[-1] == "do the thing"
+    # The next turn continues the same conversation, with its own prompt.
+    argv = ClaudeCode().command(LaunchContext("abc", profile, "and the tests", resume="sid-1"))
+    assert argv[-3:] == ["--resume", "sid-1", "and the tests"]
+    # Interactive resume still takes no prompt.
+    argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "x", resume="sid-1"))
+    assert argv[-2:] == ["--resume", "sid-1"]
+
+
+def test_lightweight_fields_are_ignored_by_other_providers(monkeypatch):
+    from dataclasses import replace
+
+    from copse.providers import Codex
+
+    monkeypatch.setenv("COPSE_CODEX_BIN", "codex")
+    profile = replace(load_profile("developer"), strict_mcp=True, setting_sources=["project"],
+                      effort="low", headless=True)
+    argv = Codex().command(LaunchContext("abc", profile, "do it"))
+    for flag in ("-p", "--strict-mcp-config", "--setting-sources", "--effort"):
+        assert flag not in argv

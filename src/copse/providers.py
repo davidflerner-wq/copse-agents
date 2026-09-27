@@ -78,6 +78,11 @@ class Provider:
         return None
 
 
+def claude_binary() -> str:
+    """COPSE_CLAUDE_BIN, else `claude` on PATH."""
+    return os.environ.get("COPSE_CLAUDE_BIN") or "claude"
+
+
 class ClaudeCode(Provider):
     name = "claude"
     uses_hooks = True
@@ -123,12 +128,26 @@ class ClaudeCode(Provider):
                 f"'{a}'" for a in [*copse_invocation(), "_statusline"])},
         }
         mcp = {"mcpServers": {"copse": mcp_server_spec(ctx.agent_id)}}
-        argv = [
-            "claude",
+        p = ctx.profile
+        argv = [claude_binary()]
+        if p.headless:
+            # One turn per process; copse's headless runner (agents.run_headless)
+            # starts the next with --resume when a message arrives.
+            argv.append("-p")
+        argv += [
             "--settings", json.dumps(settings),
             "--mcp-config", json.dumps(mcp),
             "--allowedTools", ",".join(["mcp__copse", *(ctx.profile.allowed_tools or [])]),
         ]
+        # Lightweight workers. --settings (copse's hooks) is its own setting
+        # source, so --setting-sources never drops them; --strict-mcp-config
+        # keeps the --mcp-config servers (copse) and ignores all others.
+        if p.strict_mcp:
+            argv.append("--strict-mcp-config")
+        if p.setting_sources:
+            argv += ["--setting-sources", ",".join(p.setting_sources)]
+        if p.effort:
+            argv += ["--effort", p.effort]
         if ctx.profile.prompt:
             argv += ["--append-system-prompt", ctx.profile.prompt]
         if ctx.profile.model:
@@ -137,6 +156,8 @@ class ClaudeCode(Provider):
             argv += ["--permission-mode", ctx.profile.permission_mode]
         if ctx.resume:
             argv += ["--resume", ctx.resume]
+            if p.headless and ctx.initial_prompt:
+                argv.append(ctx.initial_prompt)  # -p needs the next turn's prompt
         elif ctx.initial_prompt:
             argv.append(ctx.initial_prompt)
         return argv
