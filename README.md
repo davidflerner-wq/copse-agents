@@ -167,11 +167,6 @@ uv run pytest
 2. Create a GitHub release tagged `v<version>` (e.g. `gh release create v0.1.1 --generate-notes`).
 3. The Publish workflow tests, builds, and uploads to PyPI via Trusted Publishing.
 
-## Acknowledgements
-
-copse builds on ideas from
-[CLI Agent Orchestrator](https://github.com/awslabs/cli-agent-orchestrator) and
-[Superset](https://github.com/superset-sh/superset).
 
 ## License
 
