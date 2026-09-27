@@ -4,10 +4,32 @@ version = "0.1.0"
 description = "Orchestrate CLI coding agents in tmux, each on its own git worktree and branch"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Hannah Lerner" }]
+keywords = ["ai", "agents", "claude-code", "codex", "git", "worktree", "tmux", "mcp", "orchestration"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Version Control :: Git",
+]
 dependencies = [
     "typer>=0.12",
     "mcp>=2.2,<3",
 ]
+
+[project.urls]
+Homepage = "https://github.com/hmlerner/copse-agents"
+Repository = "https://github.com/hmlerner/copse-agents"
+Issues = "https://github.com/hmlerner/copse-agents/issues"
 
 [project.scripts]
 copse = "copse.cli:app"
@@ -16,11 +38,16 @@ copse = "copse.cli:app"
 dev = ["pytest>=8"]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/copse"]
+# Metadata 2.5 is newer than twine/PyPI tooling reliably accepts.
+core-metadata-version = "2.4"
+
+[tool.hatch.build.targets.sdist]
+core-metadata-version = "2.4"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

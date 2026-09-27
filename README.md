@@ -144,3 +144,13 @@ defines, so only point workers at repos you trust. Override the list in
 uv sync
 PYTHONPATH=tests uv run pytest
 ```
+
+### Releasing
+
+1. Bump `version` in `pyproject.toml`, commit, and push.
+2. Create a GitHub release tagged `v<version>` (e.g. `gh release create v0.1.1 --generate-notes`).
+3. The Publish workflow tests, builds, and uploads to PyPI via Trusted Publishing.
+
+## License
+
+Apache-2.0
