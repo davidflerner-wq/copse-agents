@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -128,8 +129,42 @@ def start(
         _attach(ws, a.tmux_window)
 
 
+def _ls_entry(db: DB, ws: Workspace) -> dict:
+    """What `copse ls` shows for one workspace; git fields are None when unknown."""
+    ahead = behind = dirty = None
+    if ws.base_branch and os.path.isdir(ws.path):
+        try:
+            st = git.status(ws.path, ws.base_branch)
+            ahead, behind, dirty = st.ahead, st.behind, len(st.dirty_files)
+        except git.GitError:
+            pass
+    return {
+        "id": ws.id,
+        "name": ws.name,
+        "branch": ws.branch,
+        "base_branch": ws.base_branch,
+        "path": ws.path,
+        "ahead": ahead,
+        "behind": behind,
+        "dirty": dirty,
+        "agents": [
+            {
+                "id": a.id,
+                "profile": a.profile,
+                "provider": a.provider,
+                "status": a.status if agents.is_alive(a) else "exited",
+                "mode": a.mode,
+            }
+            for a in db.list_agents(ws.id)
+        ],
+    }
+
+
 @app.command("ls")
-def list_cmd(all_repos: bool = typer.Option(False, "--all", help="Every repo, not just this one.")) -> None:
+def list_cmd(
+    all_repos: bool = typer.Option(False, "--all", help="Every repo, not just this one."),
+    as_json: bool = typer.Option(False, "--json", help="Print a JSON array instead of a table."),
+) -> None:
     """List workspaces and their agents."""
     db = DB()
     repo_root = None
@@ -139,6 +174,9 @@ def list_cmd(all_repos: bool = typer.Option(False, "--all", help="Every repo, no
         except git.GitError:
             pass
     rows = db.find_workspaces(repo_root)
+    if as_json:
+        typer.echo(json.dumps([_ls_entry(db, ws) for ws in rows], indent=2))
+        return
     if not rows:
         typer.echo("no workspaces")
         return
@@ -146,20 +184,15 @@ def list_cmd(all_repos: bool = typer.Option(False, "--all", help="Every repo, no
         if not os.path.isdir(ws.path):
             typer.secho(f"{ws.id}  (missing: {ws.path})", fg="red")
             continue
+        e = _ls_entry(db, ws)
         info = ""
-        if ws.base_branch:
-            try:
-                st = git.status(ws.path, ws.base_branch)
-                dirty = f" *{len(st.dirty_files)}" if st.dirty_files else ""
-                info = f"  ↑{st.ahead} ↓{st.behind}{dirty} vs {ws.base_branch}"
-            except git.GitError:
-                pass
+        if e["ahead"] is not None:
+            dirty = f" *{e['dirty']}" if e["dirty"] else ""
+            info = f"  ↑{e['ahead']} ↓{e['behind']}{dirty} vs {ws.base_branch}"
         typer.secho(f"{ws.id}", bold=True, nl=False)
         typer.echo(f"  [{ws.branch}]{info}")
-        for a in db.list_agents(ws.id):
-            alive = agents.is_alive(a)
-            status = a.status if alive else "exited"
-            typer.echo(f"    {a.id}  {a.profile:<12} {a.provider:<7} {status:<11} {a.mode}")
+        for a in e["agents"]:
+            typer.echo(f"    {a['id']}  {a['profile']:<12} {a['provider']:<7} {a['status']:<11} {a['mode']}")
 
 
 @app.command()
