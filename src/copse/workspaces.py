@@ -20,15 +20,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from grove import git, tmux
-from grove.config import (
+from copse import git, tmux
+from copse.config import (
     PORT_BLOCK_SIZE,
     PORT_RANGE_START,
     RepoConfig,
     load_repo_config,
     worktrees_dir,
 )
-from grove.db import DB, Workspace
+from copse.db import DB, Workspace
 
 ROOT_NAME = "root"
 
@@ -48,18 +48,18 @@ class SetupResult:
 
 def workspace_env(ws: Workspace) -> dict[str, str]:
     env = {
-        "GROVE_ROOT_PATH": ws.repo_root,
-        "GROVE_WORKSPACE_PATH": ws.path,
-        "GROVE_WORKSPACE_NAME": ws.name,
-        "GROVE_WORKSPACE_ID": ws.id,
-        "GROVE_BRANCH": ws.branch,
+        "COPSE_ROOT_PATH": ws.repo_root,
+        "COPSE_WORKSPACE_PATH": ws.path,
+        "COPSE_WORKSPACE_NAME": ws.name,
+        "COPSE_WORKSPACE_ID": ws.id,
+        "COPSE_BRANCH": ws.branch,
     }
     if ws.base_branch:
-        env["GROVE_BASE_BRANCH"] = ws.base_branch
+        env["COPSE_BASE_BRANCH"] = ws.base_branch
     if ws.port_base is not None:
-        env["GROVE_PORT_BASE"] = str(ws.port_base)
-    if "GROVE_HOME" in os.environ:
-        env["GROVE_HOME"] = os.environ["GROVE_HOME"]
+        env["COPSE_PORT_BASE"] = str(ws.port_base)
+    if "COPSE_HOME" in os.environ:
+        env["COPSE_HOME"] = os.environ["COPSE_HOME"]
     return env
 
 
@@ -104,7 +104,7 @@ def _repo_slug(repo_root: str) -> str:
 
 def _session_name(repo_root: str, name: str) -> str:
     # tmux forbids '.' and ':' in session names.
-    return f"grove_{_repo_slug(repo_root)}_{name}".replace(".", "_").replace(":", "_")
+    return f"copse_{_repo_slug(repo_root)}_{name}".replace(".", "_").replace(":", "_")
 
 
 def _unique_name(db: DB, repo_root: str, branch: str) -> str:

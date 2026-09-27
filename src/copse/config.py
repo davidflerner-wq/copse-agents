@@ -1,7 +1,7 @@
 """Paths and per-repo configuration.
 
-Repo config lives in ``<repo>/.grove/config.json`` (committed, shared with the
-team) and ``<repo>/.grove/config.local.json`` (gitignored, personal). Local
+Repo config lives in ``<repo>/.copse/config.json`` (committed, shared with the
+team) and ``<repo>/.copse/config.local.json`` (gitignored, personal). Local
 keys override shared ones; for command lists, local may instead give
 ``{"before": [...], "after": [...]}`` to wrap the team's commands.
 """
@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-CONFIG_DIR = ".grove"
+CONFIG_DIR = ".copse"
 CONFIG_FILE = "config.json"
 LOCAL_CONFIG_FILE = "config.local.json"
 
@@ -21,20 +21,20 @@ PORT_RANGE_START = 20000
 PORT_BLOCK_SIZE = 10
 
 
-def grove_home() -> Path:
-    return Path(os.environ.get("GROVE_HOME", Path.home() / ".grove"))
+def copse_home() -> Path:
+    return Path(os.environ.get("COPSE_HOME", Path.home() / ".copse"))
 
 
 def db_path() -> Path:
-    return grove_home() / "grove.db"
+    return copse_home() / "copse.db"
 
 
 def worktrees_dir() -> Path:
-    return grove_home() / "worktrees"
+    return copse_home() / "worktrees"
 
 
 def user_profiles_dir() -> Path:
-    return grove_home() / "agents"
+    return copse_home() / "agents"
 
 
 @dataclass

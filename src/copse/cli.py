@@ -1,4 +1,4 @@
-"""grove command line."""
+"""copse command line."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ from typing import Optional
 
 import typer
 
-from grove import agents, git, tmux, workspaces
-from grove.config import write_template
-from grove.db import DB, Workspace
-from grove.profiles import list_profiles
+from copse import agents, git, tmux, workspaces
+from copse.config import write_template
+from copse.db import DB, Workspace
+from copse.profiles import list_profiles
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help=__doc__)
 agent_app = typer.Typer(no_args_is_help=True, help="Manage agents.")
@@ -34,7 +34,7 @@ def _ws(db: DB, ref: Optional[str]) -> Workspace:
             return ws
     except workspaces.WorkspaceError as e:
         _fail(str(e))
-    _fail("not inside a grove workspace; pass a workspace name")
+    _fail("not inside a copse workspace; pass a workspace name")
     raise AssertionError
 
 
@@ -62,7 +62,7 @@ def _run(fn, *args, **kwargs):
 
 @app.command()
 def init() -> None:
-    """Write a starter .grove/config.json in this repo."""
+    """Write a starter .copse/config.json in this repo."""
     root = _run(git.main_repo_root, os.getcwd())
     path = write_template(root)
     typer.echo(f"wrote {path}")
@@ -89,7 +89,7 @@ def new(
     typer.secho(f"✓ {ws.id}", fg="green", bold=True)
     typer.echo(f"  branch  {ws.branch} ({created.how}, from {created.start_point})")
     typer.echo(f"  path    {ws.path}")
-    typer.echo(f"  ports   {ws.port_base}-{ws.port_base + 9}  (GROVE_PORT_BASE)")
+    typer.echo(f"  ports   {ws.port_base}-{ws.port_base + 9}  (COPSE_PORT_BASE)")
     if created.copied:
         typer.echo(f"  copied  {', '.join(created.copied)}")
     if created.setup:
@@ -97,9 +97,9 @@ def new(
             typer.echo("  setup   ok")
         else:
             typer.secho(f"  setup   FAILED\n{created.setup.log}", fg="yellow")
-            typer.echo(f"  (workspace kept; fix and re-run with `grove setup {ws.name}`)")
+            typer.echo(f"  (workspace kept; fix and re-run with `copse setup {ws.name}`)")
 
-    from grove.config import load_repo_config
+    from copse.config import load_repo_config
 
     profile = agent or load_repo_config(ws.repo_root).default_agent
     window = None
@@ -107,7 +107,7 @@ def new(
         a = _run(agents.spawn, db, ws, profile, prompt=prompt, provider_name=provider)
         window = a.tmux_window
         typer.echo(f"  agent   {a.id} ({a.profile}/{a.provider})")
-    typer.echo(f"\n  grove attach {ws.name}")
+    typer.echo(f"\n  copse attach {ws.name}")
     if attach:
         _attach(ws, window)
 
@@ -170,14 +170,14 @@ def attach(workspace: Optional[str] = typer.Argument(None)) -> None:
 
 @app.command()
 def cd(workspace: str) -> None:
-    """Print a workspace's path (use: cd "$(grove cd NAME)")."""
+    """Print a workspace's path (use: cd "$(copse cd NAME)")."""
     typer.echo(_ws(DB(), workspace).path)
 
 
 @app.command("open")
 def open_cmd(
     workspace: Optional[str] = typer.Argument(None),
-    editor: str = typer.Option(os.environ.get("GROVE_EDITOR", "code"), help="Editor command."),
+    editor: str = typer.Option(os.environ.get("COPSE_EDITOR", "code"), help="Editor command."),
 ) -> None:
     """Open a workspace in your editor."""
     subprocess.run([editor, _ws(DB(), workspace).path])
@@ -186,7 +186,7 @@ def open_cmd(
 @app.command()
 def setup(workspace: Optional[str] = typer.Argument(None)) -> None:
     """Re-run setup commands in a workspace."""
-    from grove.config import load_repo_config
+    from copse.config import load_repo_config
 
     ws = _ws(DB(), workspace)
     cmds = load_repo_config(ws.repo_root).setup
@@ -354,8 +354,8 @@ def send(agent_id: str, message: str) -> None:
 
 @app.command()
 def mcp() -> None:
-    """Run the grove MCP server on stdio (agents launch this automatically)."""
-    from grove.mcp_server import main
+    """Run the copse MCP server on stdio (agents launch this automatically)."""
+    from copse.mcp_server import main
 
     main()
 
@@ -365,7 +365,7 @@ def mcp() -> None:
 
 @app.command("_hook", hidden=True)
 def hook(event: str) -> None:
-    agent_id = os.environ.get("GROVE_AGENT_ID")
+    agent_id = os.environ.get("COPSE_AGENT_ID")
     if not agent_id:
         return
     out = agents.hook_main(DB(), agent_id, event, sys.stdin.read())

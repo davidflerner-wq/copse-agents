@@ -1,5 +1,5 @@
-"""MCP server each agent gets as ``grove``. It knows which agent is calling
-from ``GROVE_AGENT_ID`` (set in the agent's environment at spawn)."""
+"""MCP server each agent gets as ``copse``. It knows which agent is calling
+from ``COPSE_AGENT_ID`` (set in the agent's environment at spawn)."""
 
 from __future__ import annotations
 
@@ -8,16 +8,16 @@ import os
 
 from mcp.server.mcpserver import MCPServer
 
-from grove import agents, git, workspaces
-from grove.db import DB, Agent, Workspace
-from grove.profiles import list_profiles
+from copse import agents, git, workspaces
+from copse.db import DB, Agent, Workspace
+from copse.profiles import list_profiles
 
 MAX_DIFF_CHARS = 60_000
 
 mcp = MCPServer(
-    "grove",
+    "copse",
     instructions=(
-        "grove runs other coding agents for you, each on its own git branch in its own "
+        "copse runs other coding agents for you, each on its own git branch in its own "
         "worktree. Delegate with `handoff` (wait for the result) or `assign` (continue "
         "working; the result arrives later as a message). Review a worker's branch with "
         "`workspace_diff`, integrate it with `merge_workspace`, clean up with "
@@ -27,7 +27,7 @@ mcp = MCPServer(
 
 
 def _caller(db: DB) -> tuple[Agent | None, Workspace]:
-    agent_id = os.environ.get("GROVE_AGENT_ID")
+    agent_id = os.environ.get("COPSE_AGENT_ID")
     agent = db.get_agent(agent_id) if agent_id else None
     if agent:
         ws = db.get_workspace(agent.workspace_id)
@@ -122,7 +122,7 @@ def report_result(result: str) -> str:
     db = DB()
     caller, _ = _caller(db)
     if not caller:
-        return "Not running as a grove agent; nothing to report to."
+        return "Not running as a copse agent; nothing to report to."
     return agents.report_result(db, caller.id, result)
 
 

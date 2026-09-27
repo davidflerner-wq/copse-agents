@@ -13,14 +13,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator
 
-from grove.config import db_path
+from copse.config import db_path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS workspaces (
     id TEXT PRIMARY KEY,
     repo_root TEXT NOT NULL,
     name TEXT NOT NULL,
-    kind TEXT NOT NULL,            -- 'worktree' (grove-managed) or 'main' (existing checkout)
+    kind TEXT NOT NULL,            -- 'worktree' (copse-managed) or 'main' (existing checkout)
     branch TEXT NOT NULL,
     base_branch TEXT,
     path TEXT NOT NULL,

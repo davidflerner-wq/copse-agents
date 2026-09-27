@@ -14,18 +14,18 @@ import re
 import time
 import uuid
 
-from grove import git, tmux, workspaces
-from grove.db import DB, Agent, Workspace
-from grove.profiles import load_profile
-from grove.providers import LaunchContext, get_provider
+from copse import git, tmux, workspaces
+from copse.db import DB, Agent, Workspace
+from copse.profiles import load_profile
+from copse.providers import LaunchContext, get_provider
 
 WORKER_FOOTER = """
 
 ---
-You are running as a grove worker (agent id {agent_id}) on branch `{branch}`.
+You are running as a copse worker (agent id {agent_id}) on branch `{branch}`.
 When you have finished:
 1. Commit your work to this branch with a clear message (do not push or merge).
-2. Call the `report_result` tool from the `grove` MCP server with a concise
+2. Call the `report_result` tool from the `copse` MCP server with a concise
    summary: what you changed, anything left undone, and anything the
    supervisor should check.
 """
@@ -40,7 +40,7 @@ def new_id() -> str:
 
 
 def agent_env(ws: Workspace, agent_id: str) -> dict[str, str]:
-    return {**workspaces.workspace_env(ws), "GROVE_AGENT_ID": agent_id}
+    return {**workspaces.workspace_env(ws), "COPSE_AGENT_ID": agent_id}
 
 
 def spawn(
@@ -110,7 +110,7 @@ def format_message(db: DB, body: str, sender_id: str | None) -> str:
         return body
     sender = db.get_agent(sender_id)
     who = f"{sender.profile} agent {sender_id}" if sender else f"agent {sender_id}"
-    return f"[Message from {who}. Reply with the grove send_message tool, to_agent_id={sender_id}]\n\n{body}"
+    return f"[Message from {who}. Reply with the copse send_message tool, to_agent_id={sender_id}]\n\n{body}"
 
 
 def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None) -> str:
@@ -194,7 +194,7 @@ def kill(db: DB, agent_id: str) -> None:
 
 def _branch_from_task(profile: str, task: str, agent_hint: str) -> str:
     words = re.findall(r"[A-Za-z0-9]+", task.lower())[:5]
-    return f"grove/{profile}/{'-'.join(words) or 'task'}-{agent_hint}"
+    return f"copse/{profile}/{'-'.join(words) or 'task'}-{agent_hint}"
 
 
 def delegate(
@@ -234,7 +234,7 @@ def delegate(
 
 
 def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None:
-    """Called from ``grove _hook <event>`` inside the agent's own process tree.
+    """Called from ``copse _hook <event>`` inside the agent's own process tree.
     Returns JSON for Claude Code to read on stdout, or None."""
     agent = db.get_agent(agent_id)
     if agent is None:
@@ -247,10 +247,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             # from a detached process so this hook returns immediately.
             import subprocess
 
-            from grove.providers import grove_invocation
+            from copse.providers import copse_invocation
 
             subprocess.Popen(
-                [*grove_invocation(), "_flush", agent_id, "--delay", "3"],
+                [*copse_invocation(), "_flush", agent_id, "--delay", "3"],
                 start_new_session=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
@@ -272,7 +272,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             db.set_status(agent_id, "processing")
             return {
                 "decision": "block",
-                "reason": "You haven't called the grove `report_result` tool yet. "
+                "reason": "You haven't called the copse `report_result` tool yet. "
                 "If your task is finished, commit your work and call it now. "
                 "If you are blocked, call it with a description of what's blocking you.",
             }

@@ -12,7 +12,7 @@ def test_stdio_server_starts_and_lists_tools(tmp_path):
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
     ]
     proc = subprocess.Popen(
-        [sys.executable, "-m", "grove", "mcp"], cwd=tmp_path, text=True,
+        [sys.executable, "-m", "copse", "mcp"], cwd=tmp_path, text=True,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     try:

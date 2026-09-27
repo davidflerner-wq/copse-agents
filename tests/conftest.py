@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from grove.db import DB
+from copse.db import DB
 
 
 def sh(cmd: str, cwd: Path) -> str:
@@ -13,10 +13,10 @@ def sh(cmd: str, cwd: Path) -> str:
 
 
 @pytest.fixture(autouse=True)
-def grove_home(tmp_path, monkeypatch):
-    home = tmp_path / "grove-home"
-    monkeypatch.setenv("GROVE_HOME", str(home))
-    for k in ("GIT_DIR", "GIT_WORK_TREE", "GROVE_AGENT_ID"):
+def copse_home(tmp_path, monkeypatch):
+    home = tmp_path / "copse-home"
+    monkeypatch.setenv("COPSE_HOME", str(home))
+    for k in ("GIT_DIR", "GIT_WORK_TREE", "COPSE_AGENT_ID"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("GIT_AUTHOR_NAME", "t")
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "t@example.com")
@@ -26,7 +26,7 @@ def grove_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def db(grove_home):
+def db(copse_home):
     return DB()
 
 

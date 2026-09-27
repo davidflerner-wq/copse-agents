@@ -2,8 +2,8 @@
 
 CAO infers agent state by regex-matching the terminal screen, which breaks
 whenever a CLI redesigns its TUI. Where the CLI offers lifecycle hooks
-(Claude Code), grove uses those instead: the agent itself reports
-``processing`` / ``idle`` / ``waiting`` by running ``grove _hook <event>``.
+(Claude Code), copse uses those instead: the agent itself reports
+``processing`` / ``idle`` / ``waiting`` by running ``copse _hook <event>``.
 CLIs without hooks report ``unknown``, and messages to them are delivered
 immediately rather than queued.
 """
@@ -17,20 +17,20 @@ import sys
 import time
 from dataclasses import dataclass
 
-from grove import tmux
-from grove.profiles import Profile
+from copse import tmux
+from copse.profiles import Profile
 
 
-def grove_invocation() -> list[str]:
-    """argv that re-enters this same grove install, independent of PATH."""
-    return [sys.executable, "-m", "grove"]
+def copse_invocation() -> list[str]:
+    """argv that re-enters this same copse install, independent of PATH."""
+    return [sys.executable, "-m", "copse"]
 
 
 def mcp_server_spec(agent_id: str) -> dict:
-    env = {"GROVE_AGENT_ID": agent_id}
-    if "GROVE_HOME" in os.environ:
-        env["GROVE_HOME"] = os.environ["GROVE_HOME"]
-    cmd = grove_invocation()
+    env = {"COPSE_AGENT_ID": agent_id}
+    if "COPSE_HOME" in os.environ:
+        env["COPSE_HOME"] = os.environ["COPSE_HOME"]
+    cmd = copse_invocation()
     return {"command": cmd[0], "args": [*cmd[1:], "mcp"], "env": env}
 
 
@@ -60,7 +60,7 @@ class ClaudeCode(Provider):
     YES_SELECTED = re.compile(r"[❯>]\s*(\d+\.\s*)?Yes, I trust", re.I)
 
     def _hook(self, event: str) -> list[dict]:
-        cmd = " ".join(f"'{a}'" for a in [*grove_invocation(), "_hook", event])
+        cmd = " ".join(f"'{a}'" for a in [*copse_invocation(), "_hook", event])
         return [{"hooks": [{"type": "command", "command": cmd}]}]
 
     def command(self, ctx: LaunchContext) -> list[str]:
@@ -75,12 +75,12 @@ class ClaudeCode(Provider):
                 "PostToolUse": self._hook("tool-done"),
             }
         }
-        mcp = {"mcpServers": {"grove": mcp_server_spec(ctx.agent_id)}}
+        mcp = {"mcpServers": {"copse": mcp_server_spec(ctx.agent_id)}}
         argv = [
             "claude",
             "--settings", json.dumps(settings),
             "--mcp-config", json.dumps(mcp),
-            "--allowedTools", ",".join(["mcp__grove", *(ctx.profile.allowed_tools or [])]),
+            "--allowedTools", ",".join(["mcp__copse", *(ctx.profile.allowed_tools or [])]),
         ]
         if ctx.profile.prompt:
             argv += ["--append-system-prompt", ctx.profile.prompt]
@@ -94,7 +94,7 @@ class ClaudeCode(Provider):
 
     def after_launch(self, target: str) -> None:
         # A fresh worktree is a folder Claude Code hasn't seen, so it asks
-        # whether to trust it. grove created the worktree from the user's own
+        # whether to trust it. copse created the worktree from the user's own
         # repo, so choose "Yes". The dialog's cursor starts on "No, exit", so
         # move it explicitly and never press Enter unless "Yes" is selected.
         deadline = time.time() + 30
@@ -121,9 +121,9 @@ class Codex(Provider):
         spec = mcp_server_spec(ctx.agent_id)
         argv = [
             "codex",
-            "-c", f"mcp_servers.grove.command={json.dumps(spec['command'])}",
-            "-c", f"mcp_servers.grove.args={json.dumps(spec['args'])}",
-            "-c", "mcp_servers.grove.env=" + "{" + ", ".join(
+            "-c", f"mcp_servers.copse.command={json.dumps(spec['command'])}",
+            "-c", f"mcp_servers.copse.args={json.dumps(spec['args'])}",
+            "-c", "mcp_servers.copse.env=" + "{" + ", ".join(
                 f"{k} = {json.dumps(v)}" for k, v in spec["env"].items()
             ) + "}",
         ]
@@ -137,7 +137,7 @@ class Codex(Provider):
 
 
 class Shell(Provider):
-    """A plain shell. Useful for dev servers and for testing grove itself."""
+    """A plain shell. Useful for dev servers and for testing copse itself."""
 
     name = "shell"
 

@@ -3,15 +3,15 @@ import os
 
 import pytest
 
-from grove import git, workspaces
-from grove.config import load_repo_config
+from copse import git, workspaces
+from copse.config import load_repo_config
 
 from conftest import sh
 
 
 def write_config(repo, **cfg):
-    (repo / ".grove").mkdir(exist_ok=True)
-    (repo / ".grove" / "config.json").write_text(json.dumps(cfg))
+    (repo / ".copse").mkdir(exist_ok=True)
+    (repo / ".copse" / "config.json").write_text(json.dumps(cfg))
 
 
 def test_create_branches_from_fetched_base(db, repo, tmp_path):
@@ -26,13 +26,13 @@ def test_create_branches_from_fetched_base(db, repo, tmp_path):
     assert created.how == "new"
     assert created.start_point == "origin/main"
     assert ws.branch == "feat/login" and ws.base_branch == "main"
-    assert (tmp_path / "grove-home" / "worktrees" / "proj" / "feat" / "login" / "new.txt").exists()
+    assert (tmp_path / "copse-home" / "worktrees" / "proj" / "feat" / "login" / "new.txt").exists()
     assert git.get_base(str(repo), "feat/login") == "main"
     assert ws.name == "feat-login"
 
 
 def test_copy_setup_env_and_ports(db, repo):
-    write_config(repo, copy=[".env"], setup=['echo "$GROVE_BRANCH $GROVE_PORT_BASE" > setup.out'])
+    write_config(repo, copy=[".env"], setup=['echo "$COPSE_BRANCH $COPSE_PORT_BASE" > setup.out'])
     a = workspaces.create(db, str(repo), "one").workspace
     b = workspaces.create(db, str(repo), "two").workspace
     assert (os.path.join(a.path, ".env"))
@@ -51,7 +51,7 @@ def test_failed_setup_keeps_workspace(db, repo):
 
 def test_local_config_wraps_shared(repo):
     write_config(repo, setup=["b"])
-    (repo / ".grove" / "config.local.json").write_text(json.dumps({"setup": {"before": ["a"], "after": ["c"]}, "branch_prefix": "me/"}))
+    (repo / ".copse" / "config.local.json").write_text(json.dumps({"setup": {"before": ["a"], "after": ["c"]}, "branch_prefix": "me/"}))
     cfg = load_repo_config(repo)
     assert cfg.setup == ["a", "b", "c"]
     assert cfg.branch_prefix == "me/"

@@ -7,8 +7,8 @@
     ---
     You are a developer agent...
 
-Lookup order: ``<repo>/.grove/agents/``, ``~/.grove/agents/``, then the
-built-in profiles shipped with grove.
+Lookup order: ``<repo>/.copse/agents/``, ``~/.copse/agents/``, then the
+built-in profiles shipped with copse.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 
-from grove.config import CONFIG_DIR, user_profiles_dir
+from copse.config import CONFIG_DIR, user_profiles_dir
 
 
 @dataclass
@@ -65,7 +65,7 @@ def load_profile(name: str, repo_root: str | None = None) -> Profile:
         f = d / f"{name}.md"
         if f.is_file():
             return _parse(f.read_text(encoding="utf-8"), name)
-    builtin = resources.files("grove.builtin_agents").joinpath(f"{name}.md")
+    builtin = resources.files("copse.builtin_agents").joinpath(f"{name}.md")
     if builtin.is_file():
         return _parse(builtin.read_text(encoding="utf-8"), name)
     raise KeyError(f"no agent profile named {name!r}")
@@ -73,7 +73,7 @@ def load_profile(name: str, repo_root: str | None = None) -> Profile:
 
 def list_profiles(repo_root: str | None = None) -> list[Profile]:
     seen: dict[str, Profile] = {}
-    builtin_dir = resources.files("grove.builtin_agents")
+    builtin_dir = resources.files("copse.builtin_agents")
     for entry in builtin_dir.iterdir():
         if entry.name.endswith(".md"):
             p = _parse(entry.read_text(encoding="utf-8"), entry.name[:-3])

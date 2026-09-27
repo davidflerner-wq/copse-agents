@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 TIMEOUT = 120
-BASE_CONFIG_KEY = "grove-base"
+BASE_CONFIG_KEY = "copse-base"
 
 
 class GitError(RuntimeError):

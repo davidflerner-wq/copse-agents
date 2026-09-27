@@ -3,10 +3,10 @@ import time
 
 import pytest
 
-from grove import agents, tmux, workspaces
-from grove.db import Agent
-from grove.providers import ClaudeCode, LaunchContext
-from grove.profiles import load_profile
+from copse import agents, tmux, workspaces
+from copse.db import Agent
+from copse.providers import ClaudeCode, LaunchContext
+from copse.profiles import load_profile
 
 
 def fake_agent(db, ws, status="processing", mode="interactive", parent=None, agent_id="a1"):
@@ -69,7 +69,7 @@ def test_claude_command_wires_hooks_mcp_and_profile():
     assert argv[0] == "claude" and argv[-1] == "do the thing"
     settings = argv[argv.index("--settings") + 1]
     assert "_hook" in settings and "Stop" in settings
-    assert '"GROVE_AGENT_ID": "abc"' in argv[argv.index("--mcp-config") + 1]
+    assert '"COPSE_AGENT_ID": "abc"' in argv[argv.index("--mcp-config") + 1]
     assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
 
 
@@ -78,11 +78,11 @@ def test_shell_agent_in_tmux_end_to_end(db, ws):
     a = agents.spawn(db, ws, "developer", provider_name="shell")
     try:
         assert agents.is_alive(a)
-        assert agents.send_message(db, a.id, "echo grove-says-hi-$GROVE_AGENT_ID") == "delivered"
+        assert agents.send_message(db, a.id, "echo copse-says-hi-$COPSE_AGENT_ID") == "delivered"
         deadline = time.time() + 5
-        while time.time() < deadline and f"grove-says-hi-{a.id}" not in tmux.capture(a.tmux_window):
+        while time.time() < deadline and f"copse-says-hi-{a.id}" not in tmux.capture(a.tmux_window):
             time.sleep(0.2)
-        assert f"grove-says-hi-{a.id}" in tmux.capture(a.tmux_window)
+        assert f"copse-says-hi-{a.id}" in tmux.capture(a.tmux_window)
     finally:
         tmux.kill_session(ws.tmux_session)
 
@@ -90,7 +90,7 @@ def test_shell_agent_in_tmux_end_to_end(db, ws):
 def test_developer_may_run_tests_and_builds_but_not_everything():
     argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), None))
     allowed = argv[argv.index("--allowedTools") + 1].split(",")
-    assert "mcp__grove" in allowed
+    assert "mcp__copse" in allowed
     assert "Bash(pytest:*)" in allowed and "Bash(npm run:*)" in allowed
     assert "Bash(git push:*)" not in allowed
     assert not any(t in ("Bash", "Bash(*)") for t in allowed)

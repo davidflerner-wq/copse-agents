@@ -66,7 +66,7 @@ def capture(target: str, lines: int = 200) -> str:
 def paste(target: str, text: str, submit: bool = True) -> None:
     """Paste ``text`` as one bracketed paste (so newlines don't submit early),
     then press Enter."""
-    buf = f"grove-{uuid.uuid4().hex[:8]}"
+    buf = f"copse-{uuid.uuid4().hex[:8]}"
     _tmux("load-buffer", "-b", buf, "-", input=text)
     _tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", target)
     if submit:
