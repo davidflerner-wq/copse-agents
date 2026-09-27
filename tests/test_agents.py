@@ -190,3 +190,15 @@ def test_watch_pane_shares_the_window_and_messages_reach_the_agent(db, ws):
         assert f"reached-{a.id}" in tmux.capture(a.tmux_window)
     finally:
         tmux.kill_session(ws.tmux_session)
+
+
+@pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
+def test_find_running_reuses_a_live_interactive_agent(db, ws):
+    assert agents.find_running(db, ws, "developer") is None
+    a = agents.spawn(db, ws, "developer", provider_name="shell")
+    try:
+        assert agents.find_running(db, ws, "developer").id == a.id
+        assert agents.find_running(db, ws, "reviewer") is None
+    finally:
+        tmux.kill_session(ws.tmux_session)
+    assert agents.find_running(db, ws, "developer") is None  # dead agents don't count

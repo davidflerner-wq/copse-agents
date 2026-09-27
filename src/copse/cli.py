@@ -16,7 +16,10 @@ from copse.config import write_template
 from copse.db import DB, Workspace
 from copse.profiles import list_profiles
 
-app = typer.Typer(no_args_is_help=True, add_completion=False, help=__doc__)
+app = typer.Typer(add_completion=False, help="""copse: run coding agents in parallel, each on its own git branch.
+
+Run `copse` with no arguments to open (or reopen) a supervisor chat in this
+repo, with the live dashboard underneath.""")
 agent_app = typer.Typer(no_args_is_help=True, help="Manage agents.")
 app.add_typer(agent_app, name="agent")
 
@@ -131,15 +134,36 @@ def start(
     provider: Optional[str] = typer.Option(None),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the copse watch dashboard in a pane under the agent."),
+    new: bool = typer.Option(False, "--new", help="Start another agent even if one is already running here."),
 ) -> None:
-    """Start an agent in the current checkout (default: a supervisor), with the
-    dashboard of every agent in this repo beneath it."""
+    """Open a chat with an agent in the current checkout (default: a supervisor),
+    with the dashboard of every agent in this repo beneath it. If one is already
+    running here, reopen it instead of starting another (--new to force)."""
     db = DB()
     ws = _run(workspaces.adopt_root, db, os.getcwd())
-    a = _run(agents.spawn, db, ws, agent, prompt=prompt, provider_name=provider, watch_pane=watch)
-    typer.echo(f"✓ {a.profile} agent {a.id} in {ws.id} ({ws.branch})")
+    running = agents.find_running(db, ws, agent) if not new and not prompt else None
+    if running:
+        typer.echo(f"↺ reopening {running.profile} agent {running.id} in {ws.id}")
+        a = running
+    else:
+        a = _run(agents.spawn, db, ws, agent, prompt=prompt, provider_name=provider,
+                 watch_pane=watch)
+        typer.echo(f"✓ {a.profile} agent {a.id} in {ws.id} ({ws.branch})")
     if attach:
         _attach(ws, a.tmux_window)
+
+
+@app.callback(invoke_without_command=True)
+def default(ctx: typer.Context) -> None:
+    """Bare `copse`: open the supervisor chat for this repo."""
+    if ctx.invoked_subcommand is None:
+        try:
+            git.main_repo_root(os.getcwd())
+        except git.GitError:
+            typer.echo(ctx.get_help())
+            typer.secho("\nRun copse inside a git repository to open a supervisor.", fg="yellow")
+            raise typer.Exit(0)
+        start(agent="supervisor", prompt=None, provider=None, attach=True, watch=True, new=False)
 
 
 @app.command("ls")

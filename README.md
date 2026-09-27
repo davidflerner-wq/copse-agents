@@ -37,22 +37,22 @@ uv tool install --editable ~/Projects/copse   # from a local checkout
 
 ```sh
 cd ~/code/myapp
-copse init                                  # optional: writes .copse/config.json
+copse
+```
+
+That's it. `copse` opens a supervisor chat (Claude Code) in your repo, with the
+live dashboard of every agent underneath, in one tmux window. Tell the supervisor
+what you want. It splits the work between workers, each on its own branch, then
+reviews and merges their branches. Run `copse` again later to reopen the same chat.
+
+Or drive a single workspace yourself:
+
+```sh
 copse new fix-login -p "Fix the login redirect bug; add a test"
 copse ls                                    # workspaces, agents, ahead/behind
-copse attach fix-login                      # watch or talk to the agent
 copse diff fix-login --stat
 copse pr fix-login                          # push + gh pr create
 copse rm fix-login                          # keeps the branch
-```
-
-Or let a supervisor split up the work:
-
-```sh
-copse start -p "Add CSV export to reports and a settings page; tests for both"
-# a supervisor starts in this checkout. It calls assign(...) once per task, each
-# worker gets branch copse/developer/<task>-xxxx, and the supervisor reviews
-# with workspace_diff and merges with merge_workspace.
 ```
 
 ## Commands
@@ -60,7 +60,8 @@ copse start -p "Add CSV export to reports and a settings page; tests for both"
 | | |
 |---|---|
 | `copse new BRANCH [-b BASE] [-a PROFILE] [-p PROMPT]` | worktree + branch + agent |
-| `copse start [-a supervisor]` | agent in the current checkout |
+| `copse` | open (or reopen) the supervisor chat here, dashboard underneath |
+| `copse start [-a PROFILE] [-p PROMPT] [--new] [--no-watch]` | the same, with options |
 | `copse ls [--all]` | workspaces and agents |
 | `copse watch [--all] [--once]` | live dashboard: agent status, who's waiting on you, queued messages; enter attaches, `p` peeks |
 | `copse attach / cd / open [WS]` | tmux session / path / editor |

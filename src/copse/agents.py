@@ -123,6 +123,14 @@ def get(db: DB, agent_id: str) -> Agent:
     return agent
 
 
+def find_running(db: DB, ws: Workspace, profile: str) -> Agent | None:
+    """The newest live interactive agent of ``profile`` in ``ws``, if any."""
+    for a in reversed(db.list_agents(ws.id)):
+        if a.profile == profile and a.mode == "interactive" and is_alive(a):
+            return a
+    return None
+
+
 def is_alive(agent: Agent) -> bool:
     return bool(agent.tmux_window) and tmux.window_alive(agent.tmux_window)
 

@@ -40,3 +40,13 @@ def test_ls_json_respects_all(db, repo, tmp_path, monkeypatch):
     sh("git init -q -b main", elsewhere)
     assert json.loads(CliRunner().invoke(app, ["ls", "--json"]).stdout) == []
     assert len(json.loads(CliRunner().invoke(app, ["ls", "--json", "--all"]).stdout)) == 1
+
+
+def test_bare_copse_outside_a_repo_shows_help(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from copse.cli import app
+
+    monkeypatch.chdir(tmp_path)
+    r = CliRunner().invoke(app, [])
+    assert r.exit_code == 0 and "supervisor" in r.output and "git repository" in r.output
