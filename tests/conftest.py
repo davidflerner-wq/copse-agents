@@ -12,6 +12,27 @@ def sh(cmd: str, cwd: Path) -> str:
     ).stdout.strip()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def private_tmux_server():
+    """Run every test's tmux sessions on a private server, so parallel test
+    runs (e.g. two copse workers testing at once) can't collide."""
+    import os
+
+    from copse import tmux
+
+    old = os.environ.get("COPSE_TMUX_SOCKET")
+    os.environ["COPSE_TMUX_SOCKET"] = f"copse-test-{os.getpid()}"
+    yield
+    try:
+        tmux.kill_server()
+    except tmux.TmuxError:
+        pass
+    if old is None:
+        os.environ.pop("COPSE_TMUX_SOCKET", None)
+    else:
+        os.environ["COPSE_TMUX_SOCKET"] = old
+
+
 @pytest.fixture(autouse=True)
 def copse_home(tmp_path, monkeypatch):
     home = tmp_path / "copse-home"

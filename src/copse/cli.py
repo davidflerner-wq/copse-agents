@@ -158,17 +158,17 @@ def _ls_entry(db: DB, ws: Workspace) -> dict:
         "ahead": ahead,
         "behind": behind,
         "dirty": dirty,
-        "agents": [
-            {
-                "id": a.id,
-                "profile": a.profile,
-                "provider": a.provider,
-                "status": a.status if agents.is_alive(a) else "exited",
-                "mode": a.mode,
-            }
-            for a in db.list_agents(ws.id)
-        ],
+        "agents": [_agent_entry(db, a) for a in db.list_agents(ws.id)],
     }
+
+
+def _agent_entry(db: DB, a) -> dict:
+    if agents.is_alive(a):
+        status = agents.reconcile(db, a, samples=1).status
+    else:
+        status = "exited"
+    return {"id": a.id, "profile": a.profile, "provider": a.provider,
+            "status": status, "mode": a.mode}
 
 
 @app.command("ls")

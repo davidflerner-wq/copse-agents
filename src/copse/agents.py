@@ -1,6 +1,6 @@
 """Agents: a CLI agent process in a tmux window inside a workspace.
 
-Messaging follows CAO's inbox model: a message to a busy agent waits in its
+Messaging uses an inbox: a message to a busy agent waits in its
 inbox and is delivered the moment the agent goes idle. With hook-capable
 providers, delivery happens inside the ``Stop`` hook itself (the hook tells
 Claude Code to keep going with the message as its next instruction), so
@@ -125,7 +125,35 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None) ->
         tmux.paste(agent.tmux_window, text)
         return "delivered"
     db.enqueue(agent.id, text, sender_id)
+    reconcile(db, agent)
     return "delivered" if flush(db, agent.id) else "queued"
+
+
+def reconcile(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> Agent:
+    """Correct a status the hooks left stale. Claude Code runs no Stop hook
+    when a turn is interrupted (Esc), so the agent can sit idle while we still
+    think it's busy; and after a permission prompt is approved the status
+    stays 'waiting' until the tool finishes. The screen must agree across
+    ``samples`` reads before we override the hooks."""
+    provider = get_provider(agent.provider)
+    if not provider.uses_hooks or agent.status not in ("processing", "waiting"):
+        return agent
+    seen = set()
+    for i in range(samples):
+        if i:
+            time.sleep(gap)
+        try:
+            seen.add(provider.screen_state(tmux.capture(agent.tmux_window, lines=40)))
+        except tmux.TmuxError:
+            return agent
+    if len(seen) != 1:
+        return agent
+    state = seen.pop()
+    new = {"idle": "idle", "busy": "processing", "waiting": "waiting"}.get(state or "")
+    if new and new != agent.status:
+        db.set_status(agent.id, new, only_if=agent.status)
+        agent.status = new
+    return agent
 
 
 def flush(db: DB, agent_id: str) -> bool:

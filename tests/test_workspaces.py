@@ -134,3 +134,24 @@ def test_resolve_from_inside_worktree(db, repo):
 ])
 def test_sanitize_branch(raw, want):
     assert git.sanitize_branch(raw) == want
+
+
+def test_unpushed_base_commits_are_not_counted_as_branch_work(db, repo):
+    # Local main gains a commit that isn't pushed yet; a workspace branched
+    # from local main must not show that commit as its own.
+    (repo / "local.txt").write_text("l")
+    sh("git add -A && git commit -qm local-only", repo)
+    ws = workspaces.create(db, str(repo), "feature", start="main").workspace
+    st = git.status(ws.path, "main")
+    assert (st.ahead, st.behind) == (0, 0)
+    assert "local.txt" not in git.diff(ws.path, "main", stat=True)
+
+
+def test_stale_local_base_compares_against_origin(db, repo, tmp_path):
+    other = tmp_path / "other"
+    sh(f"git clone -q {tmp_path / 'origin.git'} {other}", tmp_path)
+    (other / "up.txt").write_text("u")
+    sh("git add -A && git commit -qm upstream && git push -q", other)
+    ws = workspaces.create(db, str(repo), "feature").workspace  # from origin/main
+    assert git.base_ref(ws.path, "main") == "origin/main"
+    assert git.status(ws.path, "main").ahead == 0

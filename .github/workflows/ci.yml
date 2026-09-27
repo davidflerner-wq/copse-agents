@@ -28,5 +28,3 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: uv sync
       - run: uv run pytest -q
-        env:
-          PYTHONPATH: tests

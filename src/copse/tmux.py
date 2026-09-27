@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import time
@@ -12,10 +13,17 @@ class TmuxError(RuntimeError):
     pass
 
 
+def _base() -> list[str]:
+    """``tmux``, or ``tmux -L <name>`` when COPSE_TMUX_SOCKET selects a
+    private server (used by the test suite so runs can't collide)."""
+    sock = os.environ.get("COPSE_TMUX_SOCKET")
+    return ["tmux", "-L", sock] if sock else ["tmux"]
+
+
 def _tmux(*args: str, input: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
     if not shutil.which("tmux"):
         raise TmuxError("tmux is not installed (macOS: `brew install tmux`)")
-    proc = subprocess.run(["tmux", *args], capture_output=True, text=True, input=input)
+    proc = subprocess.run([*_base(), *args], capture_output=True, text=True, input=input)
     if check and proc.returncode != 0:
         raise TmuxError(f"tmux {' '.join(args)}: {proc.stderr.strip()}")
     return proc
@@ -55,6 +63,10 @@ def kill_window(target: str) -> None:
     _tmux("kill-window", "-t", target, check=False)
 
 
+def kill_server() -> None:
+    _tmux("kill-server", check=False)
+
+
 def kill_session(session: str) -> None:
     _tmux("kill-session", "-t", f"={session}", check=False)
 
@@ -81,7 +93,7 @@ def send_keys(target: str, *keys: str) -> None:
 
 def attach_command(session: str, window: str | None = None) -> list[str]:
     target = f"={session}" if window is None else window
-    return ["tmux", "attach-session", "-t", target]
+    return [*_base(), "attach-session", "-t", target]
 
 
 def select_window(target: str) -> None:

@@ -1,7 +1,7 @@
 """How to launch each supported CLI agent and learn when it's idle.
 
-CAO infers agent state by regex-matching the terminal screen, which breaks
-whenever a CLI redesigns its TUI. Where the CLI offers lifecycle hooks
+Inferring agent state by regex-matching the terminal screen breaks whenever
+a CLI redesigns its TUI. Where the CLI offers lifecycle hooks
 (Claude Code), copse uses those instead: the agent itself reports
 ``processing`` / ``idle`` / ``waiting`` by running ``copse _hook <event>``.
 CLIs without hooks report ``unknown``, and messages to them are delivered
@@ -28,8 +28,9 @@ def copse_invocation() -> list[str]:
 
 def mcp_server_spec(agent_id: str) -> dict:
     env = {"COPSE_AGENT_ID": agent_id}
-    if "COPSE_HOME" in os.environ:
-        env["COPSE_HOME"] = os.environ["COPSE_HOME"]
+    for key in ("COPSE_HOME", "COPSE_TMUX_SOCKET"):
+        if key in os.environ:
+            env[key] = os.environ[key]
     cmd = copse_invocation()
     return {"command": cmd[0], "args": [*cmd[1:], "mcp"], "env": env}
 
@@ -50,6 +51,11 @@ class Provider:
 
     def after_launch(self, target: str) -> None:
         """Handle any startup dialogs. Default: nothing."""
+
+    def screen_state(self, screen: str) -> str | None:
+        """Best-effort read of the terminal: 'idle', 'waiting', 'busy', or
+        None when unsure. Only used to correct a status hooks left stale."""
+        return None
 
 
 class ClaudeCode(Provider):
@@ -91,6 +97,16 @@ class ClaudeCode(Provider):
         if ctx.initial_prompt:
             argv.append(ctx.initial_prompt)
         return argv
+
+    def screen_state(self, screen: str) -> str | None:
+        tail = "\n".join(screen.rstrip().splitlines()[-25:])
+        if "Do you want to proceed?" in tail or "Enter to confirm" in tail:
+            return "waiting"
+        if "esc to interrupt" in tail:
+            return "busy"
+        if "? for shortcuts" in tail or "⏵⏵" in tail or "shift+tab to cycle" in tail:
+            return "idle"
+        return None
 
     def after_launch(self, target: str) -> None:
         # A fresh worktree is a folder Claude Code hasn't seen, so it asks

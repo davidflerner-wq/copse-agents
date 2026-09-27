@@ -3,21 +3,26 @@
 *Published on PyPI as `copse-agents`; the command is `copse`. This project is
 unrelated to the Copse desktop app at copse.dev.*
 
-Run CLI coding agents (Claude Code, Codex, …) in tmux. Each one works on its own
-git branch in its own worktree, and a supervisor agent can delegate to workers,
-review their branches, and merge them back.
+A supervisor for your coding agents. copse runs Claude Code and Codex
+side by side in tmux, gives each agent its own git worktree and branch, and
+lets a supervisor agent split up work, hand it out, review each branch, and
+merge the results. Nobody edits the same files, and nothing lands without
+review.
 
-copse combines two ideas:
-
-- **From [CAO](https://github.com/awslabs/cli-agent-orchestrator):** agents in tmux
-  sessions, supervisor→worker delegation over MCP (`handoff`, `assign`,
-  `send_message`), an inbox that delivers messages when an agent goes idle, and
-  markdown agent profiles.
-- **From [Superset](https://github.com/superset-sh/superset):** each workspace is a
-  worktree on its own branch, cut from a freshly fetched base. Each repo can
-  define setup/teardown scripts, local files to copy in, and gets a port block
-  per workspace. You can diff against the base, sync, commit, push, open a PR,
-  and merge back. Removal checks for uncommitted changes and keeps the branch.
+- **Parallel agents, no collisions.** Every workspace is a separate worktree on
+  its own branch, cut from a freshly fetched base, with its own block of ports
+  for dev servers.
+- **Delegation built in.** Agents get a `copse` MCP server: `assign` work to
+  parallel workers, `handoff` a task and wait for it, `send_message` between
+  agents, then `workspace_diff`, `merge_workspace`, and `remove_workspace`.
+- **The whole branch lifecycle.** Diff against the base, sync (rebase or
+  merge), commit, push, open a PR, merge back. Removal refuses to throw away
+  uncommitted work and keeps the branch unless you say otherwise.
+- **Per-repo setup.** `.copse/config.json` defines setup and teardown scripts
+  and which local files (like `.env`) to copy into new workspaces.
+- **Reliable status.** copse knows whether each agent is working, idle, or
+  waiting for your approval from the agent's own lifecycle hooks, not by
+  scraping the terminal.
 
 ## Install
 
@@ -123,9 +128,9 @@ defines, so only point workers at repos you trust. Override the list in
   and every agent's MCP server share it. Worktrees live in
   `~/.copse/worktrees/<repo>/<branch>`, and the base branch is recorded in git
   config as `branch.<b>.copse-base`.
-- **Agent status comes from hooks, not screen-scraping.** CAO works out whether
-  Claude Code is idle by regex-matching the terminal, which breaks whenever the
-  TUI changes. copse launches Claude Code with `--settings` hooks
+- **Agent status comes from hooks, not screen-scraping.** Guessing an agent's
+  state by pattern-matching terminal output breaks whenever a CLI redesigns its
+  interface. copse launches Claude Code with `--settings` hooks
   (`SessionStart`, `UserPromptSubmit`, `Stop`, `Notification`) that call
   `copse _hook <event>`. The `Stop` hook also delivers queued messages: it
   returns `{"decision": "block", "reason": <message>}`, so Claude continues with
@@ -142,7 +147,7 @@ defines, so only point workers at repos you trust. Override the list in
 
 ```sh
 uv sync
-PYTHONPATH=tests uv run pytest
+uv run pytest
 ```
 
 ### Releasing
@@ -150,6 +155,12 @@ PYTHONPATH=tests uv run pytest
 1. Bump `version` in `pyproject.toml`, commit, and push.
 2. Create a GitHub release tagged `v<version>` (e.g. `gh release create v0.1.1 --generate-notes`).
 3. The Publish workflow tests, builds, and uploads to PyPI via Trusted Publishing.
+
+## Acknowledgements
+
+copse builds on ideas from
+[CLI Agent Orchestrator](https://github.com/awslabs/cli-agent-orchestrator) and
+[Superset](https://github.com/superset-sh/superset).
 
 ## License
 

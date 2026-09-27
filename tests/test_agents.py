@@ -94,3 +94,28 @@ def test_developer_may_run_tests_and_builds_but_not_everything():
     assert "Bash(pytest:*)" in allowed and "Bash(npm run:*)" in allowed
     assert "Bash(git push:*)" not in allowed
     assert not any(t in ("Bash", "Bash(*)") for t in allowed)
+
+
+CLAUDE_IDLE = "⏺ Done.\n\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+CLAUDE_BUSY = "✶ Thinking… (12s)\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt\n"
+CLAUDE_PROMPT = " Bash command\n   pytest\n This command requires approval\n\n Do you want to proceed?\n ❯ 1. Yes\n   4. No\n\n Esc to cancel\n"
+
+
+@pytest.mark.parametrize("screen,want", [(CLAUDE_IDLE, "idle"), (CLAUDE_BUSY, "busy"), (CLAUDE_PROMPT, "waiting"), ("", None)])
+def test_claude_screen_state(screen, want):
+    assert ClaudeCode().screen_state(screen) == want
+
+
+def test_reconcile_recovers_from_interrupted_turn(db, ws, monkeypatch):
+    # Esc-interrupted turns run no Stop hook: status says waiting, screen says idle.
+    fake_agent(db, ws, status="waiting")
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
+    a = agents.reconcile(db, db.get_agent("a1"), gap=0)
+    assert a.status == "idle" == db.get_agent("a1").status
+
+
+def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):
+    fake_agent(db, ws, status="processing")
+    screens = iter([CLAUDE_IDLE, CLAUDE_BUSY])
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: next(screens))
+    assert agents.reconcile(db, db.get_agent("a1"), gap=0).status == "processing"

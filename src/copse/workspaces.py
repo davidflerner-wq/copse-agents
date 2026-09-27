@@ -1,7 +1,7 @@
 """Workspaces: a git worktree on its own branch, plus the tmux session its
 agents run in.
 
-Lifecycle (modeled on Superset's):
+Lifecycle:
   create  -> fetch base, ``git worktree add``, record base, copy local files,
              reserve a port block, run setup
   work    -> diff vs. base, sync (rebase/merge base in), commit, push, PR,
@@ -59,8 +59,9 @@ def workspace_env(ws: Workspace) -> dict[str, str]:
         env["COPSE_BASE_BRANCH"] = ws.base_branch
     if ws.port_base is not None:
         env["COPSE_PORT_BASE"] = str(ws.port_base)
-    if "COPSE_HOME" in os.environ:
-        env["COPSE_HOME"] = os.environ["COPSE_HOME"]
+    for key in ("COPSE_HOME", "COPSE_TMUX_SOCKET"):
+        if key in os.environ:
+            env[key] = os.environ[key]
     return env
 
 

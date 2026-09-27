@@ -211,8 +211,19 @@ class Status:
 
 
 def base_ref(path: str | Path, base: str) -> str:
-    """Compare against ``origin/<base>`` when it exists, else local ``<base>``."""
-    return f"origin/{base}" if remote_branch_exists(path, base) else base
+    """The ref to compare a branch against. Local ``<base>`` unless it's
+    strictly behind ``origin/<base>`` (i.e. not pulled yet). Comparing to
+    origin while local has unpushed commits would count those commits as
+    the branch's own work."""
+    local = branch_exists(path, base)
+    if not remote_branch_exists(path, base):
+        return base
+    if not local:
+        return f"origin/{base}"
+    local_behind = ok(["merge-base", "--is-ancestor", base, f"origin/{base}"], path) and not ok(
+        ["merge-base", "--is-ancestor", f"origin/{base}", base], path
+    )
+    return f"origin/{base}" if local_behind else base
 
 
 def dirty_files(path: str | Path) -> list[str]:

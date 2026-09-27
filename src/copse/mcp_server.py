@@ -95,6 +95,7 @@ async def assign(
 
     When it finishes, its result arrives in your conversation as a message.
     Isolation works as for handoff. Use this to run several workers in parallel.
+    Pass a short descriptive branch (e.g. "feat/ls-json") to name the worker's branch.
     """
     def run() -> str:
         db = DB()
