@@ -13,6 +13,7 @@ Lifecycle (modeled on Superset's):
 from __future__ import annotations
 
 import glob
+import json
 import os
 import shutil
 import subprocess
@@ -181,10 +182,12 @@ def create(
     fetch: bool | None = None,
     start: str | None = None,
     run_setup: bool = True,
+    apply_prefix: bool = True,
 ) -> Created:
     repo_root = git.main_repo_root(repo_path)
     cfg: RepoConfig = load_repo_config(repo_root)
-    branch = git.sanitize_branch(f"{cfg.branch_prefix}{branch}")
+    prefix = cfg.branch_prefix if apply_prefix else ""
+    branch = git.sanitize_branch(f"{prefix}{branch}")
     base = base or cfg.base_branch or git.default_branch(repo_root)
     if branch == base:
         raise WorkspaceError(f"branch {branch!r} is the base branch; pick a new branch name")
@@ -217,6 +220,50 @@ def create(
     copied = _copy_local_files(repo_root, path, cfg.copy)
     setup = run_commands(cfg.setup, path, workspace_env(ws)) if run_setup and cfg.setup else None
     return Created(ws, how, start_point, copied, setup)
+
+
+def gh_pr_view(repo_path: str, number: int) -> dict:
+    """``gh pr view <number> --json headRefName,baseRefName``, parsed."""
+    args = ["gh", "pr", "view", str(number), "--json", "headRefName,baseRefName"]
+    try:
+        proc = subprocess.run(args, cwd=repo_path, capture_output=True, text=True, timeout=60)
+    except FileNotFoundError as e:
+        raise WorkspaceError("`gh` (GitHub CLI) is not installed; it's needed for --pr") from e
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise WorkspaceError(f"gh pr view {number}: {e}") from e
+    if proc.returncode != 0:
+        msg = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+        raise WorkspaceError(f"gh pr view {number} failed: {msg}")
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as e:
+        raise WorkspaceError(f"gh pr view {number}: unexpected output: {proc.stdout[:200]!r}") from e
+
+
+def create_from_pr(
+    db: DB,
+    repo_path: str,
+    number: int,
+    *,
+    run_setup: bool = True,
+) -> Created:
+    """A workspace on pull request ``number``'s head branch, based on the PR's
+    base branch. The head branch is fetched from origin and checked out
+    tracking it, under its own name (no ``branch_prefix``) so pushes update
+    the PR."""
+    info = gh_pr_view(repo_path, number)
+    head, base = info.get("headRefName"), info.get("baseRefName")
+    if not head or not base:
+        raise WorkspaceError(f"gh pr view {number}: missing headRefName/baseRefName in {info!r}")
+    repo_root = git.main_repo_root(repo_path)
+    try:
+        start = git.fetch_remote_branch(repo_root, head)
+    except git.GitError as e:
+        raise WorkspaceError(
+            f"couldn't fetch PR #{number}'s branch {head!r} from origin "
+            f"(PRs from forks aren't supported): {e}"
+        ) from e
+    return create(db, repo_path, head, base, start=start, run_setup=run_setup, apply_prefix=False)
 
 
 def adopt_root(db: DB, repo_path: str) -> Workspace:
