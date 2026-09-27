@@ -100,12 +100,51 @@ def _wrap(text: str, width: int, indent: str) -> list[str]:
                          subsequent_indent=indent) or [indent]
 
 
-def render(snap: list[dict], now: float, width: int = 80) -> list[Line]:
+MILESTONE_MARK = {"passed": ("✓", "ok"), "failed": ("✗", "bad"), "pending": ("○", "dim")}
+
+
+def render_autopilot(pilot: dict, width: int) -> list[Line]:
+    """The goal and its milestones, above the agents."""
+    if not pilot["enabled"]:
+        return [Line("Autopilot off", "dim"), Line("")]
+    if not pilot["goal"]:
+        lines = [Line("Autopilot on", "accent")]
+        lines += [Line(t, "dim") for t in _wrap("Tell the supervisor what we're building.", width, "  ")]
+        return lines + [Line("")]
+    lines = [Line(t, "accent") for t in _wrap(f"Autopilot · {pilot['goal']}", width, "")]
+    for m in pilot["milestones"]:
+        mark, style = MILESTONE_MARK.get(m["status"], ("·", "dim"))
+        wrapped = _wrap(m["title"], width - 4, "")
+        lines.append(Line(f"  {mark} {wrapped[0]}", style))
+        lines += [Line(f"    {t}", style) for t in wrapped[1:]]
+    done = sum(m["status"] == "passed" for m in pilot["milestones"])
+    total = len(pilot["milestones"])
+    state = {"done": ("goal reached", "ok"), "blocked": ("needs you", "alert"),
+             "stalled": ("stalled: needs you", "alert")}.get(pilot["state"])
+    parts = [f"{done} of {total} verified"]
+    if state:
+        parts.append(state[0])
+    elif pilot.get("workers"):
+        parts.append(f"{plural(pilot['workers'], 'worker')} on it")
+    lines += [Line(t, state[1] if state else "dim") for t in _wrap(" · ".join(parts), width, "  ")]
+    if pilot["state"] in ("blocked", "stalled") and pilot.get("note"):
+        lines += [Line(t, "dim") for t in _wrap(pilot["note"], width, "  ")]
+    u = pilot.get("usage")
+    if u and u["used"] >= 75:
+        from copse.autopilot import usage_note
+
+        lines += [Line(t, "alert") for t in _wrap(usage_note(u), width, "  ")]
+    return lines + [Line("")]
+
+
+def render(snap: list[dict], now: float, width: int = 80, pilot: dict | None = None) -> list[Line]:
     agents_ = [a for ws in snap for a in ws["agents"]]
     lines = [Line(summary(snap), "alert" if any(a["status"] == "waiting" for a in agents_) else "bold")]
     if snap:
         lines.append(Line(f"{plural(len(agents_), 'agent')} in {plural(len(snap), 'workspace')}", "dim"))
     lines.append(Line(""))
+    if pilot:
+        lines += render_autopilot(pilot, width)
     if not snap:
         for t in _wrap("Nothing running yet. Start an agent with `copse new <branch>`.", width, ""):
             lines.append(Line(t, "dim"))
@@ -138,13 +177,15 @@ def render(snap: list[dict], now: float, width: int = 80) -> list[Line]:
 
 # -- --once ------------------------------------------------------------------
 
-ANSI = {"bold": "1", "dim": "2", "busy": "36", "ok": "32", "alert": "1;33", "bad": "31"}
+ANSI = {"bold": "1", "dim": "2", "busy": "36", "ok": "32", "alert": "1;33", "bad": "31",
+        "accent": "1;35"}
 
 
 def print_once(db: DB, repo_root: str | None, color: bool) -> str:
     out = []
     width = shutil.get_terminal_size().columns - 1
-    for line in render(view.snapshot(db, repo_root), time.time(), width):
+    for line in render(view.snapshot(db, repo_root), time.time(), width,
+                       view.autopilot_entry(db, repo_root)):
         code = ANSI.get(line.style) if color else None
         out.append(f"\033[{code}m{line.text}\033[0m" if code else line.text)
     return "\n".join(out)
@@ -277,7 +318,8 @@ def _loop(stdscr, repo_root: str | None) -> None:
     while True:
         h, w = stdscr.getmaxyx()
         if stale:
-            lines = render(view.snapshot(db, repo_root), time.time(), w - 1)
+            lines = render(view.snapshot(db, repo_root), time.time(), w - 1,
+                           view.autopilot_entry(db, repo_root))
             stale = False
         rows = [i for i, ln in enumerate(lines) if ln.agent]
         selected = max(0, min(selected, len(rows) - 1))

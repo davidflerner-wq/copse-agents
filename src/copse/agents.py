@@ -33,6 +33,15 @@ When you have finished:
    supervisor should check.
 """
 
+REVIEW_FOOTER = """
+
+---
+You are running as a copse reviewer (agent id {agent_id}) on branch `{branch}`.
+Don't edit files. When you have finished, call the `submit_review` tool from
+the `copse` MCP server: approved=true only if you'd merge it as is, with a
+summary of your findings (most severe first, each with file:line and a fix).
+"""
+
 
 class AgentError(RuntimeError):
     pass
@@ -45,8 +54,8 @@ class StillRunning(AgentError):
 # Modes whose workers must finish with report_result. A handoff whose caller
 # stopped waiting becomes "handoff_detached": its result is then forwarded to
 # the caller as a message, like an assign.
-REPORTING_MODES = ("handoff", "handoff_detached", "assign")
-FORWARDING_MODES = ("handoff_detached", "assign")
+REPORTING_MODES = ("handoff", "handoff_detached", "assign", "review")
+FORWARDING_MODES = ("handoff_detached", "assign", "review")
 
 
 def new_id() -> str:
@@ -68,13 +77,26 @@ def spawn(
     mode: str = "interactive",
     watch_pane: bool = False,
     background_setup: bool = False,
+    done_when: str | None = None,
+    autopilot: bool = False,
 ) -> Agent:
+    """Start an agent in ``ws``. Workers (handoff/assign) given a ``done_when``
+    finish line run it as a Claude Code ``/goal``. With ``autopilot``, the
+    agent is a session root that drives toward a goal (see copse.autopilot)."""
+    from copse import autopilot as pilot
+
     profile = load_profile(profile_name, ws.repo_root)
     provider = get_provider(provider_name or profile.provider)
     agent_id = new_id()
 
     if prompt and mode in ("handoff", "assign"):
+        if done_when:
+            prompt += f"\n\nFinish line: {done_when.strip()}"
         prompt += WORKER_FOOTER.format(agent_id=agent_id, branch=ws.branch)
+        if done_when and provider.name == "claude":
+            prompt = pilot.worker_goal(prompt, done_when, ws.branch) or prompt
+    elif prompt and mode == "review":
+        prompt += REVIEW_FOOTER.format(agent_id=agent_id, branch=ws.branch)
 
     agent = Agent(
         id=agent_id, workspace_id=ws.id, profile=profile.name, provider=provider.name,
@@ -82,6 +104,11 @@ def spawn(
         result=None, created_at=time.time(), task=prompt,
     )
     db.add_agent(agent)
+    if autopilot:
+        plan = pilot.enable(db, agent_id, ws)
+        if plan and not prompt:
+            prompt = agent.task = pilot.kickoff(plan)
+            db.update_agent(agent_id, task=prompt)
     try:
         _launch(db, agent, ws, prompt=prompt, resume=None, watch_pane=watch_pane,
                 background_setup=background_setup)
@@ -110,8 +137,21 @@ def _pause_when_done(agent_id: str, argv: list[str]) -> list[str]:
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             resume: str | None, watch_pane: bool, background_setup: bool = False) -> None:
     """Start (or restart) ``agent``'s CLI in a new tmux window of ``ws``."""
+    from dataclasses import replace
+
+    from copse import autopilot as pilot
+    from copse.config import load_repo_config
+
     profile = load_profile(agent.profile, ws.repo_root)
+    if db.get_autopilot(agent.id):
+        profile = replace(profile, prompt=profile.prompt + pilot.guide(load_repo_config(ws.repo_root)))
     provider = get_provider(agent.provider)
+    if provider.prompt_after_ready:
+        # Typed in once it's ready, after any warm-up message.
+        for text in ((provider.warmup(profile) if not resume else None), prompt):
+            if text:
+                db.enqueue(agent.id, text, None)
+        prompt = None
     # Recorded before launching: the agent's hooks may fire within milliseconds.
     status = "processing" if prompt else "starting"
     if not provider.uses_hooks:
@@ -119,7 +159,7 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     db.set_status(agent.id, status)
     agent.status = status
 
-    argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume))
+    argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path))
     if agent.mode == "interactive":
         argv = _pause_when_done(agent.id, argv)
     tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
@@ -155,6 +195,15 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         )
     else:
         provider.after_launch(target)
+        ready(db, agent.id)
+
+
+def ready(db: DB, agent_id: str) -> None:
+    """after_launch saw the CLI's input box. For CLIs with no hook that says
+    so, this is when it's ready (and when queued messages can go in)."""
+    agent = db.get_agent(agent_id)
+    if agent and not get_provider(agent.provider).announces_start:
+        handle_hook(db, agent_id, "session-start", {})
 
 
 # -- sessions: pause and continue ----------------------------------------------
@@ -231,7 +280,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True) -> list[Agent]:
         if ws is None or not os.path.isdir(ws.path):
             continue
         provider = get_provider(a.provider)
-        ref = a.session_ref if provider.name == "claude" and a.session_ref else None
+        ref = a.session_ref if provider.name in ("claude", "antigravity") and a.session_ref else None
         if ref and not provider.can_resume(ref):
             ref = None  # nothing was ever said in it: start that agent fresh
         prompt = None if ref else ((a.task + RESUME_NOTE) if a.task else None)
@@ -400,6 +449,17 @@ def collect(db: DB, parent_id: str | None, worker_id: str) -> None:
         db.drop_pending(parent_id, worker_id)
 
 
+def close_later(agent_id: str, delay: float = 5.0) -> None:
+    """Stop an agent shortly, from a detached process: used by an agent's own
+    tool call, which must return before its CLI goes away."""
+    from copse.providers import copse_invocation
+
+    subprocess.Popen(
+        [*copse_invocation(), "_close", agent_id, "--delay", str(delay)],
+        start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
 def kill(db: DB, agent_id: str) -> None:
     agent = get(db, agent_id)
     if agent.tmux_window:
@@ -425,10 +485,19 @@ def delegate(
     *,
     isolate: bool = True,
     branch: str | None = None,
+    done_when: str | None = None,
 ) -> tuple[Agent, Workspace]:
     """Start a worker. With ``isolate``, the worker gets a new worktree whose
     branch starts from the caller's current branch, so it sees the caller's
-    committed work, and nobody edits the same files."""
+    committed work, and nobody edits the same files. Refuses beyond the
+    repo's ``max_agents`` workers running at once."""
+    from copse import autopilot as pilot
+    from copse.config import load_repo_config
+
+    try:
+        pilot.check_capacity(db, caller.id if caller else None, load_repo_config(caller_ws.repo_root))
+    except pilot.AutopilotError as e:
+        raise AgentError(str(e)) from e
     if isolate:
         caller_ws = workspaces.refresh_branch(db, caller_ws)
         base = caller_ws.branch
@@ -443,9 +512,26 @@ def delegate(
     else:
         ws = caller_ws
     agent = spawn(
-        db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode
+        db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
+        done_when=done_when,
     )
     return agent, ws
+
+
+def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str,
+                   focus: str | None = None, checks: list[str] | None = None) -> Agent:
+    """Start a reviewer in a worker's workspace. Its verdict is recorded for
+    the merge gate and forwarded to ``caller`` as a message."""
+    base = ws.base_branch or "the base branch"
+    task = (f"Review the changes on branch `{ws.branch}` (workspace {ws.id}) against `{base}`: "
+            f"run `git diff $(git merge-base HEAD {base})` or use the copse workspace_diff tool. "
+            "Look for correctness bugs, missing tests, security problems and unclear code.")
+    if checks:
+        task += " Also run: " + "; ".join(f"`{c}`" for c in checks) + "."
+    if focus:
+        task += f"\n\nFocus: {focus}"
+    return spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
+                 mode="review")
 
 
 # -- hook entry point --------------------------------------------------------
@@ -471,12 +557,20 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             from copse.providers import copse_invocation
 
             subprocess.Popen(
-                [*copse_invocation(), "_flush", agent_id, "--delay", "3"],
+                [*copse_invocation(), "_flush", agent_id, "--delay",
+                 str(get_provider(agent.provider).ready_delay)],
                 start_new_session=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
     elif event == "prompt-submit":
         db.set_status(agent_id, "processing")
+        # Queued messages (worker results) are typed into an idle chat too;
+        # only a prompt copse didn't deliver is the user speaking.
+        prompt = str(payload.get("prompt", ""))
+        if agent.mode == "interactive" and not db.recently_delivered(agent_id, prompt):
+            from copse import autopilot as pilot
+
+            pilot.user_spoke(db, agent)
     elif event == "notification":
         text = str(payload.get("message", "")).lower()
         if "permission" in text or "approval" in text:
@@ -491,13 +585,33 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         needs_report = agent.mode in REPORTING_MODES and agent.result is None
         if needs_report and not payload.get("stop_hook_active"):
             db.set_status(agent_id, "processing")
+            if agent.mode == "review":
+                return {
+                    "decision": "block",
+                    "reason": "You haven't called the copse `submit_review` tool yet. "
+                    "Call it now with your verdict and findings.",
+                }
             return {
                 "decision": "block",
                 "reason": "You haven't called the copse `report_result` tool yet. "
                 "If your task is finished, commit your work and call it now. "
                 "If you are blocked, call it with a description of what's blocking you.",
             }
+        if agent.mode == "interactive":
+            from copse import autopilot as pilot
+
+            decision = pilot.on_stop(db, agent, payload)
+            if decision:
+                db.set_status(agent_id, "processing")
+                return decision
         db.set_status(agent_id, "idle")
+    elif event == "stop-failure":
+        # The turn ended on an API error; no Stop hook follows.
+        db.set_status(agent_id, "idle")
+        if "rate_limit" in json.dumps(payload):
+            from copse import autopilot as pilot
+
+            pilot.limit_reached(db, agent)
     return None
 
 

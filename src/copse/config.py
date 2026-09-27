@@ -46,6 +46,15 @@ class RepoConfig:
     branch_prefix: str = ""
     default_agent: str = "developer"
     fetch: bool = True
+    # Autopilot and merge gates.
+    autopilot: bool = True             # `copse` starts the supervisor with autopilot on
+    checks: list[str] = field(default_factory=list)  # must pass in a branch before it merges
+    review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
+    reviewer: str = "reviewer"         # agent profile that reviews branches
+    pre_commit: bool = True            # run pre-commit (the framework) over a branch before merging
+    max_agents: int = 4                # workers running at once per session; 0 means no cap
+    check_timeout: int = 900           # seconds allowed for each check command
+    usage_limit: int = 90              # autopilot stops pushing on at this % of the Claude usage limit
 
 
 def _merge_commands(shared: list[str], local: object) -> list[str]:
@@ -74,10 +83,11 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
     local = _read_json(base / LOCAL_CONFIG_FILE)
 
     cfg = RepoConfig()
-    for key in ("setup", "teardown", "copy"):
+    for key in ("setup", "teardown", "copy", "checks"):
         merged = _merge_commands(list(shared.get(key, [])), local.get(key))
         setattr(cfg, key, merged)
-    for key in ("base_branch", "branch_prefix", "default_agent", "fetch"):
+    for key in ("base_branch", "branch_prefix", "default_agent", "fetch", "autopilot", "review",
+                "reviewer", "pre_commit", "max_agents", "check_timeout", "usage_limit"):
         if key in local:
             setattr(cfg, key, local[key])
         elif key in shared:
@@ -93,6 +103,7 @@ TEMPLATE = {
     "branch_prefix": "",
     "default_agent": "developer",
     "fetch": True,
+    "checks": [],
 }
 
 

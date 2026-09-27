@@ -30,4 +30,5 @@ def test_stdio_server_starts_and_lists_tools(tmp_path):
     assert reply, proc.stderr.read()
     names = {t["name"] for t in reply["result"]["tools"]}
     assert {"handoff", "assign", "send_message", "report_result", "workspace_diff",
-            "merge_workspace", "remove_workspace", "wait_for_worker"} <= names
+            "merge_workspace", "remove_workspace", "wait_for_worker", "request_review",
+            "submit_review", "set_goal", "get_progress", "check_milestone", "need_user"} <= names

@@ -97,7 +97,7 @@ def new(
     pr: Optional[int] = typer.Option(None, "--pr", help="Check out this GitHub PR's head branch (via `gh`), based on the PR's base branch. Don't also pass BRANCH or --base; the head branch is always fetched."),
     agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Agent profile to start (default from config; 'none' for no agent)."),
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p", help="First message for the agent."),
-    provider: Optional[str] = typer.Option(None, help="Override the profile's provider (claude, codex, shell)."),
+    provider: Optional[str] = typer.Option(None, help="Override the profile's provider (claude, codex, antigravity, shell)."),
     no_fetch: bool = typer.Option(False, "--no-fetch", help="Don't fetch the base branch first."),
     no_setup: bool = typer.Option(False, "--no-setup", help="Skip setup commands."),
     attach: bool = typer.Option(False, "--attach", help="Attach to the tmux session afterward."),
@@ -152,21 +152,39 @@ def start(
     provider: Optional[str] = typer.Option(None),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the copse watch dashboard in a pane under the agent."),
+    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="The supervisor drives toward a goal until it's verified (default: on, or `autopilot` in .copse/config.json)."),
 ) -> None:
     """Start a fresh chat with an agent here (default: a supervisor), with the
     dashboard of every agent in this repo beneath it. A session still running
     here is paused first; `copse continue` brings paused sessions back."""
     from copse import sessions
+    from copse.config import load_repo_config
 
     db = DB()
     ws = _here_or_scratch(db, reuse_scratch=False)
     _pause_running(db, ws)
     sessions.enforce(db, ws.repo_root)
+    if autopilot is None:
+        autopilot = agent == "supervisor" and _run(load_repo_config, ws.repo_root).autopilot
     a = _run(agents.spawn, db, ws, agent, prompt=prompt, provider_name=provider,
-             watch_pane=watch, background_setup=True)
+             watch_pane=watch, background_setup=True, autopilot=autopilot)
     typer.echo(f"✓ {a.profile} agent {a.id} in {ws.id} ({ws.branch})")
+    if autopilot:
+        _say_autopilot(db, a.id)
     if attach:
         _attach(ws, a.tmux_window)
+
+
+def _say_autopilot(db: DB, root_id: str) -> None:
+    from copse import autopilot as pilot
+
+    ap = db.get_autopilot(root_id)
+    if ap and ap.goal:
+        done, total = pilot.counts(db, root_id)
+        typer.echo(f"  autopilot: {ap.goal} ({done} of {total} milestones verified)")
+    else:
+        typer.echo("  autopilot: on. Tell the supervisor what we're building.")
+    typer.echo("  `copse autopilot off` hands the wheel back to you.")
 
 
 def _pause_running(db: DB, ws: Workspace) -> None:
@@ -350,13 +368,81 @@ def transfer(
 def default(
     ctx: typer.Context,
     cont: bool = typer.Option(False, "--continue", "-c", help="Pick up the most recent paused session instead of starting fresh."),
+    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="Start with autopilot on or off (default: on, or `autopilot` in .copse/config.json)."),
+    provider: Optional[str] = typer.Option(None, "--provider", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity)."),
 ) -> None:
     """Bare `copse`: a fresh supervisor chat here (a scratch session outside git)."""
     if ctx.invoked_subcommand is None:
         if cont:
             continue_cmd(session_id=None, attach=True)
         else:
-            start(agent="supervisor", prompt=None, provider=None, attach=True, watch=True)
+            start(agent="supervisor", prompt=None, provider=provider, attach=True, watch=True,
+                  autopilot=autopilot)
+
+
+def _session_root(db: DB) -> str:
+    """This repo's current session: the one running here, else the newest
+    paused one."""
+    from copse import sessions
+
+    cwd = os.getcwd()
+    try:
+        ws = workspaces.adopt_root(db, cwd)
+    except git.GitError:
+        from copse import scratch
+
+        ws = scratch.for_origin(db, cwd) or workspaces.current(db)
+        if ws is None:
+            _fail("no copse session here")
+    live = agents.find_running(db, ws, "supervisor")
+    if live:
+        return live.id
+    found = sessions.paused(db, ws.repo_root)
+    if found:
+        return found[0].root.id
+    _fail("no copse session here. Run `copse` to start one.")
+    raise AssertionError
+
+
+@app.command("autopilot")
+def autopilot_cmd(
+    action: Optional[str] = typer.Argument(None, help="on, off, or check (run the milestone checks now). Omit to show progress."),
+) -> None:
+    """Show the goal's progress, or turn autopilot on or off.
+
+    With autopilot on, the supervisor keeps working until every milestone's
+    check passes or it needs you."""
+    from copse import autopilot as pilot
+
+    db = DB()
+    root_id = _session_root(db)
+    root = db.get_agent(root_id)
+    if action in ("on", "off"):
+        on = action == "on"
+        pilot.set_enabled(db, root_id, on)
+        if root and agents.is_alive(root):
+            note = ("Autopilot is on again: keep driving toward the goal (get_progress shows where it stands)."
+                    if on else "Autopilot is now off: stop driving and wait for the user's instructions.")
+            try:
+                agents.send_message(db, root_id, f"[copse autopilot] {note}")
+            except agents.AgentError:
+                pass
+        typer.echo(f"autopilot {action} for session {root_id}")
+        if on and not (root and agents.is_alive(root)):
+            typer.echo("It takes effect when the session runs: `copse continue`.")
+        return
+    if action == "check":
+        ws = db.get_workspace(root.workspace_id) if root else None
+        if ws is None or db.get_autopilot(root_id) is None:
+            _fail("autopilot isn't set up for this session")
+        typer.echo(_run(pilot.check_milestones, db, root_id, ws))
+        return
+    if action:
+        _fail(f"unknown action {action!r}: use on, off or check")
+    typer.echo(pilot.progress(db, root_id))
+    u = pilot.usage()
+    if u:
+        typer.echo(pilot.usage_note(u))
 
 
 @app.command("ls")
@@ -618,6 +704,11 @@ def mcp() -> None:
 
 @app.command("_hook", hidden=True)
 def hook(event: str) -> None:
+    if event.startswith("agy-"):
+        from copse import antigravity
+
+        typer.echo(antigravity.hook_main(DB(), event, sys.stdin.read()))
+        return
     agent_id = os.environ.get("COPSE_AGENT_ID")
     if not agent_id:
         return
@@ -630,9 +721,11 @@ def hook(event: str) -> None:
 def after_launch_cmd(agent_id: str) -> None:
     from copse.providers import get_provider
 
-    a = DB().get_agent(agent_id)
+    db = DB()
+    a = db.get_agent(agent_id)
     if a and a.tmux_window:
         get_provider(a.provider).after_launch(a.tmux_window)
+        agents.ready(db, agent_id)
 
 
 @app.command("_ended", hidden=True)
@@ -642,6 +735,24 @@ def ended_cmd(agent_id: str) -> None:
     # Runs inside the window it's about to close; don't die with it.
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     agents.ended(DB(), agent_id)
+
+
+@app.command("_close", hidden=True)
+def close_cmd(agent_id: str, delay: float = typer.Option(0.0)) -> None:
+    time.sleep(delay)
+    try:
+        agents.kill(DB(), agent_id)
+    except agents.AgentError:
+        pass
+
+
+@app.command("_statusline", hidden=True)
+def statusline_cmd() -> None:
+    from copse.providers import status_line
+
+    out = status_line(sys.stdin.read())
+    if out:
+        typer.echo(out)
 
 
 @app.command("_flush", hidden=True)

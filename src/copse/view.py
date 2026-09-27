@@ -51,3 +51,30 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False) -> dict:
 
 def snapshot(db: DB, repo_root: str | None) -> list[dict]:
     return [workspace_entry(db, ws, detail=True) for ws in db.find_workspaces(repo_root)]
+
+
+def autopilot_entry(db: DB, repo_root: str | None) -> dict | None:
+    """The goal and milestones of the newest running autopilot session in
+    ``repo_root``, for the sidebar."""
+    from copse import autopilot
+
+    if not repo_root:
+        return None
+    roots = [a for ws in db.find_workspaces(repo_root) for a in db.list_agents(ws.id)
+             if a.mode == "interactive" and a.status not in ("paused", "done")
+             and db.get_autopilot(a.id) and agents.is_alive(a)]
+    if not roots:
+        return None
+    root = max(roots, key=lambda a: a.created_at)
+    ap = db.get_autopilot(root.id)
+    assert ap is not None
+    return {
+        "enabled": bool(ap.enabled),
+        "goal": ap.goal,
+        "state": ap.state,
+        "note": ap.note,
+        "milestones": [{"position": m.position, "title": m.title, "status": m.status,
+                        "check": m.check_cmd} for m in db.milestones(root.id)],
+        "usage": autopilot.usage(),
+        "workers": len(autopilot.active_workers(db, root.id)),
+    }

@@ -74,6 +74,49 @@ copse pr fix-login                          # push + gh pr create
 copse rm fix-login                          # keeps the branch
 ```
 
+## Autopilot
+
+`copse` starts the supervisor with autopilot on. Tell it what we're building,
+or put the goal in `.copse/goals.md`, and it works like a project manager:
+
+1. **Goal and milestones.** The goal is split into milestones, and each one has
+   a check command that copse runs itself. A milestone is done only when its
+   check exits 0, so progress is verified, not just claimed.
+2. **Workers in parallel.** The supervisor splits each milestone into tasks
+   and starts workers on their own branches, up to `max_agents` at once.
+   Claude workers run the task as a Claude Code `/goal` with a finish line, so
+   they keep going until it's met.
+3. **Gated merges.** A branch merges only when everything is committed, a
+   reviewer agent has approved that exact commit, your pre-commit hooks pass,
+   and your `checks` pass. copse runs these itself before `merge_workspace`.
+4. **It keeps going.** If the supervisor stops while milestones are still
+   unverified and no worker is running, copse tells it to continue. It stops
+   when every check passes, when it needs a decision from you, after three
+   reminders with no progress, or when your Claude usage nears its limit.
+
+The sidebar shows the goal, each milestone (✓ verified, ✗ failing, ○ not
+checked yet), and anything that needs you.
+
+```markdown
+<!-- .copse/goals.md -->
+# Settings page
+
+## Settings API
+check: uv run pytest tests/test_settings_api.py -q
+
+## Settings UI
+check: npm test -- settings
+```
+
+`copse autopilot` shows progress, `copse autopilot check` runs the checks
+now, and `copse autopilot off` (or `on`) hands the wheel back (or takes it
+again). `copse --no-autopilot`, or `"autopilot": false` in the repo config,
+starts without it.
+
+To track your Claude usage, copse gives the agents it launches a status line.
+It records the usage percentage Claude Code reports, then prints whatever
+your own status line prints, so what you see doesn't change.
+
 ## Commands
 
 | | |
@@ -82,7 +125,8 @@ copse rm fix-login                          # keeps the branch
 | `copse` | a fresh supervisor chat here, dashboard alongside |
 | `copse continue [ID]` / `copse -c` | resume a paused session (default: the most recent) |
 | `copse sessions` / `copse prune` | list paused sessions / apply the retention rules now |
-| `copse start [-a PROFILE] [-p PROMPT] [--no-watch]` | the same, with options |
+| `copse start [-a PROFILE] [-p PROMPT] [--no-watch] [--no-autopilot]` | the same, with options |
+| `copse autopilot [on\|off\|check]` | the goal's progress; turn autopilot on or off; run the checks now |
 | `copse transfer [REPO] [--from SESSION] [-b BRANCH]` | move a scratch session's work into a real repo |
 | `copse ls [--all]` | workspaces and agents |
 | `copse watch [--all] [--once]` | the dashboard on its own (the same view as the sidebar): enter attaches, `p` peeks |
@@ -107,9 +151,24 @@ With no `WS` argument, commands act on the workspace you're in.
   "base_branch": "main",
   "branch_prefix": "",
   "default_agent": "developer",
-  "fetch": true
+  "fetch": true,
+  "checks": ["uv run pytest -q"],
+  "max_agents": 4
 }
 ```
+
+The last two are for autopilot and merge gates:
+
+| Key | Default | |
+|---|---|---|
+| `autopilot` | `true` | start the supervisor with autopilot on |
+| `checks` | `[]` | commands that must pass in a worker's branch before it merges |
+| `review` | only under autopilot | require a reviewer's approval before merging |
+| `reviewer` | `"reviewer"` | the agent profile that reviews (a Codex profile gives a second model's view) |
+| `pre_commit` | `true` | run [pre-commit](https://pre-commit.com) over the branch, if the repo uses it |
+| `max_agents` | `4` | workers running at once per session (`0`: no cap) |
+| `check_timeout` | `900` | seconds each check may take |
+| `usage_limit` | `90` | autopilot stops pushing on at this % of your Claude usage limit |
 
 `.copse/config.local.json` is gitignored and overrides keys for you only. For
 `setup`/`teardown` it can also give `{"before": [...], "after": [...]}` to run
@@ -130,7 +189,7 @@ Markdown files with frontmatter. copse looks in `.copse/agents/`, then
 ---
 name: frontend
 description: React/TypeScript specialist
-provider: claude          # claude | codex | shell
+provider: claude          # claude | codex | antigravity | shell
 model: sonnet             # optional
 permission_mode: acceptEdits   # optional, Claude Code only
 ---
@@ -147,6 +206,38 @@ commands. Note that `npm run`, `make`, and `uv run` execute whatever the repo
 defines, so only point workers at repos you trust. Override the list in
 `.copse/agents/developer.md`.
 
+## Google Antigravity
+
+copse runs Google Antigravity's terminal agent, `agy`, as well as Claude Code and
+Codex. Install it and sign in once:
+
+```sh
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+agy        # sign in with your Google account, then quit
+```
+
+Then run the whole session on it with `copse --provider antigravity`, or mix models:
+give a profile `provider: antigravity` (for example a `gemini-reviewer` for a second
+model's review) and the supervisor can hand it tasks.
+
+`agy` has no command-line options for hooks, MCP servers or instructions, so copse
+adds three files to the checkout's `.agents/` folder: `mcp_config.json` (copse's tools),
+`hooks.json` (status, messages, autopilot) and `rules/copse.md`. They're listed in
+`.git/info/exclude`, so they never show up in `git status`. copse adds to these files if
+you already have them, and won't change one that's committed. Each agent's first
+message is a short warm-up with its instructions, because `agy` connects MCP servers
+only once a conversation has started.
+
+**Permissions.** `agy` doesn't let hooks approve shell commands, so an Antigravity
+agent asks before running anything your own `agy` settings don't already allow, and
+the sidebar shows it as needing you. To let agents run tests and commit without asking,
+add rules to `~/.gemini/antigravity-cli/settings.json`, for example:
+
+```json
+{ "permissions": { "allow": ["command(uv run pytest)", "command(git status)",
+                               "command(git diff)", "command(git add)", "command(git commit)"] } }
+```
+
 ## How it works
 
 - **Look:** copse's tmux sessions get their own dark purple theme and mouse
@@ -159,7 +250,7 @@ defines, so only point workers at repos you trust. Override the list in
 - **Agent status comes from hooks, not screen-scraping.** Guessing an agent's
   state by pattern-matching terminal output breaks whenever a CLI redesigns its
   interface. copse launches Claude Code with `--settings` hooks
-  (`SessionStart`, `UserPromptSubmit`, `Stop`, `Notification`) that call
+  (`SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure`, `Notification`) that call
   `copse _hook <event>`. The `Stop` hook also delivers queued messages: it
   returns `{"decision": "block", "reason": <message>}`, so Claude continues with
   the message as its next instruction and nothing is typed into a busy terminal.

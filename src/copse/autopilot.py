@@ -1,0 +1,446 @@
+"""Autopilot: the supervisor as a project manager that keeps going.
+
+A session with autopilot on has a goal broken into milestones. Each milestone
+has a check command that copse runs itself (exit 0 means done), so progress
+is verified rather than claimed. The supervisor splits milestones into tasks,
+hands them to workers, gets their branches reviewed and merged (through the
+merge gates in ``gates``), and re-runs the checks.
+
+When the supervisor stops while milestones are still unverified and no worker
+is running, its Stop hook tells it to keep going. It stops pushing when:
+- every milestone's check passes (the goal is done),
+- the supervisor calls ``need_user`` (blocked on a decision only the user can
+  make), until the user next types something,
+- it has nudged MAX_NUDGES times in a row with no progress (stalled), or
+- Claude usage is near its limit.
+
+Goals come from the chat (the supervisor calls ``set_goal``) or from
+``.copse/goals.md``, loaded when the session starts:
+
+    # Settings page
+
+    Users can change their name and email.
+
+    ## Settings API
+    check: uv run pytest tests/test_settings_api.py -q
+
+    ## Settings UI
+    check: npm test -- settings
+    The form saves and shows errors inline.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+from copse.config import CONFIG_DIR, RepoConfig, copse_home, load_repo_config
+from copse.db import DB, Agent, Autopilot, Milestone, Workspace
+
+GOALS_FILE = "goals.md"
+MAX_NUDGES = 3
+MAX_GOAL_CHARS = 4000        # Claude Code's limit for a /goal condition
+OUTPUT_TAIL_LINES = 30
+USAGE_FRESH_SECONDS = 15 * 60
+
+GUIDE = """
+
+## Autopilot is on
+
+You are this project's manager. Drive the goal to completion without waiting
+to be asked each step.
+
+- The goal: if none is set yet, ask the user what we're building. Turn the
+  answer into a goal with 2-6 milestones, each with a `check` command copse can
+  run from the root of this checkout that exits 0 only when that milestone is
+  done (e.g. `uv run pytest tests/test_settings.py -q`). Record it with
+  `set_goal`, tell the user the plan in a few lines, then start. If
+  `.copse/goals.md` exists, copse has already loaded it: call `get_progress`.
+- Work on the first unverified milestone. Split it into independent tasks and
+  `assign` them to workers in parallel (at most {max_agents} at once). Give
+  every task a `done_when` finish line the worker can verify itself.
+- When a worker reports, call `request_review` on its workspace. When the
+  review approves, `merge_workspace` it (copse runs the checks and pre-commit
+  hooks and requires the approval first), then `remove_workspace`. When the
+  review requests changes, `send_message` the findings to the worker, and
+  request another review when it reports again.
+- After merging, call `check_milestone`. Only copse's check marks a milestone
+  done: never claim one is done yourself.
+- Keep going until every milestone passes. If you stop early, copse will ask
+  you to continue. Stop only when you are blocked on something only the user
+  can decide: call `need_user` with the question, then ask it.
+- When a milestone passes, tell the user in one line.
+- If a message says autopilot is off, stop driving: wait for the user's
+  instructions.
+"""
+
+KICKOFF = (
+    "[copse autopilot] The goal in .copse/goals.md is loaded: {goal} ({n} milestones). "
+    "Call get_progress, tell me your plan in a few lines, then start working toward it."
+)
+
+
+class AutopilotError(RuntimeError):
+    pass
+
+
+# -- goals.md ---------------------------------------------------------------
+
+
+@dataclass
+class Plan:
+    goal: str
+    detail: str | None
+    milestones: list[tuple[str, str | None, str | None]]   # (title, check, detail)
+
+
+def parse_goals(text: str) -> Plan | None:
+    """``# Goal`` then ``## Milestone`` sections, each with an optional
+    ``check: <command>`` line. Returns None when there's no goal heading."""
+    goal, detail_lines = None, []
+    milestones: list[list] = []
+    for line in text.splitlines():
+        if m := re.match(r"^#\s+(.+?)\s*$", line):
+            if goal is None:
+                goal = m.group(1)
+            continue
+        if m := re.match(r"^##\s+(.+?)\s*$", line):
+            milestones.append([m.group(1), None, []])
+            continue
+        if milestones and milestones[-1][1] is None and (
+            m := re.match(r"^\s*check:\s*`?(.+?)`?\s*$", line, re.I)
+        ):
+            milestones[-1][1] = m.group(1)
+            continue
+        (milestones[-1][2] if milestones else detail_lines).append(line)
+    if not goal:
+        return None
+    clean = lambda lines: "\n".join(lines).strip() or None  # noqa: E731
+    return Plan(goal, clean(detail_lines), [(t, c, clean(d)) for t, c, d in milestones])
+
+
+def load_goals_file(root: str) -> Plan | None:
+    path = Path(root) / CONFIG_DIR / GOALS_FILE
+    if not path.is_file():
+        return None
+    return parse_goals(path.read_text(encoding="utf-8"))
+
+
+# -- sessions ----------------------------------------------------------------
+
+
+def root_of(db: DB, agent_id: str) -> str:
+    """The session an agent belongs to: its topmost ancestor."""
+    seen = set()
+    agent = db.get_agent(agent_id)
+    while agent and agent.parent_id and agent.parent_id not in seen:
+        seen.add(agent.id)
+        parent = db.get_agent(agent.parent_id)
+        if parent is None:
+            break
+        agent = parent
+    return agent.id if agent else agent_id
+
+
+def for_agent(db: DB, agent_id: str) -> Autopilot | None:
+    """The autopilot of the session ``agent_id`` belongs to, if it has one."""
+    return db.get_autopilot(root_of(db, agent_id))
+
+
+def enable(db: DB, root_id: str, ws: Workspace) -> Plan | None:
+    """Turn autopilot on for a new session. Loads ``.copse/goals.md`` if the
+    checkout has one, and returns it."""
+    db.add_autopilot(root_id)
+    plan = load_goals_file(ws.path)
+    if plan:
+        set_goal(db, root_id, plan.goal, plan.milestones, plan.detail)
+    return plan
+
+
+def set_enabled(db: DB, root_id: str, on: bool) -> None:
+    db.add_autopilot(root_id, enabled=on)
+    fields: dict[str, object] = {"enabled": int(on), "nudges": 0}
+    ap = db.get_autopilot(root_id)
+    if on and ap and ap.state in ("blocked", "stalled"):
+        fields.update(state="running", note=None)
+    db.update_autopilot(root_id, **fields)
+
+
+def set_goal(db: DB, root_id: str, goal: str,
+             milestones: list[tuple[str, str | None, str | None]], detail: str | None = None) -> None:
+    """Record the goal and its milestones. A milestone that keeps its title and
+    check keeps its last result."""
+    if not goal.strip():
+        raise AutopilotError("the goal needs a title")
+    if not milestones:
+        raise AutopilotError("give at least one milestone")
+    old = {(m.title, m.check_cmd): m for m in db.milestones(root_id)}
+    db.update_autopilot(root_id, goal=goal.strip(), detail=detail, state="running", note=None)
+    db.set_milestones(root_id, milestones)
+    for m in db.milestones(root_id):
+        prev = old.get((m.title, m.check_cmd))
+        if prev and prev.status != "pending":
+            db.record_check(m.id, prev.status == "passed", prev.output or "")
+    db.bump_progress(root_id)
+
+
+def need_user(db: DB, root_id: str, question: str) -> None:
+    db.update_autopilot(root_id, state="blocked", note=question.strip()[:500], nudges=0)
+
+
+def user_spoke(db: DB, agent: Agent) -> None:
+    """The user typed into the supervisor's chat: whatever blocked autopilot
+    is theirs to have answered, so it may drive again."""
+    ap = db.get_autopilot(agent.id)
+    if ap and ap.state in ("blocked", "stalled"):
+        db.update_autopilot(agent.id, state="running", note=None, nudges=0)
+    elif ap:
+        db.update_autopilot(agent.id, nudges=0)
+
+
+# -- checks ------------------------------------------------------------------
+
+
+def tail(text: str, lines: int = OUTPUT_TAIL_LINES) -> str:
+    out = text.rstrip().splitlines()
+    return "\n".join(out[-lines:])
+
+
+def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int) -> tuple[bool, str]:
+    """Run one check command. Returns (passed, the tail of its output)."""
+    try:
+        proc = subprocess.run(
+            cmd, shell=True, cwd=cwd, env={**os.environ, **env}, capture_output=True,
+            text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"$ {cmd}\n(timed out after {timeout}s)"
+    output = tail((proc.stdout or "") + (proc.stderr or ""))
+    status = "" if proc.returncode == 0 else f"(exit {proc.returncode})"
+    return proc.returncode == 0, "\n".join(p for p in (f"$ {cmd}", output, status) if p)
+
+
+def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None = None,
+                     cfg: RepoConfig | None = None) -> str:
+    """Run milestone checks in the supervisor's checkout (where merges land)
+    and record the results. With ``position``, just that one milestone; if
+    that makes every milestone pass, all are re-run together to confirm."""
+    from copse import workspaces
+
+    cfg = cfg or load_repo_config(ws.repo_root)
+    ms = db.milestones(root_id)
+    if not ms:
+        raise AutopilotError("no milestones yet: record the goal with set_goal first")
+    chosen = [m for m in ms if position is None or m.position == position]
+    if not chosen:
+        raise AutopilotError(f"no milestone {position}; they're numbered 1-{len(ms)}")
+    env = workspaces.workspace_env(ws)
+    changed = False
+
+    def run(batch: list[Milestone]) -> None:
+        nonlocal changed
+        for m in batch:
+            if not m.check_cmd:
+                continue
+            ok, out = run_check(m.check_cmd, ws.path, env, cfg.check_timeout)
+            changed |= (m.status == "passed") != ok
+            db.record_check(m.id, ok, out)
+
+    run(chosen)
+    ms = db.milestones(root_id)
+    if position is not None and all(m.status == "passed" for m in ms) and len(ms) > 1:
+        run(ms)  # confirm nothing earlier regressed
+        ms = db.milestones(root_id)
+    if changed:
+        db.bump_progress(root_id)
+    done = all(m.status == "passed" for m in ms)
+    if done:
+        db.update_autopilot(root_id, state="done", note=None)
+    elif (ap := db.get_autopilot(root_id)) and ap.state == "done":
+        db.update_autopilot(root_id, state="running")
+    shown = [m for m in ms if position is None or m.position == position or done]
+    lines = [progress(db, root_id)]
+    for m in shown:
+        if m.output and m.status == "failed":
+            lines.append(f"\nMilestone {m.position} check output:\n{m.output}")
+    if done:
+        lines.append("\nEvery milestone's check passes: the goal is reached. Tell the user.")
+    return "\n".join(lines)
+
+
+# -- progress -----------------------------------------------------------------
+
+MARK = {"passed": "✓", "failed": "✗", "pending": "○"}
+
+
+def counts(db: DB, root_id: str) -> tuple[int, int]:
+    ms = db.milestones(root_id)
+    return sum(m.status == "passed" for m in ms), len(ms)
+
+
+def progress(db: DB, root_id: str) -> str:
+    ap = db.get_autopilot(root_id)
+    if ap is None:
+        return "Autopilot is not set up for this session."
+    head = f"Autopilot {'on' if ap.enabled else 'off'}"
+    if not ap.goal:
+        return f"{head}. No goal yet: ask the user what we're building, then call set_goal."
+    done, total = counts(db, root_id)
+    lines = [f"{head}. Goal: {ap.goal}", f"{done} of {total} milestones verified."]
+    for m in db.milestones(root_id):
+        how = f"check: `{m.check_cmd}`" if m.check_cmd else "NO CHECK: propose one with set_goal"
+        when = f", last checked {time.strftime('%H:%M', time.localtime(m.checked_at))}" if m.checked_at else ""
+        lines.append(f"  {MARK.get(m.status, '·')} {m.position}. {m.title} ({how}{when})")
+    if ap.state in ("blocked", "stalled") and ap.note:
+        lines.append(f"{ap.state.capitalize()}: {ap.note}")
+    return "\n".join(lines)
+
+
+# -- workers and the cap ----------------------------------------------------------
+
+
+BUSY = ("starting", "processing", "waiting")
+
+
+def active_workers(db: DB, root_id: str, *, reviewers: bool = True) -> list[Agent]:
+    """Agents in the session still working: not yet reported, or back at work
+    after reporting (e.g. on review feedback)."""
+    from copse import agents
+
+    return [a for a in agents.tree(db, root_id)[1:]
+            if a.mode in agents.REPORTING_MODES and (reviewers or a.mode != "review")
+            and (a.result is None or a.status in BUSY)
+            and a.status not in ("paused", "done") and agents.is_alive(a)]
+
+
+def check_capacity(db: DB, caller_id: str | None, cfg: RepoConfig) -> None:
+    """Refuse a new worker beyond ``max_agents``. Reviewers don't count: they
+    are short, and holding up a review would hold up every merge."""
+    if not caller_id or cfg.max_agents <= 0:
+        return
+    busy = active_workers(db, root_of(db, caller_id), reviewers=False)
+    if len(busy) >= cfg.max_agents:
+        raise AutopilotError(
+            f"{len(busy)} workers are already running, the most allowed at once "
+            f"(max_agents in .copse/config.json). Wait for one to report, then try again."
+        )
+
+
+# -- Claude usage -------------------------------------------------------------------
+
+
+def usage_path() -> Path:
+    return copse_home() / "usage.json"
+
+
+def record_usage(status: dict) -> None:
+    """Keep the plan usage Claude Code gives its status line (Claude.ai
+    subscriptions only)."""
+    limits = status.get("rate_limits")
+    if not isinstance(limits, dict):
+        return
+    data = {"updated_at": time.time()}
+    for window in ("five_hour", "seven_day"):
+        w = limits.get(window)
+        if isinstance(w, dict) and isinstance(w.get("used_percentage"), (int, float)):
+            data[window] = {"used": float(w["used_percentage"]), "resets_at": w.get("resets_at")}
+    if len(data) > 1:
+        path = usage_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(path)
+
+
+def usage() -> dict | None:
+    """The fullest recent usage window: {"window", "used", "resets_at"}, or None."""
+    try:
+        data = json.loads(usage_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if time.time() - data.get("updated_at", 0) > USAGE_FRESH_SECONDS:
+        return None
+    windows = [(k, v) for k, v in data.items() if isinstance(v, dict)]
+    if not windows:
+        return None
+    name, w = max(windows, key=lambda kv: kv[1].get("used", 0))
+    return {"window": name, "used": w.get("used", 0), "resets_at": w.get("resets_at")}
+
+
+def usage_note(u: dict) -> str:
+    window = "5-hour" if u["window"] == "five_hour" else "weekly"
+    resets = ""
+    if isinstance(u.get("resets_at"), (int, float)):
+        resets = f", resets {time.strftime('%-I:%M%p', time.localtime(u['resets_at'])).lower()}"
+    return f"Claude usage at {u['used']:.0f}% of the {window} limit{resets}"
+
+
+def limit_reached(db: DB, agent: Agent) -> None:
+    """A turn failed on the usage limit: stop pushing until the user is back."""
+    ap = db.get_autopilot(root_of(db, agent.id))
+    if ap and ap.enabled:
+        db.update_autopilot(ap.root_id, state="blocked", nudges=0,
+                            note="Claude's usage limit was reached. Continue when it resets.")
+
+
+# -- the Stop hook -------------------------------------------------------------------
+
+
+def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
+    """The supervisor is about to stop. Returns a "block" decision telling it
+    to keep going, or None to let it stop."""
+    ap = db.get_autopilot(agent.id)
+    if ap is None or not ap.enabled or not ap.goal or ap.state != "running":
+        return None
+    ms = db.milestones(agent.id)
+    if ms and all(m.status == "passed" for m in ms):
+        db.update_autopilot(agent.id, state="done")
+        return None
+    if active_workers(db, agent.id):
+        return None  # their results arrive as messages and wake it up
+    ws = db.get_workspace(agent.workspace_id)
+    cfg = load_repo_config(ws.repo_root) if ws else RepoConfig()
+    u = usage()
+    if u and u["used"] >= cfg.usage_limit:
+        db.update_autopilot(agent.id, state="blocked", note=usage_note(u) + ". Autopilot paused so work doesn't stall halfway.")
+        return None
+    nudges = ap.nudges if ap.nudged_at == ap.progress else 0
+    if nudges >= MAX_NUDGES:
+        db.update_autopilot(agent.id, state="stalled", nudges=0,
+                            note=f"no progress after {MAX_NUDGES} reminders to keep going")
+        return None
+    db.update_autopilot(agent.id, nudges=nudges + 1, nudged_at=ap.progress)
+    return {"decision": "block", "reason": nudge(db, ap, cfg)}
+
+
+def nudge(db: DB, ap: Autopilot, cfg: RepoConfig) -> str:
+    return (
+        "[copse autopilot] The goal isn't reached yet, and no workers are running.\n"
+        f"{progress(db, ap.root_id)}\n\n"
+        "Keep going without waiting for the user: plan the next tasks for the first "
+        f"unverified milestone and assign workers (at most {cfg.max_agents or 'any number'} "
+        "at once), get finished branches reviewed and merged, and call check_milestone. "
+        "If you need a decision only the user can make, call need_user with the question, "
+        "then ask it."
+    )
+
+
+def guide(cfg: RepoConfig) -> str:
+    return GUIDE.format(max_agents=cfg.max_agents or "any number of")
+
+
+def kickoff(plan: Plan) -> str:
+    return KICKOFF.format(goal=plan.goal, n=len(plan.milestones))
+
+
+def worker_goal(prompt: str, done_when: str, branch: str) -> str | None:
+    """A worker's first message as a Claude Code ``/goal``: Claude keeps working
+    until a small model judges the finish line met. None if too long for one."""
+    text = (f"/goal Finish line: {done_when.strip()} The work is committed on branch "
+            f"`{branch}` and reported with the copse report_result tool.\n\nTask:\n{prompt}")
+    return text if len(text) - len("/goal ") <= MAX_GOAL_CHARS else None

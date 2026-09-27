@@ -8,7 +8,8 @@ import os
 
 from mcp.server.mcpserver import MCPServer
 
-from copse import agents, git, workspaces
+from copse import agents, autopilot, gates, git, workspaces
+from copse.config import load_repo_config
 from copse.db import DB, Agent, Workspace
 from copse.profiles import list_profiles
 
@@ -21,7 +22,9 @@ mcp = MCPServer(
         "worktree. Delegate with `handoff` (wait for the result) or `assign` (continue "
         "working; the result arrives later as a message). Review a worker's branch with "
         "`workspace_diff`, integrate it with `merge_workspace`, clean up with "
-        "`remove_workspace`. Workers must finish by calling `report_result`."
+        "`remove_workspace`. Workers must finish by calling `report_result`. In an autopilot "
+        "session, track the goal with `set_goal`, `get_progress` and `check_milestone`, and "
+        "get branches approved with `request_review` before merging."
     ),
 )
 
@@ -89,7 +92,7 @@ def _await_worker(db: DB, worker_id: str, wait_seconds: int) -> str:
 @mcp.tool()
 async def handoff(
     agent_profile: str, task: str, isolate: bool = True, branch: str | None = None,
-    wait_seconds: int = DEFAULT_WAIT_SECONDS,
+    wait_seconds: int = DEFAULT_WAIT_SECONDS, done_when: str | None = None,
 ) -> str:
     """Give a task to a new worker agent and wait for its result.
 
@@ -104,13 +107,16 @@ async def handoff(
     workspace_diff and integrate with merge_workspace. Pass a short
     descriptive branch (e.g. "fix/login-redirect") to name the worker's branch.
     With isolate=false the worker shares your working directory; only use that
-    for read-only tasks.
+    for read-only tasks. done_when is a finish line the worker can verify
+    (e.g. "uv run pytest tests/test_auth.py passes"); Claude workers keep
+    going until it's met.
     """
     def run() -> str:
         db = DB()
         caller, ws = _caller(db)
         worker, _ = agents.delegate(
-            db, caller, ws, agent_profile, task, "handoff", isolate=isolate, branch=branch
+            db, caller, ws, agent_profile, task, "handoff", isolate=isolate, branch=branch,
+            done_when=done_when,
         )
         return _await_worker(db, worker.id, wait_seconds)
 
@@ -130,21 +136,29 @@ async def wait_for_worker(agent_id: str, wait_seconds: int = DEFAULT_WAIT_SECOND
 
 @mcp.tool()
 async def assign(
-    agent_profile: str, task: str, isolate: bool = True, branch: str | None = None
+    agent_profile: str, task: str, isolate: bool = True, branch: str | None = None,
+    done_when: str | None = None,
 ) -> str:
     """Start a worker agent on a task and return immediately.
 
     When it finishes, its result arrives in your conversation as a message.
     Isolation works as for handoff. Use this to run several workers in parallel.
     Pass a short descriptive branch (e.g. "feat/ls-json") to name the worker's branch.
+    done_when is a finish line the worker can verify (e.g. "uv run pytest
+    tests/test_ls.py passes"); Claude workers keep going until it's met.
     """
     def run() -> str:
         db = DB()
         caller, ws = _caller(db)
         worker, wws = agents.delegate(
-            db, caller, ws, agent_profile, task, "assign", isolate=isolate, branch=branch
+            db, caller, ws, agent_profile, task, "assign", isolate=isolate, branch=branch,
+            done_when=done_when,
         )
-        return f"Started worker {worker.id} ({worker.profile}) in workspace {wws.id} on branch {wws.branch}."
+        text = f"Started worker {worker.id} ({worker.profile}) in workspace {wws.id} on branch {wws.branch}."
+        u = autopilot.usage()
+        if u and u["used"] >= load_repo_config(wws.repo_root).usage_limit - 15:
+            text += f"\nNote: {autopilot.usage_note(u)}."
+        return text
 
     return await asyncio.to_thread(run)
 
@@ -206,13 +220,75 @@ def workspace_diff(workspace: str, stat_only: bool = False) -> str:
 
 
 @mcp.tool()
-def merge_workspace(workspace: str, squash: bool = False) -> str:
+async def merge_workspace(workspace: str, squash: bool = False) -> str:
     """Merge a workspace's branch into its base branch (for workers: your branch).
+
+    First copse checks the merge gates in the workspace: everything committed,
+    a reviewer's approval of this commit (in autopilot sessions, or when the
+    repo requires review), pre-commit hooks, and the repo's `checks` commands.
+    If a gate fails nothing is merged, and the reply says what to fix.
     Fails without changing anything on conflicts."""
+    def run() -> str:
+        db = DB()
+        caller, _ = _caller(db)
+        ws = _ws(db, workspace)
+        cfg = load_repo_config(ws.repo_root)
+        pilot = autopilot.for_agent(db, caller.id) if caller else None
+        review = cfg.review if cfg.review is not None else bool(pilot and pilot.enabled)
+        report = gates.run(db, ws, cfg, review_required=review)
+        if not report.ok:
+            return f"Not merged. {report.problem}"
+        if gates.head(ws) != report.sha:
+            return (f"Not merged: {ws.branch} got new commits while the gates ran. "
+                    "Call merge_workspace again to check the new commits.")
+        target = workspaces.merge_back(db, ws, squash=squash)
+        text = f"Merged {ws.branch} into {ws.base_branch} at {target} ({report.summary()})."
+        if pilot:
+            db.bump_progress(pilot.root_id)
+            if pilot.goal:
+                text += " Next: call check_milestone to verify progress."
+        return text
+
+    return await asyncio.to_thread(run)
+
+
+@mcp.tool()
+def request_review(workspace: str, focus: str | None = None) -> str:
+    """Start a reviewer agent on a worker's branch. It doesn't edit code; its
+    verdict arrives as a message and is recorded for merge_workspace, which
+    only accepts an approval of the branch's current commit. focus: anything
+    the reviewer should look at especially."""
     db = DB()
+    caller, _ = _caller(db)
     ws = _ws(db, workspace)
-    target = workspaces.merge_back(db, ws, squash=squash)
-    return f"Merged {ws.branch} into {ws.base_branch} at {target}."
+    if ws.kind != "worktree":
+        return "Only a worker's workspace (its own branch and worktree) can be reviewed this way."
+    cfg = load_repo_config(ws.repo_root)
+    reviewer = agents.request_review(db, caller, ws, cfg.reviewer, focus, cfg.checks)
+    return (f"Reviewer {reviewer.id} ({reviewer.profile}/{reviewer.provider}) is reviewing "
+            f"{ws.branch}. Its verdict will arrive as a message.")
+
+
+@mcp.tool()
+def submit_review(approved: bool, summary: str) -> str:
+    """Reviewers: call this once with your verdict. approved=true only if the
+    branch can merge as is. summary: your findings, most severe first."""
+    db = DB()
+    caller, ws = _caller(db)
+    if not caller or caller.mode != "review":
+        return "Only a reviewer started with request_review can submit a review."
+    sha = gates.head(ws)
+    db.add_review(ws.id, sha, caller.id, approved, summary)
+    if approved:
+        root = autopilot.root_of(db, caller.id)
+        db.bump_progress(root)
+    verdict = "APPROVED" if approved else "CHANGES REQUESTED"
+    agents.report_result(
+        db, caller.id,
+        f"Review of {ws.branch} (workspace {ws.id}) at {sha[:8]}: {verdict}\n\n{summary}",
+    )
+    agents.close_later(caller.id)
+    return f"Review recorded ({verdict}) and sent to your supervisor. You're done."
 
 
 @mcp.tool()
@@ -223,6 +299,86 @@ def remove_workspace(workspace: str, delete_branch: bool = False, force: bool = 
     ws = _ws(db, workspace)
     removed = workspaces.remove(db, ws, force=force, delete_branch=delete_branch)
     return f"Removed {ws.id}. {removed.branch_note or 'branch deleted'}"
+
+
+def _session(db: DB) -> tuple[str, Workspace] | str:
+    """The caller's session root and the checkout it works in, or an error."""
+    caller, _ = _caller(db)
+    if not caller:
+        return "Not running as a copse agent."
+    root_id = autopilot.root_of(db, caller.id)
+    root = db.get_agent(root_id)
+    ws = db.get_workspace(root.workspace_id) if root else None
+    if not ws or not db.get_autopilot(root_id):
+        return "Autopilot isn't on for this session. The user can turn it on with `copse autopilot on`."
+    return root_id, ws
+
+
+@mcp.tool()
+def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = None) -> str:
+    """Autopilot: record what we're building. milestones is an ordered list of
+    {"title": ..., "check": ..., "detail": ...}. Each check is a shell command
+    copse runs from the root of your checkout; it must exit 0 only when that
+    milestone is done (e.g. "uv run pytest tests/test_settings.py -q").
+    Replaces any earlier goal; milestones that keep their title and check keep
+    their last result."""
+    db = DB()
+    found = _session(db)
+    if isinstance(found, str):
+        return found
+    root_id, _ = found
+    items = []
+    for m in milestones:
+        title = str(m.get("title", "")).strip()
+        if not title:
+            return "Every milestone needs a title."
+        check = str(m.get("check") or "").strip() or None
+        items.append((title, check, (str(m.get("detail") or "").strip() or None)))
+    try:
+        autopilot.set_goal(db, root_id, goal, items, detail)
+    except autopilot.AutopilotError as e:
+        return str(e)
+    return autopilot.progress(db, root_id)
+
+
+@mcp.tool()
+def get_progress() -> str:
+    """Autopilot: the goal, each milestone with its check and last result."""
+    db = DB()
+    found = _session(db)
+    return found if isinstance(found, str) else autopilot.progress(db, found[0])
+
+
+@mcp.tool()
+async def check_milestone(milestone: int | None = None) -> str:
+    """Autopilot: run milestone checks in your checkout (where merges land) and
+    record the results. milestone: its number; omit to check all of them.
+    This is the only way a milestone becomes done."""
+    def run() -> str:
+        db = DB()
+        found = _session(db)
+        if isinstance(found, str):
+            return found
+        root_id, ws = found
+        try:
+            return autopilot.check_milestones(db, root_id, ws, milestone)
+        except autopilot.AutopilotError as e:
+            return str(e)
+
+    return await asyncio.to_thread(run)
+
+
+@mcp.tool()
+def need_user(question: str) -> str:
+    """Autopilot: you're blocked on a decision only the user can make. copse
+    stops asking you to keep going until the user replies. Ask them the
+    question right after calling this."""
+    db = DB()
+    found = _session(db)
+    if isinstance(found, str):
+        return found
+    autopilot.need_user(db, found[0], question)
+    return "Noted. Ask the user now; autopilot resumes when they reply."
 
 
 @mcp.tool()

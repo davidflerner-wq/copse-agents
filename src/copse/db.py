@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS agents (
     created_at REAL NOT NULL,
     status_since REAL,             -- when status last changed
     task TEXT,                     -- the prompt it was started with (for resuming)
-    session_ref TEXT               -- the CLI's own session id (claude --resume)
+    session_ref TEXT,              -- the CLI's own session id (claude --resume)
+    stop_blocked INTEGER           -- copse's Stop hook just kept it going (for CLIs that don't say)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,6 +52,41 @@ CREATE TABLE IF NOT EXISTS inbox (
     body TEXT NOT NULL,
     created_at REAL NOT NULL,
     delivered_at REAL
+);
+-- Autopilot: one row per session (keyed by its supervisor) that has it on.
+CREATE TABLE IF NOT EXISTS autopilot (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    goal TEXT,                     -- NULL until the user says what we're building
+    detail TEXT,
+    state TEXT NOT NULL DEFAULT 'running',  -- running | blocked | stalled | done
+    note TEXT,                     -- why it's blocked or stalled
+    progress INTEGER NOT NULL DEFAULT 0,    -- bumped whenever real progress happens
+    nudges INTEGER NOT NULL DEFAULT 0,      -- "keep going" nudges since the last progress
+    nudged_at INTEGER,             -- the progress count at the last nudge
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS milestones (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    root_id TEXT NOT NULL REFERENCES autopilot(root_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    check_cmd TEXT,                -- copse runs this itself; exit 0 means done
+    detail TEXT,
+    status TEXT NOT NULL DEFAULT 'pending', -- pending | passed | failed
+    checked_at REAL,
+    output TEXT                    -- the tail of the last check's output
+);
+-- A reviewer agent's verdict on a branch at one commit. A merge gate only
+-- accepts an approval of the commit it is about to merge.
+CREATE TABLE IF NOT EXISTS reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    sha TEXT NOT NULL,
+    reviewer_id TEXT,
+    approved INTEGER NOT NULL,
+    summary TEXT,
+    created_at REAL NOT NULL
 );
 """
 
@@ -84,6 +120,45 @@ class Agent:
     status_since: float | None = None
     task: str | None = None
     session_ref: str | None = None
+    stop_blocked: int | None = None
+
+
+@dataclass
+class Autopilot:
+    root_id: str
+    enabled: int
+    goal: str | None
+    detail: str | None
+    state: str
+    note: str | None
+    progress: int
+    nudges: int
+    nudged_at: int | None
+    created_at: float
+
+
+@dataclass
+class Milestone:
+    id: int
+    root_id: str
+    position: int
+    title: str
+    check_cmd: str | None
+    detail: str | None
+    status: str
+    checked_at: float | None
+    output: str | None
+
+
+@dataclass
+class Review:
+    id: int
+    workspace_id: str
+    sha: str
+    reviewer_id: str | None
+    approved: int
+    summary: str | None
+    created_at: float
 
 
 @dataclass
@@ -121,7 +196,8 @@ class DB:
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(agents)")}
-        for col, kind in (("status_since", "REAL"), ("task", "TEXT"), ("session_ref", "TEXT")):
+        for col, kind in (("status_since", "REAL"), ("task", "TEXT"), ("session_ref", "TEXT"),
+                          ("stop_blocked", "INTEGER")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
 
@@ -271,8 +347,90 @@ class DB:
             )
             return cur.rowcount
 
+    def recently_delivered(self, agent_id: str, body: str, within: float = 120.0) -> bool:
+        """Whether ``body`` is a message copse delivered to the agent just now."""
+        want = body.strip()
+        if not want:
+            return False
+        rows = self.conn.execute(
+            "SELECT body FROM inbox WHERE agent_id=? AND delivered_at > ?",
+            (agent_id, time.time() - within),
+        )
+        return any(r[0].strip() == want for r in rows)
+
+    def delivered_since(self, agent_id: str, since: float) -> bool:
+        """Whether copse delivered any message to the agent after ``since``."""
+        row = self.conn.execute(
+            "SELECT 1 FROM inbox WHERE agent_id=? AND delivered_at > ? LIMIT 1", (agent_id, since),
+        ).fetchone()
+        return row is not None
+
     def pending_count(self, agent_id: str) -> int:
         row = self.conn.execute(
             "SELECT COUNT(*) FROM inbox WHERE agent_id=? AND delivered_at IS NULL", (agent_id,)
         ).fetchone()
         return int(row[0])
+
+    # -- autopilot -----------------------------------------------------------
+
+    def get_autopilot(self, root_id: str) -> Autopilot | None:
+        row = self.conn.execute("SELECT * FROM autopilot WHERE root_id=?", (root_id,)).fetchone()
+        return _load(Autopilot, row) if row else None
+
+    def add_autopilot(self, root_id: str, enabled: bool = True) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT OR IGNORE INTO autopilot (root_id, enabled, created_at) VALUES (?,?,?)",
+                (root_id, int(enabled), time.time()),
+            )
+
+    def update_autopilot(self, root_id: str, **fields: object) -> None:
+        cols = ", ".join(f"{k}=?" for k in fields)
+        with self.tx() as c:
+            c.execute(f"UPDATE autopilot SET {cols} WHERE root_id=?", (*fields.values(), root_id))
+
+    def bump_progress(self, root_id: str) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE autopilot SET progress=progress+1, nudges=0 WHERE root_id=?", (root_id,))
+
+    def set_milestones(self, root_id: str, items: list[tuple[str, str | None, str | None]]) -> None:
+        """Replace the session's milestones with ``(title, check_cmd, detail)`` items."""
+        with self.tx() as c:
+            c.execute("DELETE FROM milestones WHERE root_id=?", (root_id,))
+            for i, (title, check, detail) in enumerate(items, start=1):
+                c.execute(
+                    "INSERT INTO milestones (root_id, position, title, check_cmd, detail) "
+                    "VALUES (?,?,?,?,?)",
+                    (root_id, i, title, check, detail),
+                )
+
+    def milestones(self, root_id: str) -> list[Milestone]:
+        rows = self.conn.execute(
+            "SELECT * FROM milestones WHERE root_id=? ORDER BY position", (root_id,)
+        )
+        return [_load(Milestone, r) for r in rows]
+
+    def record_check(self, milestone_id: int, passed: bool, output: str) -> None:
+        with self.tx() as c:
+            c.execute(
+                "UPDATE milestones SET status=?, checked_at=?, output=? WHERE id=?",
+                ("passed" if passed else "failed", time.time(), output, milestone_id),
+            )
+
+    # -- reviews -------------------------------------------------------------
+
+    def add_review(self, workspace_id: str, sha: str, reviewer_id: str | None,
+                   approved: bool, summary: str) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO reviews (workspace_id, sha, reviewer_id, approved, summary, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (workspace_id, sha, reviewer_id, int(approved), summary, time.time()),
+            )
+
+    def latest_review(self, workspace_id: str, sha: str) -> Review | None:
+        row = self.conn.execute(
+            "SELECT * FROM reviews WHERE workspace_id=? AND sha=? ORDER BY id DESC LIMIT 1",
+            (workspace_id, sha),
+        ).fetchone()
+        return _load(Review, row) if row else None

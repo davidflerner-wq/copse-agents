@@ -41,11 +41,30 @@ class LaunchContext:
     profile: Profile
     initial_prompt: str | None
     resume: str | None = None   # the CLI's session id to continue, if it supports that
+    cwd: str | None = None      # the workspace it runs in
 
 
 class Provider:
     name = "base"
     uses_hooks = False
+    # Whether a hook reports when the CLI is ready for input. Without one,
+    # copse marks it ready once after_launch sees its input box.
+    announces_start = True
+    # Whether the first prompt must wait until the CLI is ready (typed in
+    # then, like a queued message) rather than go on its command line, and
+    # how long to give it after its input box appears.
+    prompt_after_ready = False
+    ready_delay = 3
+
+    def warmup(self, profile: Profile) -> str | None:
+        """A message to send before the first prompt, for CLIs that need a
+        turn to get going. None for most."""
+        return None
+
+    @staticmethod
+    def can_resume(session_id: str) -> bool:
+        """Whether the CLI can continue the saved session ``session_id``."""
+        return False
 
     def command(self, ctx: LaunchContext) -> list[str]:
         raise NotImplementedError
@@ -93,7 +112,15 @@ class ClaudeCode(Provider):
                 # After a permission prompt is answered, the tool runs; flip
                 # 'waiting' back to 'processing'.
                 "PostToolUse": self._hook("tool-done"),
-            }
+                # A turn that ends on an API error (e.g. the usage limit) runs
+                # this instead of Stop.
+                "StopFailure": self._hook("stop-failure"),
+            },
+            # Claude Code only tells status lines how much of the plan's usage
+            # is spent. copse's records that, then runs the person's own
+            # status line, so what they see doesn't change.
+            "statusLine": {"type": "command", "command": " ".join(
+                f"'{a}'" for a in [*copse_invocation(), "_statusline"])},
         }
         mcp = {"mcpServers": {"copse": mcp_server_spec(ctx.agent_id)}}
         argv = [
@@ -206,6 +233,79 @@ class Codex(Provider):
                 return
 
 
+class Antigravity(Provider):
+    """Google Antigravity's terminal agent, agy (see copse.antigravity)."""
+
+    name = "antigravity"
+    uses_hooks = True
+    announces_start = False
+    # With -i, agy starts on the prompt before its MCP servers connect, and
+    # the agent never sees copse's tools in that first turn.
+    prompt_after_ready = True
+    ready_delay = 5
+
+    def warmup(self, profile: Profile) -> str | None:
+        from copse import antigravity
+
+        return antigravity.warmup(profile.prompt)
+
+    @staticmethod
+    def can_resume(session_id: str) -> bool:
+        from copse import antigravity
+
+        return antigravity.can_resume(session_id)
+
+    def command(self, ctx: LaunchContext) -> list[str]:
+        from copse import antigravity
+
+        if ctx.cwd:
+            antigravity.install(ctx.cwd)
+        argv = [antigravity.binary()]
+        if ctx.profile.model:
+            argv += ["--model", ctx.profile.model]
+        if ctx.profile.permission_mode in ("acceptEdits", "accept-edits"):
+            argv += ["--mode", "accept-edits"]
+        elif ctx.profile.permission_mode == "plan":
+            argv += ["--mode", "plan"]
+        if ctx.resume:
+            argv += ["--conversation", ctx.resume]
+        elif ctx.initial_prompt:
+            argv += ["-i", ctx.initial_prompt]
+        return argv
+
+    TRUST_DIALOG = re.compile(r"Do you trust the contents of this project\?", re.I)
+    TRUST_SELECTED = re.compile(r">\s*Yes, I trust this folder")
+    READY = re.compile(r"\? for shortcuts|esc to cancel")
+
+    def after_launch(self, target: str) -> None:
+        # A new worktree is a folder agy hasn't seen. copse made it from the
+        # user's own repo, so trust it; never press Enter unless "Yes" is selected.
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            time.sleep(0.5)
+            try:
+                screen = tmux.capture(target, lines=60)
+            except tmux.TmuxError:
+                return
+            if self.TRUST_DIALOG.search(screen):
+                if self.TRUST_SELECTED.search(screen):
+                    tmux.send_keys(target, "Enter")
+                else:
+                    tmux.send_keys(target, "Up")
+            elif self.READY.search(screen):
+                return
+
+    def screen_state(self, screen: str) -> str | None:
+        tail = "\n".join(screen.rstrip().splitlines()[-25:])
+        if "Requesting permission for" in tail or "Run this command?" in tail:
+            return "waiting"
+        if "esc to cancel" in tail:
+            return "busy"
+        if "? for shortcuts" in tail:
+            return "idle"
+        return None
+
+
 class Shell(Provider):
     """A plain shell. Useful for dev servers and for testing copse itself."""
 
@@ -215,7 +315,7 @@ class Shell(Provider):
         return [os.environ.get("SHELL", "/bin/sh")]
 
 
-PROVIDERS: dict[str, Provider] = {p.name: p for p in (ClaudeCode(), Codex(), Shell())}
+PROVIDERS: dict[str, Provider] = {p.name: p for p in (ClaudeCode(), Codex(), Antigravity(), Shell())}
 
 
 def get_provider(name: str) -> Provider:
@@ -223,3 +323,52 @@ def get_provider(name: str) -> Provider:
         return PROVIDERS[name]
     except KeyError:
         raise KeyError(f"unknown provider {name!r}; choose from {', '.join(PROVIDERS)}") from None
+
+
+def _own_status_line(project_dir: str | None) -> str | None:
+    """The status line command the person configured for Claude Code, if any:
+    project settings first, then user settings (as Claude Code orders them)."""
+    config = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+    candidates = []
+    if project_dir:
+        candidates += [os.path.join(project_dir, ".claude", "settings.local.json"),
+                       os.path.join(project_dir, ".claude", "settings.json")]
+    candidates.append(os.path.join(config, "settings.json"))
+    for path in candidates:
+        try:
+            with open(path, encoding="utf-8") as f:
+                line = json.load(f).get("statusLine")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(line, dict) and line.get("type") == "command" and line.get("command"):
+            return str(line["command"])
+    return None
+
+
+def status_line(stdin_text: str) -> str:
+    """copse's Claude Code status line: record plan usage for autopilot, then
+    print whatever the person's own status line prints (nothing if they have none)."""
+    import subprocess
+
+    from copse import autopilot
+
+    try:
+        status = json.loads(stdin_text) if stdin_text.strip() else {}
+    except ValueError:
+        status = {}
+    if isinstance(status, dict):
+        try:
+            autopilot.record_usage(status)
+        except OSError:
+            pass
+    workspace = status.get("workspace") if isinstance(status, dict) else None
+    project = (workspace or {}).get("project_dir") if isinstance(workspace, dict) else None
+    cmd = _own_status_line(project or os.getcwd())
+    if not cmd:
+        return ""
+    try:
+        proc = subprocess.run(cmd, shell=True, input=stdin_text, capture_output=True,
+                              text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return proc.stdout.rstrip("\n")
