@@ -71,8 +71,9 @@ def init() -> None:
 
 @app.command()
 def new(
-    branch: str = typer.Argument(..., help="Branch for the workspace (created if needed)."),
-    base: Optional[str] = typer.Option(None, "--base", "-b", help="Base branch (default: repo default)."),
+    branch: Optional[str] = typer.Argument(None, help="Branch for the workspace (created if needed). Required unless --pr is given."),
+    base: Optional[str] = typer.Option(None, "--base", "-b", help="Base branch (default: repo default). Not allowed with --pr."),
+    pr: Optional[int] = typer.Option(None, "--pr", help="Check out this GitHub PR's head branch (via `gh`), based on the PR's base branch. Don't also pass BRANCH or --base; the head branch is always fetched."),
     agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Agent profile to start (default from config; 'none' for no agent)."),
     prompt: Optional[str] = typer.Option(None, "--prompt", "-p", help="First message for the agent."),
     provider: Optional[str] = typer.Option(None, help="Override the profile's provider (claude, codex, shell)."),
@@ -81,11 +82,21 @@ def new(
     attach: bool = typer.Option(False, "--attach", help="Attach to the tmux session afterward."),
 ) -> None:
     """Create a worktree on a new branch and start an agent in it."""
+    if pr is not None:
+        if branch:
+            _fail("pass either BRANCH or --pr, not both (--pr uses the PR's head branch)")
+        if base:
+            _fail("--base can't be combined with --pr (the PR's base branch is used)")
+    elif not branch:
+        _fail("missing BRANCH (or pass --pr <number>)")
     db = DB()
-    created = _run(
-        workspaces.create, db, os.getcwd(), branch, base,
-        fetch=False if no_fetch else None, run_setup=not no_setup,
-    )
+    if pr is not None:
+        created = _run(workspaces.create_from_pr, db, os.getcwd(), pr, run_setup=not no_setup)
+    else:
+        created = _run(
+            workspaces.create, db, os.getcwd(), branch, base,
+            fetch=False if no_fetch else None, run_setup=not no_setup,
+        )
     ws = created.workspace
     typer.secho(f"✓ {ws.id}", fg="green", bold=True)
     typer.echo(f"  branch  {ws.branch} ({created.how}, from {created.start_point})")

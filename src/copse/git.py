@@ -126,6 +126,15 @@ def resolve_start_point(root: str | Path, base: str, fetch: bool) -> str:
     return "HEAD"
 
 
+def fetch_remote_branch(root: str | Path, branch: str, remote: str = "origin") -> str:
+    """Fetch ``branch`` from ``remote`` into ``refs/remotes/<remote>/<branch>``.
+    Unlike ``resolve_start_point``'s fetch, failure here is fatal: the caller
+    needs that exact branch. Returns the remote-tracking ref name."""
+    run(["fetch", "--quiet", "--no-tags", remote,
+         f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}"], root)
+    return f"{remote}/{branch}"
+
+
 def worktree_for_branch(root: str | Path, branch: str) -> str | None:
     for wt in list_worktrees(root):
         if wt.get("branch") == f"refs/heads/{branch}":
