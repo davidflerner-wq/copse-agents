@@ -40,12 +40,15 @@ cd ~/code/myapp
 copse
 ```
 
-That's it. `copse` opens a supervisor chat (Claude Code) in your repo, with the
-live dashboard of every agent underneath, in one tmux window. Tell the supervisor
-what you want. It splits the work between workers, each on its own branch, then
-reviews and merges their branches.
+That's it. `copse` opens a supervisor chat (Claude Code) in your repo, with a
+narrow sidebar on the left showing every agent: who's working, who's idle, and
+who's waiting for your approval. Tell the supervisor what you want. It splits the
+work between workers, each on its own branch, then reviews and merges their
+branches. It starts in under a second.
 
-**Closing and coming back.** Quitting the supervisor's chat pauses the whole
+**Closing and coming back.** When you quit the supervisor's chat, the copse window
+closes cleanly and you're back at your prompt. The whole session is paused: its
+workers stop too, and everything is kept (branches, worktrees,
 session: its workers stop too, and everything is kept (branches, worktrees,
 queued messages, and each agent's Claude conversation). `copse continue` (or
 `copse -c`) picks up the most recent paused session and lists the others by id
@@ -82,7 +85,7 @@ copse rm fix-login                          # keeps the branch
 | `copse start [-a PROFILE] [-p PROMPT] [--no-watch]` | the same, with options |
 | `copse transfer [REPO] [--from SESSION] [-b BRANCH]` | move a scratch session's work into a real repo |
 | `copse ls [--all]` | workspaces and agents |
-| `copse watch [--all] [--once]` | live dashboard: agent status, who's waiting on you, queued messages; enter attaches, `p` peeks |
+| `copse watch [--all] [--once]` | the dashboard on its own (the same view as the sidebar): enter attaches, `p` peeks |
 | `copse attach / cd / open [WS]` | tmux session / path / editor |
 | `copse status / diff [--stat] [WS]` | compared with the base branch (committed + uncommitted) |
 | `copse sync [--merge] [WS]` | rebase (or merge) the latest base into the branch |
@@ -146,6 +149,9 @@ defines, so only point workers at repos you trust. Override the list in
 
 ## How it works
 
+- **Look:** copse's tmux sessions get their own dark purple theme and mouse
+  scrolling. Your own tmux setup and other sessions are untouched (apart from
+  tmux's `focus-events`, which Claude Code asks for).
 - **State** lives in `~/.copse/copse.db` (SQLite, WAL mode). The CLI, the hooks,
   and every agent's MCP server share it. Worktrees live in
   `~/.copse/worktrees/<repo>/<branch>`, and the base branch is recorded in git
