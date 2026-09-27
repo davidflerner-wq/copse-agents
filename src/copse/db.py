@@ -233,6 +233,14 @@ class DB:
             c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (time.time(), row["id"]))
             return Message(**row)
 
+    def drop_pending(self, agent_id: str, sender_id: str) -> int:
+        with self.tx() as c:
+            cur = c.execute(
+                "DELETE FROM inbox WHERE agent_id=? AND sender_id=? AND delivered_at IS NULL",
+                (agent_id, sender_id),
+            )
+            return cur.rowcount
+
     def pending_count(self, agent_id: str) -> int:
         row = self.conn.execute(
             "SELECT COUNT(*) FROM inbox WHERE agent_id=? AND delivered_at IS NULL", (agent_id,)

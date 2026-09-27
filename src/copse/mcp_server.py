@@ -55,34 +55,75 @@ def _summary(db: DB, ws: Workspace) -> str:
     )
 
 
+DEFAULT_WAIT_SECONDS = 240
+
+
+def _await_worker(db: DB, worker_id: str, wait_seconds: int) -> str:
+    """Wait a bounded time for a handoff worker. Tool calls must stay short:
+    MCP clients time out long calls, and a timed-out call would strand the
+    result. On timeout the worker is detached, so its result is forwarded as
+    a message later, and the caller can resume with wait_for_worker."""
+    worker = agents.get(db, worker_id)
+    wws = db.get_workspace(worker.workspace_id)
+    isolated = bool(wws and wws.kind == "worktree")
+    try:
+        result = agents.wait_for_result(db, worker.id, wait_seconds)
+    except agents.StillRunning as e:
+        result = agents.detach(db, worker.id)
+        if result is None:
+            return (
+                f"Worker {worker.id} is still running ({e}). Its result will arrive as a "
+                f"message when it finishes. To keep waiting now instead, call "
+                f"wait_for_worker(agent_id=\"{worker.id}\")."
+            )
+    except agents.AgentError as e:
+        return f"Worker {worker.id} failed: {e}"
+    agents.collect(db, worker.parent_id, worker.id)
+    if worker.mode.startswith("handoff"):
+        # The caller has the result; assign workers stay up for feedback.
+        agents.kill(db, worker.id)
+    tail = f"\n\n{_summary(db, wws)}" if isolated and wws else ""
+    return f"Worker {worker.id} finished.\n\n{result}{tail}"
+
+
 @mcp.tool()
 async def handoff(
     agent_profile: str, task: str, isolate: bool = True, branch: str | None = None,
-    timeout_seconds: int = 1800,
+    wait_seconds: int = DEFAULT_WAIT_SECONDS,
 ) -> str:
     """Give a task to a new worker agent and wait for its result.
+
+    Waits up to wait_seconds (default 4 minutes). If the worker isn't done by
+    then, this returns "still running": call wait_for_worker to keep waiting,
+    or carry on, and the result will arrive as a message.
 
     With isolate=true (default) the worker gets its own git worktree on a new
     branch cut from YOUR current branch. It only sees work you've committed,
     so commit first if the worker needs your latest changes. The result
     includes the worker's summary and a diffstat of its branch; review with
-    workspace_diff and integrate with merge_workspace.
+    workspace_diff and integrate with merge_workspace. Pass a short
+    descriptive branch (e.g. "fix/login-redirect") to name the worker's branch.
     With isolate=false the worker shares your working directory; only use that
     for read-only tasks.
     """
     def run() -> str:
         db = DB()
         caller, ws = _caller(db)
-        worker, wws = agents.delegate(
+        worker, _ = agents.delegate(
             db, caller, ws, agent_profile, task, "handoff", isolate=isolate, branch=branch
         )
-        try:
-            result = agents.wait_for_result(db, worker.id, timeout_seconds)
-        except agents.AgentError as e:
-            return f"Worker {worker.id} ({wws.id}) failed: {e}"
-        agents.kill(db, worker.id)
-        tail = f"\n\n{_summary(db, wws)}" if isolate else ""
-        return f"Worker {worker.id} finished.\n\n{result}{tail}"
+        return _await_worker(db, worker.id, wait_seconds)
+
+    return await asyncio.to_thread(run)
+
+
+@mcp.tool()
+async def wait_for_worker(agent_id: str, wait_seconds: int = DEFAULT_WAIT_SECONDS) -> str:
+    """Keep waiting for a worker started with handoff that was still running.
+    Returns its result, or "still running" again after wait_seconds."""
+    def run() -> str:
+        db = DB()
+        return _await_worker(db, agent_id, wait_seconds)
 
     return await asyncio.to_thread(run)
 

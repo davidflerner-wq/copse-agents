@@ -35,6 +35,17 @@ class AgentError(RuntimeError):
     pass
 
 
+class StillRunning(AgentError):
+    """The wait ended before the worker reported; it's still working."""
+
+
+# Modes whose workers must finish with report_result. A handoff whose caller
+# stopped waiting becomes "handoff_detached": its result is then forwarded to
+# the caller as a message, like an assign.
+REPORTING_MODES = ("handoff", "handoff_detached", "assign")
+FORWARDING_MODES = ("handoff_detached", "assign")
+
+
 def new_id() -> str:
     return uuid.uuid4().hex[:8]
 
@@ -174,7 +185,7 @@ def flush(db: DB, agent_id: str) -> bool:
 def report_result(db: DB, agent_id: str, result: str) -> str:
     agent = get(db, agent_id)
     db.set_result(agent.id, result)
-    if agent.mode == "assign" and agent.parent_id and db.get_agent(agent.parent_id):
+    if agent.mode in FORWARDING_MODES and agent.parent_id and db.get_agent(agent.parent_id):
         ws = db.get_workspace(agent.workspace_id)
         where = f" on branch `{ws.branch}` (workspace {ws.id})" if ws else ""
         send_message(
@@ -204,10 +215,26 @@ def wait_for_result(db: DB, agent_id: str, timeout: float, poll: float = 2.0) ->
         time.sleep(poll)
     agent = db.get_agent(agent_id)
     hint = " It is waiting for a permission approval: attach to its workspace to answer." if agent and agent.status == "waiting" else ""
-    raise AgentError(
-        f"agent {agent_id} did not report within {int(timeout)}s; it's still running "
+    raise StillRunning(
+        f"agent {agent_id} hasn't reported yet after {int(timeout)}s "
         f"(status: {agent.status if agent else '?'}).{hint}"
     )
+
+
+def detach(db: DB, agent_id: str) -> str | None:
+    """Stop waiting synchronously on a handoff worker: from now on its result
+    is forwarded to its parent as a message. Returns the result instead if it
+    arrived in the meantime (so it's never lost between the two paths)."""
+    db.update_agent(agent_id, mode="handoff_detached")
+    agent = db.get_agent(agent_id)
+    return agent.result if agent else None
+
+
+def collect(db: DB, parent_id: str | None, worker_id: str) -> None:
+    """The parent received the worker's result directly; drop the duplicate
+    copy that forwarding may have queued in the parent's inbox."""
+    if parent_id:
+        db.drop_pending(parent_id, worker_id)
 
 
 def kill(db: DB, agent_id: str) -> None:
@@ -295,7 +322,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         if msg:
             db.set_status(agent_id, "processing")
             return {"decision": "block", "reason": msg.body}
-        needs_report = agent.mode in ("handoff", "assign") and agent.result is None
+        needs_report = agent.mode in REPORTING_MODES and agent.result is None
         if needs_report and not payload.get("stop_hook_active"):
             db.set_status(agent_id, "processing")
             return {

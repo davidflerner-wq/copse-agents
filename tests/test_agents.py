@@ -119,3 +119,43 @@ def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch)
     screens = iter([CLAUDE_IDLE, CLAUDE_BUSY])
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: next(screens))
     assert agents.reconcile(db, db.get_agent("a1"), gap=0).status == "processing"
+
+
+def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
+    from copse import mcp_server
+
+    fake_agent(db, ws, status="processing", agent_id="boss")
+    fake_agent(db, ws, mode="handoff", parent="boss", agent_id="w1")
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.setattr(agents, "kill", lambda db, aid: db.delete_agent(aid))
+
+    out = mcp_server._await_worker(db, "w1", wait_seconds=0)
+    assert "still running" in out and "wait_for_worker" in out
+    assert db.get_agent("w1").mode == "handoff_detached"
+
+    # Finishing later forwards the result to the supervisor's inbox...
+    agents.report_result(db, "w1", "done later")
+    assert db.pending_count("boss") == 1
+    # ...and if the supervisor collects it directly, the duplicate is dropped.
+    out = mcp_server._await_worker(db, "w1", wait_seconds=0)
+    assert "done later" in out
+    assert db.pending_count("boss") == 0
+    assert db.get_agent("w1") is None  # handoff worker closed after collection
+
+
+def test_result_arriving_during_detach_is_not_lost(db, ws, monkeypatch):
+    fake_agent(db, ws, mode="handoff", agent_id="w1")
+    db.set_result("w1", "just in time")
+    assert agents.detach(db, "w1") == "just in time"
+
+
+def test_wait_for_worker_leaves_assign_workers_running(db, ws, monkeypatch):
+    from copse import mcp_server
+
+    fake_agent(db, ws, mode="assign", agent_id="w2")
+    db.set_result("w2", "ok")
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    killed = []
+    monkeypatch.setattr(agents, "kill", lambda db, aid: killed.append(aid))
+    assert "ok" in mcp_server._await_worker(db, "w2", wait_seconds=0)
+    assert killed == []

@@ -13,8 +13,9 @@ review.
   its own branch, cut from a freshly fetched base, with its own block of ports
   for dev servers.
 - **Delegation built in.** Agents get a `copse` MCP server: `assign` work to
-  parallel workers, `handoff` a task and wait for it, `send_message` between
-  agents, then `workspace_diff`, `merge_workspace`, and `remove_workspace`.
+  parallel workers, `handoff` a task and wait for it (in bounded steps, with
+  `wait_for_worker` to keep waiting), `send_message` between agents, then
+  `workspace_diff`, `merge_workspace`, and `remove_workspace`.
 - **The whole branch lifecycle.** Diff against the base, sync (rebase or
   merge), commit, push, open a PR, merge back. Removal refuses to throw away
   uncommitted work and keeps the branch unless you say otherwise.
