@@ -18,21 +18,29 @@ def agent(status, **kw):
 
 def test_waiting_agents_stand_out():
     lines = watch.render([ws([agent("waiting"), agent("processing", id="e5f6")])], now=1090)
-    assert lines[0].text == "1 workspace · 2 agents · 1 working · 1 waiting for you"
-    waiting = next(ln for ln in lines if ln.agent and ln.agent["status"] == "waiting")
-    assert waiting.style == "alert" and "needs approval" in waiting.text and "1m" in waiting.text
-    assert any("↑2 ↓1 vs main  3 uncommitted" in ln.text for ln in lines)
+    assert lines[0].text == "1 needs you · 1 working" and lines[0].style == "alert"
+    assert lines[1].text == "2 agents in 1 workspace"
+    i = next(i for i, ln in enumerate(lines) if ln.agent and ln.agent["status"] == "waiting")
+    assert lines[i].style == "alert" and lines[i].text.startswith("  ! ")
+    assert lines[i + 1].text.strip().startswith("needs you for 1m")
+    assert any("2 ahead · 1 behind main · 3 files changed" in ln.text for ln in lines)
+
+
+def test_lines_fit_a_narrow_sidebar():
+    lines = watch.render([ws([agent("processing", pending=3)])], now=1090, width=30)
+    assert all(len(ln.text) <= 30 for ln in lines)
 
 
 def test_queued_messages_and_reports_are_shown():
     lines = watch.render([ws([agent("idle", pending=2, reported=True)])], now=1005)
-    row = next(ln for ln in lines if ln.agent)
-    assert "2 queued msgs" in row.text and "reported" in row.text and row.style == "ok"
+    i = next(i for i, ln in enumerate(lines) if ln.agent)
+    assert lines[i].style == "ok" and "✓ Developer" in lines[i].text
+    assert "done" in lines[i + 1].text and "2 messages queued" in lines[i + 1].text
 
 
 def test_empty_state():
     lines = watch.render([], now=0)
-    assert "No workspaces" in lines[-1].text
+    assert "Nothing running yet" in lines[-1].text
 
 
 def test_ago():

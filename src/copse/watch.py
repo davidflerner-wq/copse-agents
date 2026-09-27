@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import curses
 import os
+import shutil
 import subprocess
+import textwrap
 import time
 from dataclasses import dataclass
 
@@ -25,6 +27,15 @@ STATUS_STYLE = {
     "idle": "ok",
     "waiting": "alert",
     "exited": "bad",
+}
+
+# How each status reads on screen: (icon, label).
+STATUS_LABEL = {
+    "processing": ("●", "working"),
+    "starting": ("◌", "starting up"),
+    "idle": ("○", "idle"),
+    "waiting": ("!", "needs you"),
+    "exited": ("✕", "stopped"),
 }
 
 
@@ -48,49 +59,75 @@ def ago(seconds: float | None) -> str:
     return f"{int(seconds // 86400)}d"
 
 
+def plural(n: int, word: str) -> str:
+    return f"{n} {word}{'s' * (n != 1)}"
+
+
 def summary(snap: list[dict]) -> str:
     agents_ = [a for ws in snap for a in ws["agents"]]
     waiting = sum(a["status"] == "waiting" for a in agents_)
-    busy = sum(a["status"] == "processing" for a in agents_)
-    parts = [f"{len(snap)} workspace{'s' * (len(snap) != 1)}",
-             f"{len(agents_)} agent{'s' * (len(agents_) != 1)}"]
+    busy = sum(a["status"] in ("processing", "starting") for a in agents_)
+    parts = []
+    if waiting:
+        parts.append(f"{waiting} need{'s' * (waiting == 1)} you")
     if busy:
         parts.append(f"{busy} working")
-    if waiting:
-        parts.append(f"{waiting} waiting for you")
+    if not parts:
+        parts.append("all quiet")
     return " · ".join(parts)
 
 
-def render(snap: list[dict], now: float) -> list[Line]:
-    lines: list[Line] = [Line(summary(snap), "bold"), Line("")]
+def git_summary(ws: dict) -> str:
+    if ws["ahead"] is None:
+        return "folder missing" if not os.path.isdir(ws["path"]) else ""
+    parts = []
+    if ws["ahead"]:
+        parts.append(f"{ws['ahead']} ahead")
+    if ws["behind"]:
+        parts.append(f"{ws['behind']} behind")
+    parts = [" · ".join(parts) + f" {ws['base_branch']}"] if parts else [f"up to date with {ws['base_branch']}"]
+    if ws["dirty"]:
+        parts.append(f"{plural(ws['dirty'], 'file')} changed")
+    return " · ".join(parts)
+
+
+def _wrap(text: str, width: int, indent: str) -> list[str]:
+    return textwrap.wrap(text, max(width, len(indent) + 8), initial_indent=indent,
+                         subsequent_indent=indent) or [indent]
+
+
+def render(snap: list[dict], now: float, width: int = 80) -> list[Line]:
+    agents_ = [a for ws in snap for a in ws["agents"]]
+    lines = [Line(summary(snap), "alert" if any(a["status"] == "waiting" for a in agents_) else "bold")]
+    if snap:
+        lines.append(Line(f"{plural(len(agents_), 'agent')} in {plural(len(snap), 'workspace')}", "dim"))
+    lines.append(Line(""))
     if not snap:
-        lines.append(Line("No workspaces. Start one with `copse new <branch>` or `copse start`.", "dim"))
+        for t in _wrap("Nothing running yet. Start an agent with `copse new <branch>`.", width, ""):
+            lines.append(Line(t, "dim"))
         return lines
     for ws in snap:
-        git_info = ""
-        if ws["ahead"] is not None:
-            dirty = f"  {ws['dirty']} uncommitted" if ws["dirty"] else ""
-            git_info = f"  ↑{ws['ahead']} ↓{ws['behind']} vs {ws['base_branch']}{dirty}"
-        elif not os.path.isdir(ws["path"]):
-            git_info = "  (worktree missing)"
-        lines.append(Line(f"{ws['id']}  [{ws['branch']}]{git_info}", "bold", workspace=ws))
+        title = ws["branch"] + ("  (your checkout)" if ws.get("name") == "root" else "")
+        lines.append(Line(title, "bold", workspace=ws))
+        if (info := git_summary(ws)):
+            lines += [Line(t, "dim", workspace=ws) for t in _wrap(info, width, "  ")]
         if not ws["agents"]:
-            lines.append(Line("    no agents", "dim", workspace=ws))
+            lines.append(Line("  no agents", "dim", workspace=ws))
         for a in ws["agents"]:
-            since = a.get("status_since")
-            age = ago(now - since) if since else ""
-            status = a["status"] + (f" {age}" if age else "")
-            extras = []
-            if a.get("pending"):
-                extras.append(f"{a['pending']} queued msg{'s' * (a['pending'] != 1)}")
-            if a.get("reported"):
-                extras.append("reported")
-            if a["status"] == "waiting":
-                extras.append("needs approval")
-            text = (f"    {a['id']}  {a['profile']:<11} {a['provider']:<6} "
-                    f"{status:<16} {a['mode']:<16} {', '.join(extras)}")
-            lines.append(Line(text.rstrip(), STATUS_STYLE.get(a["status"], "normal"),
+            icon, label = STATUS_LABEL.get(a["status"], ("·", a["status"]))
+            if a["status"] == "idle" and a.get("reported"):
+                icon, label = "✓", "done"
+            name = a["profile"].replace("-", " ").capitalize()
+            if a["provider"] != "claude":
+                name += f" ({a['provider']})"
+            lines.append(Line(f"  {icon} {name}", STATUS_STYLE.get(a["status"], "normal"),
                               agent=a, workspace=ws))
+            since = a.get("status_since")
+            detail = [label + (f" for {ago(now - since)}" if since else "")]
+            if a.get("pending"):
+                detail.append(f"{plural(a['pending'], 'message')} queued")
+            detail.append(a["id"][:6])
+            lines += [Line(t, "dim", workspace=ws) for t in _wrap(" · ".join(detail), width, "    ")]
         lines.append(Line(""))
     return lines
 
@@ -102,7 +139,8 @@ ANSI = {"bold": "1", "dim": "2", "busy": "36", "ok": "32", "alert": "1;33", "bad
 
 def print_once(db: DB, repo_root: str | None, color: bool) -> str:
     out = []
-    for line in render(view.snapshot(db, repo_root), time.time()):
+    width = shutil.get_terminal_size().columns - 1
+    for line in render(view.snapshot(db, repo_root), time.time(), width):
         code = ANSI.get(line.style) if color else None
         out.append(f"\033[{code}m{line.text}\033[0m" if code else line.text)
     return "\n".join(out)
@@ -110,8 +148,8 @@ def print_once(db: DB, repo_root: str | None, color: bool) -> str:
 
 # -- interactive ---------------------------------------------------------------
 
-HELP = "↑/↓ select   enter attach   p peek   r refresh   q quit"
-HELP_IN_TMUX = "↑/↓ select   enter jump to agent (prefix L to come back)   p peek   q quit"
+HELP = ["↑↓ ⏎ open  p peek  q quit"]
+HELP_IN_TMUX = [*HELP, "prefix L: back from agent"]
 
 
 def _styles() -> dict[str, int]:
@@ -170,21 +208,27 @@ def _loop(stdscr, repo_root: str | None) -> None:
     lines: list[Line] = []
     stale = True
     while True:
+        h, w = stdscr.getmaxyx()
         if stale:
-            lines = render(view.snapshot(db, repo_root), time.time())
+            lines = render(view.snapshot(db, repo_root), time.time(), w - 1)
             stale = False
         rows = [i for i, ln in enumerate(lines) if ln.agent]
         selected = max(0, min(selected, len(rows) - 1))
 
-        h, w = stdscr.getmaxyx()
+        help_ = [t for text in (HELP_IN_TMUX if os.environ.get("TMUX") else HELP)
+                 for t in _wrap(text, w - 1, "")]
         stdscr.erase()
-        stdscr.addnstr(0, 0, f"copse watch · {time.strftime('%H:%M:%S')}", w - 1, styles["dim"])
-        for y, (i, ln) in enumerate(enumerate(lines[: h - 3]), start=1):
+        clock = time.strftime("%H:%M")
+        stdscr.addnstr(0, 0, "COPSE", w - 1, styles["bold"])
+        if w > len(clock) + 7:
+            stdscr.addnstr(0, w - 1 - len(clock), clock, len(clock), styles["dim"])
+        for y, (i, ln) in enumerate(enumerate(lines[: h - 3 - len(help_)]), start=2):
             attr = styles.get(ln.style, curses.A_NORMAL)
             if rows and i == rows[selected]:
                 attr |= curses.A_REVERSE
             stdscr.addnstr(y, 0, ln.text, w - 1, attr)
-        stdscr.addnstr(h - 1, 0, HELP_IN_TMUX if os.environ.get("TMUX") else HELP, w - 1, styles["dim"])
+        for y, text in enumerate(help_, start=h - len(help_)):
+            stdscr.addnstr(y, 0, text, w - 1, styles["dim"])
         stdscr.refresh()
 
         key = stdscr.getch()
