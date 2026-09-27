@@ -1,0 +1,361 @@
+"""Workspaces: a git worktree on its own branch, plus the tmux session its
+agents run in.
+
+Lifecycle (modeled on Superset's):
+  create  -> fetch base, ``git worktree add``, record base, copy local files,
+             reserve a port block, run setup
+  work    -> diff vs. base, sync (rebase/merge base in), commit, push, PR,
+             merge back
+  remove  -> refuse if dirty (unless forced), run teardown, kill tmux,
+             remove worktree; the branch is kept unless asked otherwise
+"""
+
+from __future__ import annotations
+
+import glob
+import os
+import shutil
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+from grove import git, tmux
+from grove.config import (
+    PORT_BLOCK_SIZE,
+    PORT_RANGE_START,
+    RepoConfig,
+    load_repo_config,
+    worktrees_dir,
+)
+from grove.db import DB, Workspace
+
+ROOT_NAME = "root"
+
+
+class WorkspaceError(RuntimeError):
+    pass
+
+
+@dataclass
+class SetupResult:
+    ok: bool
+    log: str
+
+
+# -- lookup ----------------------------------------------------------------
+
+
+def workspace_env(ws: Workspace) -> dict[str, str]:
+    env = {
+        "GROVE_ROOT_PATH": ws.repo_root,
+        "GROVE_WORKSPACE_PATH": ws.path,
+        "GROVE_WORKSPACE_NAME": ws.name,
+        "GROVE_WORKSPACE_ID": ws.id,
+        "GROVE_BRANCH": ws.branch,
+    }
+    if ws.base_branch:
+        env["GROVE_BASE_BRANCH"] = ws.base_branch
+    if ws.port_base is not None:
+        env["GROVE_PORT_BASE"] = str(ws.port_base)
+    if "GROVE_HOME" in os.environ:
+        env["GROVE_HOME"] = os.environ["GROVE_HOME"]
+    return env
+
+
+def resolve(db: DB, ref: str, cwd: str | None = None) -> Workspace:
+    """Find a workspace by id, by name within the current repo, or by a
+    unique name across all repos."""
+    ws = db.get_workspace(ref)
+    if ws:
+        return ws
+    repo_root = None
+    try:
+        repo_root = git.main_repo_root(cwd or os.getcwd())
+    except git.GitError:
+        pass
+    if repo_root:
+        for ws in db.find_workspaces(repo_root):
+            if ws.name == ref or ws.branch == ref:
+                return ws
+    matches = [w for w in db.find_workspaces() if w.name == ref or w.branch == ref]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        ids = ", ".join(w.id for w in matches)
+        raise WorkspaceError(f"{ref!r} is ambiguous; use one of: {ids}")
+    raise WorkspaceError(f"no workspace named {ref!r}")
+
+
+def current(db: DB, cwd: str | None = None) -> Workspace | None:
+    try:
+        top = git.toplevel(cwd or os.getcwd())
+    except git.GitError:
+        return None
+    return db.workspace_by_path(top)
+
+
+# -- creation --------------------------------------------------------------
+
+
+def _repo_slug(repo_root: str) -> str:
+    return git.slug(Path(repo_root).name) or "repo"
+
+
+def _session_name(repo_root: str, name: str) -> str:
+    # tmux forbids '.' and ':' in session names.
+    return f"grove_{_repo_slug(repo_root)}_{name}".replace(".", "_").replace(":", "_")
+
+
+def _unique_name(db: DB, repo_root: str, branch: str) -> str:
+    base = git.slug(branch) or "ws"
+    taken = {w.name for w in db.find_workspaces(repo_root)} | {ROOT_NAME}
+    name, n = base, 2
+    while name in taken:
+        name, n = f"{base}-{n}", n + 1
+    return name
+
+
+def _next_port_base(db: DB) -> int:
+    used = db.used_port_bases()
+    port = PORT_RANGE_START
+    while port in used:
+        port += PORT_BLOCK_SIZE
+    return port
+
+
+def _copy_local_files(repo_root: str, dest: str, patterns: list[str]) -> list[str]:
+    """Copy gitignored/untracked files (``.env`` etc.) that a fresh checkout
+    lacks. Never overwrites a file that already exists in the worktree."""
+    copied = []
+    for pattern in patterns:
+        for src in glob.glob(os.path.join(repo_root, pattern), recursive=True):
+            rel = os.path.relpath(src, repo_root)
+            if rel.startswith(".."):
+                continue
+            target = os.path.join(dest, rel)
+            if os.path.exists(target):
+                continue
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            if os.path.isdir(src):
+                shutil.copytree(src, target)
+            else:
+                shutil.copy2(src, target)
+            copied.append(rel)
+    return copied
+
+
+def run_commands(commands: list[str], cwd: str, env: dict[str, str]) -> SetupResult:
+    log: list[str] = []
+    full_env = {**os.environ, **env}
+    for cmd in commands:
+        log.append(f"$ {cmd}")
+        proc = subprocess.run(
+            cmd, shell=True, cwd=cwd, env=full_env, capture_output=True, text=True
+        )
+        if proc.stdout:
+            log.append(proc.stdout.rstrip())
+        if proc.stderr:
+            log.append(proc.stderr.rstrip())
+        if proc.returncode != 0:
+            log.append(f"(exit {proc.returncode})")
+            return SetupResult(False, "\n".join(log))
+    return SetupResult(True, "\n".join(log))
+
+
+@dataclass
+class Created:
+    workspace: Workspace
+    how: str               # "new", "existing" or "remote" branch
+    start_point: str
+    copied: list[str]
+    setup: SetupResult | None
+
+
+def create(
+    db: DB,
+    repo_path: str,
+    branch: str,
+    base: str | None = None,
+    *,
+    fetch: bool | None = None,
+    start: str | None = None,
+    run_setup: bool = True,
+) -> Created:
+    repo_root = git.main_repo_root(repo_path)
+    cfg: RepoConfig = load_repo_config(repo_root)
+    branch = git.sanitize_branch(f"{cfg.branch_prefix}{branch}")
+    base = base or cfg.base_branch or git.default_branch(repo_root)
+    if branch == base:
+        raise WorkspaceError(f"branch {branch!r} is the base branch; pick a new branch name")
+
+    name = _unique_name(db, repo_root, branch)
+    path = str(worktrees_dir() / _repo_slug(repo_root) / branch)
+    if os.path.exists(path):
+        raise WorkspaceError(f"{path} already exists; remove it or choose another branch")
+
+    start_point = start or git.resolve_start_point(
+        repo_root, base, cfg.fetch if fetch is None else fetch
+    )
+    how = git.add_worktree(repo_root, path, branch, start_point)
+    git.set_base(repo_root, branch, base)
+
+    ws = Workspace(
+        id=f"{_repo_slug(repo_root)}/{name}",
+        repo_root=repo_root,
+        name=name,
+        kind="worktree",
+        branch=branch,
+        base_branch=base,
+        path=path,
+        port_base=_next_port_base(db),
+        tmux_session=_session_name(repo_root, name),
+        created_at=time.time(),
+    )
+    db.add_workspace(ws)
+
+    copied = _copy_local_files(repo_root, path, cfg.copy)
+    setup = run_commands(cfg.setup, path, workspace_env(ws)) if run_setup and cfg.setup else None
+    return Created(ws, how, start_point, copied, setup)
+
+
+def adopt_root(db: DB, repo_path: str) -> Workspace:
+    """Register an existing checkout (usually the main one) so agents can run
+    there. Nothing is created on disk; removing it never deletes files."""
+    top = git.toplevel(repo_path)
+    existing = db.workspace_by_path(top)
+    if existing:
+        return existing
+    repo_root = git.main_repo_root(repo_path)
+    cfg = load_repo_config(repo_root)
+    branch = git.current_branch(top) or "HEAD"
+    is_main = top == repo_root
+    name = ROOT_NAME if is_main else _unique_name(db, repo_root, branch)
+    base = git.get_base(repo_root, branch) if branch != "HEAD" else None
+    if base is None and not is_main:
+        base = cfg.base_branch or git.default_branch(repo_root)
+    ws = Workspace(
+        id=f"{_repo_slug(repo_root)}/{name}",
+        repo_root=repo_root,
+        name=name,
+        kind="main",
+        branch=branch,
+        base_branch=base,
+        path=top,
+        port_base=None,
+        tmux_session=_session_name(repo_root, name),
+        created_at=time.time(),
+    )
+    db.add_workspace(ws)
+    return ws
+
+
+def refresh_branch(db: DB, ws: Workspace) -> Workspace:
+    """A checkout's branch can change under us (e.g. ``git switch`` in root)."""
+    live = git.current_branch(ws.path) or ws.branch
+    if live != ws.branch:
+        with db.tx() as c:
+            c.execute("UPDATE workspaces SET branch=? WHERE id=?", (live, ws.id))
+        ws.branch = live
+    return ws
+
+
+# -- removal ---------------------------------------------------------------
+
+
+@dataclass
+class Removed:
+    branch_deleted: bool
+    branch_note: str | None
+    teardown: SetupResult | None
+
+
+def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool = False) -> Removed:
+    if ws.kind == "main":
+        tmux.kill_session(ws.tmux_session)
+        db.delete_workspace(ws.id)
+        return Removed(False, "existing checkout left untouched", None)
+
+    exists = os.path.isdir(ws.path)
+    if exists and not force:
+        dirty = git.dirty_files(ws.path)
+        if dirty:
+            shown = ", ".join(dirty[:8]) + (" ..." if len(dirty) > 8 else "")
+            raise WorkspaceError(
+                f"{ws.name} has uncommitted changes ({shown}). "
+                "Commit them, or pass --force to discard."
+            )
+
+    cfg = load_repo_config(ws.repo_root)
+    teardown = None
+    if exists and cfg.teardown:
+        teardown = run_commands(cfg.teardown, ws.path, workspace_env(ws))
+        if not teardown.ok and not force:
+            raise WorkspaceError(f"teardown failed; fix it or pass --force:\n{teardown.log}")
+
+    tmux.kill_session(ws.tmux_session)
+    if exists:
+        git.remove_worktree(ws.repo_root, ws.path, force=force)
+    else:
+        git.run(["worktree", "prune"], ws.repo_root, check=False)
+
+    deleted, note = False, None
+    if delete_branch:
+        try:
+            git.delete_branch(ws.repo_root, ws.branch, force=force)
+            deleted = True
+        except git.GitError as e:
+            note = f"kept branch {ws.branch}: {e} (use --force to delete anyway)"
+    else:
+        note = f"branch {ws.branch} kept"
+    db.delete_workspace(ws.id)
+    return Removed(deleted, note, teardown)
+
+
+# -- review and integration ------------------------------------------------
+
+
+def require_base(ws: Workspace) -> str:
+    if not ws.base_branch:
+        raise WorkspaceError(f"{ws.name} has no base branch to compare against")
+    return ws.base_branch
+
+
+def pull_request(ws: Workspace, title: str | None = None, draft: bool = False) -> str:
+    """Push, then open a PR with ``gh`` when available, else return the
+    compare URL for the browser."""
+    base = require_base(ws)
+    git.push(ws.path, ws.branch)
+    if shutil.which("gh"):
+        args = ["gh", "pr", "create", "--base", base, "--head", ws.branch]
+        args += ["--title", title, "--body", ""] if title else ["--fill"]
+        if draft:
+            args.append("--draft")
+        proc = subprocess.run(args, cwd=ws.path, capture_output=True, text=True)
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+        existing = subprocess.run(
+            ["gh", "pr", "view", ws.branch, "--json", "url", "-q", ".url"],
+            cwd=ws.path, capture_output=True, text=True,
+        )
+        if existing.returncode == 0 and existing.stdout.strip():
+            return existing.stdout.strip()
+    web = git.remote_web_url(ws.repo_root)
+    if not web:
+        raise WorkspaceError("pushed, but couldn't work out a web URL for origin")
+    return f"{web}/compare/{base}...{ws.branch}?expand=1"
+
+
+def merge_back(db: DB, ws: Workspace, squash: bool = False) -> str:
+    """Merge the workspace branch into its base, in whichever checkout has the
+    base branch checked out (usually the main one)."""
+    base = require_base(ws)
+    target = git.worktree_for_branch(ws.repo_root, base)
+    if not target:
+        raise WorkspaceError(
+            f"{base!r} isn't checked out anywhere; check it out in {ws.repo_root} first"
+        )
+    if git.dirty_files(ws.path):
+        raise WorkspaceError(f"{ws.name} has uncommitted changes; commit them first")
+    git.merge_into(ws.repo_root, target, ws.branch, squash)
+    return target
