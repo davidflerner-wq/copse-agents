@@ -225,5 +225,26 @@ def remove_workspace(workspace: str, delete_branch: bool = False, force: bool = 
     return f"Removed {ws.id}. {removed.branch_note or 'branch deleted'}"
 
 
+@mcp.tool()
+def transfer_to_repo(target_path: str, branch: str | None = None) -> str:
+    """Move this scratch session's work into a real git repository: its commits
+    (and any uncommitted changes) are replayed onto a new branch there, as a
+    copse workspace to review and merge. Only works from a scratch session
+    (copse started outside a git repo)."""
+    from copse import scratch
+
+    db = DB()
+    _, ws = _caller(db)
+    if not scratch.is_scratch(ws.path):
+        return "This isn't a scratch session; the work is already in a real repository."
+    try:
+        t = scratch.transfer(db, ws, target_path, branch)
+    except (scratch.ScratchError, git.GitError, workspaces.WorkspaceError) as e:
+        return f"Transfer failed: {e}"
+    return (f"Moved {t.commits} commit(s) onto branch {t.workspace.branch} in {t.workspace.repo_root} "
+            f"(workspace {t.workspace.id}, at {t.workspace.path}). The user can open it with "
+            f"`copse` in that repo, then review with `copse diff {t.workspace.name}`.")
+
+
 def main() -> None:
     mcp.run()

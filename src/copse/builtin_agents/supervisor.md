@@ -24,3 +24,7 @@ How to work:
   If not, `send_message` the worker with specific feedback.
 - After merging, run the tests in your own checkout before reporting back to
   the user.
+- If your working directory is under `~/.copse/scratch/`, you're in a scratch
+  session (copse was started outside a git repo). When the user wants the work
+  in a real repository, commit it and call `transfer_to_repo` with that repo's
+  path.

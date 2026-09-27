@@ -45,6 +45,13 @@ live dashboard of every agent underneath, in one tmux window. Tell the superviso
 what you want. It splits the work between workers, each on its own branch, then
 reviews and merges their branches. Run `copse` again later to reopen the same chat.
 
+**Not in a git repo?** `copse` still works. It starts a *scratch session*: a
+fresh git repo under `~/.copse/scratch/`, and nothing is created in the folder you ran
+it from. When the work belongs in a real repository, run `copse transfer ~/path/to/repo`
+(or ask the supervisor). The commits land on a new branch there, ready to review and
+merge. Running `copse` in a repo also offers to bring in any scratch work that hasn't
+been moved yet.
+
 Or drive a single workspace yourself:
 
 ```sh
@@ -62,6 +69,7 @@ copse rm fix-login                          # keeps the branch
 | `copse new BRANCH [-b BASE] [-a PROFILE] [-p PROMPT]` | worktree + branch + agent |
 | `copse` | open (or reopen) the supervisor chat here, dashboard underneath |
 | `copse start [-a PROFILE] [-p PROMPT] [--new] [--no-watch]` | the same, with options |
+| `copse transfer [REPO] [--from SESSION] [-b BRANCH]` | move a scratch session's work into a real repo |
 | `copse ls [--all]` | workspaces and agents |
 | `copse watch [--all] [--once]` | live dashboard: agent status, who's waiting on you, queued messages; enter attaches, `p` peeks |
 | `copse attach / cd / open [WS]` | tmux session / path / editor |

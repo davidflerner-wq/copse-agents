@@ -18,8 +18,9 @@ from copse.profiles import list_profiles
 
 app = typer.Typer(add_completion=False, help="""copse: run coding agents in parallel, each on its own git branch.
 
-Run `copse` with no arguments to open (or reopen) a supervisor chat in this
-repo, with the live dashboard underneath.""")
+Run `copse` with no arguments to open (or reopen) a supervisor chat here, with
+the live dashboard underneath. Outside a git repo it starts a scratch session;
+`copse transfer <repo>` moves that work into a real repository later.""")
 agent_app = typer.Typer(no_args_is_help=True, help="Manage agents.")
 app.add_typer(agent_app, name="agent")
 
@@ -54,10 +55,12 @@ def _attach(ws: Workspace, window: str | None = None) -> None:
 
 
 def _run(fn, *args, **kwargs):
+    from copse.scratch import ScratchError
+
     try:
         return fn(*args, **kwargs)
     except (git.GitError, workspaces.WorkspaceError, agents.AgentError,
-            tmux.TmuxError, KeyError, ValueError) as e:
+            tmux.TmuxError, ScratchError, KeyError, ValueError) as e:
         _fail(str(e).strip("'\""))
 
 
@@ -140,7 +143,7 @@ def start(
     with the dashboard of every agent in this repo beneath it. If one is already
     running here, reopen it instead of starting another (--new to force)."""
     db = DB()
-    ws = _run(workspaces.adopt_root, db, os.getcwd())
+    ws = _here_or_scratch(db, new)
     running = agents.find_running(db, ws, agent) if not new and not prompt else None
     if running:
         typer.echo(f"↺ reopening {running.profile} agent {running.id} in {ws.id}")
@@ -153,16 +156,81 @@ def start(
         _attach(ws, a.tmux_window)
 
 
+def _here_or_scratch(db: DB, new: bool) -> Workspace:
+    """This checkout, or (outside any git repo) a scratch session for this folder."""
+    from copse import scratch
+
+    cwd = os.getcwd()
+    try:
+        git.main_repo_root(cwd)
+    except git.GitError:
+        existing = None if new else scratch.for_origin(db, cwd)
+        if existing:
+            typer.echo(f"↺ scratch session {existing.id}")
+            return existing
+        ws = _run(scratch.create, db, cwd)
+        typer.secho(f"No git repository here, so this is a scratch session, tracked in {ws.path}", fg="cyan")
+        typer.echo("Nothing is created in this folder. When you're ready, move the work into a real repo:")
+        typer.echo("  copse transfer ~/path/to/repo    (or ask the supervisor to do it)")
+        return ws
+    _offer_pending_scratch(db, cwd)
+    return _run(workspaces.adopt_root, db, cwd)
+
+
+def _offer_pending_scratch(db: DB, cwd: str) -> None:
+    """Inside a real repo: offer to bring in scratch work that hasn't moved yet."""
+    from copse import scratch
+
+    if scratch.is_scratch(cwd) or not sys.stdin.isatty():
+        return
+    for s in scratch.pending(db)[:3]:
+        n = scratch.commit_count(s)
+        dirty = " + uncommitted changes" if git.dirty_files(s.path) else ""
+        started = scratch.origin_of(s.path) or "?"
+        if typer.confirm(f"Bring scratch session {s.name} ({n} commit(s){dirty}, started in {started}) into this repo?", default=False):
+            _do_transfer(db, s, cwd, None)
+
+
+def _do_transfer(db: DB, s: Workspace, target: str, branch: Optional[str]) -> None:
+    from copse import scratch
+
+    t = _run(scratch.transfer, db, s, target, branch)
+    extra = " (uncommitted work was committed first)" if t.snapshot else ""
+    typer.secho(f"✓ moved {t.commits} commit(s){extra} onto branch {t.workspace.branch}", fg="green")
+    typer.echo(f"  workspace {t.workspace.id} at {t.workspace.path}")
+    typer.echo(f"  review: copse diff {t.workspace.name}   merge: copse merge {t.workspace.name}   PR: copse pr {t.workspace.name}")
+
+
+@app.command()
+def transfer(
+    target: Optional[str] = typer.Argument(None, help="A folder inside the real git repo (default: here)."),
+    source: Optional[str] = typer.Option(None, "--from", help="Scratch session name or id (default: the one you're in, or the newest)."),
+    branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Branch to create (default: copse/from-<session>)."),
+) -> None:
+    """Move a scratch session's work into a real repository, on its own branch."""
+    from copse import scratch
+
+    db = DB()
+    here = os.getcwd()
+    if source:
+        s = _ws(db, source)
+    elif scratch.is_scratch(here):
+        s = _ws(db, None)
+    else:
+        options = scratch.pending(db)
+        if not options:
+            _fail("no scratch sessions with work to transfer")
+        s = options[0]
+    dest = target or here
+    if scratch.is_scratch(dest):
+        _fail("give the path of the real repository to move the work into, e.g. copse transfer ~/Projects/myapp")
+    _do_transfer(db, s, dest, branch)
+
+
 @app.callback(invoke_without_command=True)
 def default(ctx: typer.Context) -> None:
-    """Bare `copse`: open the supervisor chat for this repo."""
+    """Bare `copse`: open the supervisor chat here (a scratch session outside git)."""
     if ctx.invoked_subcommand is None:
-        try:
-            git.main_repo_root(os.getcwd())
-        except git.GitError:
-            typer.echo(ctx.get_help())
-            typer.secho("\nRun copse inside a git repository to open a supervisor.", fg="yellow")
-            raise typer.Exit(0)
         start(agent="supervisor", prompt=None, provider=None, attach=True, watch=True, new=False)
 
 
