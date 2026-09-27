@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Iterator
 
 from copse.config import db_path
@@ -96,6 +96,14 @@ class Message:
     delivered_at: float | None
 
 
+def _load(cls, row):
+    """Build ``cls`` from a row, ignoring columns this version doesn't know.
+    A newer copse may have added columns; an older copse reading the same
+    ~/.copse database must not crash on them."""
+    names = {f.name for f in fields(cls)}
+    return cls(**{k: row[k] for k in row.keys() if k in names})
+
+
 class DB:
     def __init__(self, path: str | None = None) -> None:
         p = path or str(db_path())
@@ -139,7 +147,7 @@ class DB:
 
     def get_workspace(self, ws_id: str) -> Workspace | None:
         row = self.conn.execute("SELECT * FROM workspaces WHERE id=?", (ws_id,)).fetchone()
-        return Workspace(**row) if row else None
+        return _load(Workspace, row) if row else None
 
     def find_workspaces(self, repo_root: str | None = None) -> list[Workspace]:
         if repo_root:
@@ -148,11 +156,11 @@ class DB:
             )
         else:
             rows = self.conn.execute("SELECT * FROM workspaces ORDER BY created_at")
-        return [Workspace(**r) for r in rows]
+        return [_load(Workspace, r) for r in rows]
 
     def workspace_by_path(self, path: str) -> Workspace | None:
         row = self.conn.execute("SELECT * FROM workspaces WHERE path=?", (path,)).fetchone()
-        return Workspace(**row) if row else None
+        return _load(Workspace, row) if row else None
 
     def delete_workspace(self, ws_id: str) -> None:
         with self.tx() as c:
@@ -177,7 +185,7 @@ class DB:
 
     def get_agent(self, agent_id: str) -> Agent | None:
         row = self.conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
-        return Agent(**row) if row else None
+        return _load(Agent, row) if row else None
 
     def list_agents(self, workspace_id: str | None = None) -> list[Agent]:
         if workspace_id:
@@ -186,13 +194,13 @@ class DB:
             )
         else:
             rows = self.conn.execute("SELECT * FROM agents ORDER BY created_at")
-        return [Agent(**r) for r in rows]
+        return [_load(Agent, r) for r in rows]
 
     def children(self, parent_id: str) -> list[Agent]:
         rows = self.conn.execute(
             "SELECT * FROM agents WHERE parent_id=? ORDER BY created_at", (parent_id,)
         )
-        return [Agent(**r) for r in rows]
+        return [_load(Agent, r) for r in rows]
 
     def update_agent(self, agent_id: str, **fields: object) -> None:
         if "status" in fields:
@@ -253,7 +261,7 @@ class DB:
             if not row:
                 return None
             c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (time.time(), row["id"]))
-            return Message(**row)
+            return _load(Message, row)
 
     def drop_pending(self, agent_id: str, sender_id: str) -> int:
         with self.tx() as c:

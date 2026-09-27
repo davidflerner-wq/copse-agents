@@ -74,3 +74,17 @@ def test_old_databases_are_migrated(tmp_path):
     assert a.status_since is None and a.status == "idle"
     db.set_status("a", "processing")
     assert db.get_agent("a").status_since is not None
+
+
+def test_older_copse_ignores_columns_from_a_newer_one(tmp_path):
+    # A newer copse may add columns to ~/.copse/copse.db; this version must
+    # still read the rows instead of crashing (as 0.1.x did on 0.2.0's).
+    from copse.db import Agent
+    db = DB(str(tmp_path / "t.db"))
+    db.conn.execute("INSERT INTO workspaces VALUES ('w','/r','n','main','b',NULL,'/p',NULL,'s',0)")
+    db.add_agent(Agent("a", "w", "developer", "claude", None, "interactive", "idle", "@1", None, 1.0))
+    db.conn.execute("ALTER TABLE agents ADD COLUMN from_the_future TEXT")
+    db.conn.execute("ALTER TABLE workspaces ADD COLUMN also_new INTEGER")
+    assert db.get_agent("a").status == "idle"
+    assert [a.id for a in db.list_agents("w")] == ["a"]
+    assert db.get_workspace("w").name == "n"
