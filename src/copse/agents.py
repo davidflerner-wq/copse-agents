@@ -827,6 +827,16 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             from copse import autopilot as pilot
 
             pilot.limit_reached(db, agent)
+    elif event == "subagent-start":
+        # A crash can skip SubagentStop, so this doesn't touch agent.status:
+        # the sidebar hides a subagent that's been "running" too long instead.
+        sub_id = payload.get("agent_id")
+        if sub_id:
+            db.start_native_subagent(str(sub_id), agent_id, payload.get("agent_type"))
+    elif event == "subagent-stop":
+        sub_id = payload.get("agent_id")
+        if sub_id:
+            db.stop_native_subagent(str(sub_id))
     return None
 
 

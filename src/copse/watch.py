@@ -173,6 +173,14 @@ def render(snap: list[dict], now: float, width: int = 80, pilot: dict | None = N
                 detail.append(f"{plural(a['pending'], 'message')} queued")
             detail.append(a["id"][:6])
             lines += [Line(t, "dim", workspace=ws) for t in _wrap(" · ".join(detail), width, "    ")]
+            for sub in a.get("subagents") or []:
+                sub_name = sub.get("agent_type") or "subagent"
+                if sub["ended_at"] is None:
+                    text, style = f"↳ {sub_name} · running {ago(now - sub['started_at'])}", "busy"
+                else:
+                    text, style = f"↳ {sub_name} · ✓ done", "dim"
+                # Not selectable: no `agent=`, so it can't be attached to or peeked.
+                lines += [Line(t, style, workspace=ws) for t in _wrap(text, width, "    ")]
         lines.append(Line(""))
     return lines
 

@@ -4,12 +4,22 @@ agents. Git fields are None when they can't be computed."""
 from __future__ import annotations
 
 import os
+import time
 
 from copse import agents, git
-from copse.db import DB, Agent, Workspace
+from copse.db import DB, Agent, NativeSubagent, Workspace
+
+# A crash can skip SubagentStop, so a subagent still "running" this long is
+# treated as stale and hidden rather than shown forever.
+NATIVE_SUBAGENT_STALE = 2 * 3600
+# A subagent that ended stays visible (showing "done") for a bit so it
+# doesn't just vanish from the sidebar the instant it finishes.
+NATIVE_SUBAGENT_LINGER = 30
 
 
-def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False) -> dict:
+def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False,
+                    native_subagents: dict[str, list[NativeSubagent]] | None = None,
+                    now: float | None = None) -> dict:
     ahead = behind = dirty = None
     if ws.base_branch and os.path.isdir(ws.path):
         try:
@@ -26,11 +36,31 @@ def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False) -> dict:
         "ahead": ahead,
         "behind": behind,
         "dirty": dirty,
-        "agents": [agent_entry(db, a, detail=detail) for a in db.list_agents(ws.id)],
+        "agents": [
+            agent_entry(db, a, detail=detail,
+                       native_subagents=None if native_subagents is None else native_subagents.get(a.id, []),
+                       now=now)
+            for a in db.list_agents(ws.id)
+        ],
     }
 
 
-def agent_entry(db: DB, a: Agent, *, detail: bool = False) -> dict:
+def _visible_native_subagents(subs: list[NativeSubagent], now: float) -> list[dict]:
+    out = []
+    for s in subs:
+        if s.ended_at is None:
+            if now - s.started_at > NATIVE_SUBAGENT_STALE:
+                continue
+        elif now - s.ended_at > NATIVE_SUBAGENT_LINGER:
+            continue
+        out.append({"id": s.id, "agent_type": s.agent_type, "started_at": s.started_at,
+                    "ended_at": s.ended_at})
+    return out
+
+
+def agent_entry(db: DB, a: Agent, *, detail: bool = False,
+                native_subagents: list[NativeSubagent] | None = None,
+                now: float | None = None) -> dict:
     if not agents.runs_process(a):
         status = a.status  # a supervisor's own subagent: no terminal to check
     elif agents.is_alive(a):
@@ -41,6 +71,7 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False) -> dict:
     entry = {"id": a.id, "profile": a.profile, "provider": a.provider,
              "status": status, "mode": a.mode}
     if detail:
+        subs = db.native_subagents(a.id) if native_subagents is None else native_subagents
         entry.update(
             parent_id=a.parent_id,
             status_since=a.status_since,
@@ -48,12 +79,16 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False) -> dict:
             reported=a.result is not None,
             window=a.tmux_window,
             headless=bool(a.headless),
+            subagents=_visible_native_subagents(subs, now if now is not None else time.time()),
         )
     return entry
 
 
 def snapshot(db: DB, repo_root: str | None) -> list[dict]:
-    return [workspace_entry(db, ws, detail=True) for ws in db.find_workspaces(repo_root)]
+    now = time.time()
+    by_parent = db.all_native_subagents()
+    return [workspace_entry(db, ws, detail=True, native_subagents=by_parent, now=now)
+            for ws in db.find_workspaces(repo_root)]
 
 
 def autopilot_entry(db: DB, repo_root: str | None) -> dict | None:

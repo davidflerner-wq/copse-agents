@@ -89,6 +89,17 @@ CREATE TABLE IF NOT EXISTS reviews (
     summary TEXT,
     created_at REAL NOT NULL
 );
+-- Claude Code's own built-in subagents (its Agent tool), reported by the
+-- SubagentStart/SubagentStop hooks. Purely informational for the sidebar:
+-- kept out of `agents` so they never affect message delivery, is_alive,
+-- pause/resume, autopilot worker counts, list_agents, kill or retention.
+CREATE TABLE IF NOT EXISTS native_subagents (
+    id TEXT PRIMARY KEY,            -- Claude's agent_id
+    parent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
+    agent_type TEXT,
+    started_at REAL,
+    ended_at REAL
+);
 """
 
 
@@ -161,6 +172,15 @@ class Review:
     approved: int
     summary: str | None
     created_at: float
+
+
+@dataclass
+class NativeSubagent:
+    id: str
+    parent_id: str
+    agent_type: str | None
+    started_at: float
+    ended_at: float | None
 
 
 @dataclass
@@ -436,3 +456,40 @@ class DB:
             (workspace_id, sha),
         ).fetchone()
         return _load(Review, row) if row else None
+
+    # -- native subagents ----------------------------------------------------
+
+    def start_native_subagent(self, sub_id: str, parent_id: str, agent_type: str | None) -> None:
+        """Record a SubagentStart. One write: also prunes ``parent_id``'s own
+        ended rows older than an hour, so this table doesn't grow forever."""
+        now = time.time()
+        with self.tx() as c:
+            c.execute(
+                "DELETE FROM native_subagents WHERE parent_id=? AND ended_at IS NOT NULL AND ended_at<?",
+                (parent_id, now - 3600),
+            )
+            c.execute(
+                "INSERT OR REPLACE INTO native_subagents (id, parent_id, agent_type, started_at, ended_at) "
+                "VALUES (?,?,?,?,NULL)",
+                (sub_id, parent_id, agent_type, now),
+            )
+
+    def stop_native_subagent(self, sub_id: str) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE native_subagents SET ended_at=? WHERE id=?", (time.time(), sub_id))
+
+    def native_subagents(self, parent_id: str) -> list[NativeSubagent]:
+        rows = self.conn.execute(
+            "SELECT * FROM native_subagents WHERE parent_id=? ORDER BY started_at", (parent_id,)
+        )
+        return [_load(NativeSubagent, r) for r in rows]
+
+    def all_native_subagents(self) -> dict[str, list[NativeSubagent]]:
+        """Every native subagent, grouped by parent id: one query for a whole
+        dashboard snapshot instead of one per agent."""
+        rows = self.conn.execute("SELECT * FROM native_subagents ORDER BY started_at")
+        out: dict[str, list[NativeSubagent]] = {}
+        for r in rows:
+            sub = _load(NativeSubagent, r)
+            out.setdefault(sub.parent_id, []).append(sub)
+        return out
