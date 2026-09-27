@@ -227,8 +227,13 @@ def base_ref(path: str | Path, base: str) -> str:
 
 
 def dirty_files(path: str | Path) -> list[str]:
-    lines = out(["status", "--porcelain", "--untracked-files=all"], path).splitlines()
-    return [line[3:] for line in lines if line]
+    # Deliberately not out(): it strips, and porcelain's status field is two
+    # columns whose first is blank when a change is not staged. " M app.py"
+    # arrives as "M app.py", and the three-character slice then eats the first
+    # letter of the path. Untracked files are "?? path" and were unaffected,
+    # which is why this survived.
+    proc = run(["status", "--porcelain", "--untracked-files=all"], path)
+    return [line[3:] for line in proc.stdout.splitlines() if line]
 
 
 def status(path: str | Path, base: str | None) -> Status:
