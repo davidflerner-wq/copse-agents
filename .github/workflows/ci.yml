@@ -18,12 +18,12 @@ jobs:
         python: ["3.11", "3.12", "3.13"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install tmux
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then sudo apt-get update -q && sudo apt-get install -yq tmux
           else brew install tmux; fi
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync
