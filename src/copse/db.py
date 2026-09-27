@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS agents (
     status TEXT NOT NULL,
     tmux_window TEXT NOT NULL,
     result TEXT,
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    status_since REAL              -- when status last changed
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,6 +79,7 @@ class Agent:
     tmux_window: str
     result: str | None
     created_at: float
+    status_since: float | None = None
 
 
 @dataclass
@@ -102,6 +104,13 @@ class DB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Bring databases created by older versions up to the current schema."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(agents)")}
+        if "status_since" not in cols:
+            self.conn.execute("ALTER TABLE agents ADD COLUMN status_since REAL")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -153,9 +162,12 @@ class DB:
     def add_agent(self, a: Agent) -> None:
         with self.tx() as c:
             c.execute(
-                "INSERT INTO agents VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO agents (id, workspace_id, profile, provider, parent_id, mode, "
+                "status, tmux_window, result, created_at, status_since) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (a.id, a.workspace_id, a.profile, a.provider, a.parent_id, a.mode,
-                 a.status, a.tmux_window, a.result, a.created_at),
+                 a.status, a.tmux_window, a.result, a.created_at,
+                 a.status_since or a.created_at),
             )
 
     def get_agent(self, agent_id: str) -> Agent | None:
@@ -178,6 +190,11 @@ class DB:
         return [Agent(**r) for r in rows]
 
     def update_agent(self, agent_id: str, **fields: object) -> None:
+        if "status" in fields:
+            status = fields.pop("status")
+            self.set_status(agent_id, str(status))
+            if not fields:
+                return
         cols = ", ".join(f"{k}=?" for k in fields)
         with self.tx() as c:
             c.execute(f"UPDATE agents SET {cols} WHERE id=?", (*fields.values(), agent_id))
@@ -187,20 +204,20 @@ class DB:
         into the agent's terminal, so two senders never interleave keystrokes."""
         with self.tx() as c:
             cur = c.execute(
-                "UPDATE agents SET status='processing' WHERE id=? AND status='idle'", (agent_id,)
+                "UPDATE agents SET status='processing', status_since=? WHERE id=? AND status='idle'",
+                (time.time(), agent_id),
             )
             return cur.rowcount == 1
 
+    _STAMP = "status_since = CASE WHEN status = ? THEN status_since ELSE ? END"
+
     def set_status(self, agent_id: str, status: str, only_if: str | None = None) -> None:
-        if only_if is not None:
-            with self.tx() as c:
-                c.execute(
-                    "UPDATE agents SET status=? WHERE id=? AND status=?",
-                    (status, agent_id, only_if),
-                )
-            return
+        guard, args = ("", ()) if only_if is None else (" AND status=?", (only_if,))
         with self.tx() as c:
-            c.execute("UPDATE agents SET status=? WHERE id=?", (status, agent_id))
+            c.execute(
+                f"UPDATE agents SET {self._STAMP}, status=? WHERE id=?{guard}",
+                (status, time.time(), status, agent_id, *args),
+            )
 
     def set_result(self, agent_id: str, result: str) -> None:
         with self.tx() as c:

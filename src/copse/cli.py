@@ -11,7 +11,7 @@ from typing import Optional
 
 import typer
 
-from copse import agents, git, tmux, workspaces
+from copse import agents, git, tmux, view, workspaces
 from copse.config import write_template
 from copse.db import DB, Workspace
 from copse.profiles import list_profiles
@@ -140,37 +140,6 @@ def start(
         _attach(ws, a.tmux_window)
 
 
-def _ls_entry(db: DB, ws: Workspace) -> dict:
-    """What `copse ls` shows for one workspace; git fields are None when unknown."""
-    ahead = behind = dirty = None
-    if ws.base_branch and os.path.isdir(ws.path):
-        try:
-            st = git.status(ws.path, ws.base_branch)
-            ahead, behind, dirty = st.ahead, st.behind, len(st.dirty_files)
-        except git.GitError:
-            pass
-    return {
-        "id": ws.id,
-        "name": ws.name,
-        "branch": ws.branch,
-        "base_branch": ws.base_branch,
-        "path": ws.path,
-        "ahead": ahead,
-        "behind": behind,
-        "dirty": dirty,
-        "agents": [_agent_entry(db, a) for a in db.list_agents(ws.id)],
-    }
-
-
-def _agent_entry(db: DB, a) -> dict:
-    if agents.is_alive(a):
-        status = agents.reconcile(db, a, samples=1).status
-    else:
-        status = "exited"
-    return {"id": a.id, "profile": a.profile, "provider": a.provider,
-            "status": status, "mode": a.mode}
-
-
 @app.command("ls")
 def list_cmd(
     all_repos: bool = typer.Option(False, "--all", help="Every repo, not just this one."),
@@ -186,7 +155,7 @@ def list_cmd(
             pass
     rows = db.find_workspaces(repo_root)
     if as_json:
-        typer.echo(json.dumps([_ls_entry(db, ws) for ws in rows], indent=2))
+        typer.echo(json.dumps([view.workspace_entry(db, ws) for ws in rows], indent=2))
         return
     if not rows:
         typer.echo("no workspaces")
@@ -195,7 +164,7 @@ def list_cmd(
         if not os.path.isdir(ws.path):
             typer.secho(f"{ws.id}  (missing: {ws.path})", fg="red")
             continue
-        e = _ls_entry(db, ws)
+        e = view.workspace_entry(db, ws)
         info = ""
         if e["ahead"] is not None:
             dirty = f" *{e['dirty']}" if e["dirty"] else ""
@@ -204,6 +173,26 @@ def list_cmd(
         typer.echo(f"  [{ws.branch}]{info}")
         for a in e["agents"]:
             typer.echo(f"    {a['id']}  {a['profile']:<12} {a['provider']:<7} {a['status']:<11} {a['mode']}")
+
+
+@app.command()
+def watch(
+    all_repos: bool = typer.Option(False, "--all", help="Every repo, not just this one."),
+    once: bool = typer.Option(False, "--once", help="Print one snapshot and exit."),
+) -> None:
+    """Live dashboard of workspaces and agents (highlights agents waiting on you)."""
+    from copse import watch as watch_mod
+
+    repo_root = None
+    if not all_repos:
+        try:
+            repo_root = git.main_repo_root(os.getcwd())
+        except git.GitError:
+            pass
+    if once or not sys.stdout.isatty():
+        typer.echo(watch_mod.print_once(DB(), repo_root, color=sys.stdout.isatty()))
+        return
+    watch_mod.run(repo_root)
 
 
 @app.command()
