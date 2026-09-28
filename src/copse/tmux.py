@@ -242,6 +242,23 @@ def pane_window(pane: str) -> str | None:
     return proc.stdout.strip() or None
 
 
+def pane_session(pane: str) -> str | None:
+    """The name of the session ``pane`` is currently in, or None if it's gone."""
+    proc = _tmux("display-message", "-p", "-t", pane, "#{session_name}", check=False)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def session_attached(session: str) -> bool:
+    """Whether any client is attached to ``session`` (someone is looking at
+    it). False for a session that doesn't exist."""
+    proc = _tmux("display-message", "-p", "-t", f"={session}", "#{session_attached}", check=False)
+    if proc.returncode != 0:
+        return False
+    return proc.stdout.strip() not in ("", "0")
+
+
 def active_window(session: str) -> str | None:
     """The id of ``session``'s currently active window, or None if the
     session doesn't exist."""

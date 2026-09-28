@@ -244,11 +244,24 @@ def run_native(db: DB, agent_id: str, resume: str | None = None, *,
     permissions = Permissions(profile.permission_mode, [*(profile.allowed_tools or []), *codemap.ALLOWED_TOOLS])
     system = "\n\n".join(filter(None, [profile.prompt, NATIVE_NOTE, DELIVERY_NOTE]))
     config = LoopConfig(context_tokens=profile.context_tokens or DEFAULT_CONTEXT_TOKENS)
+    # Text streamed since the last tool call: what the pane already shows.
+    streamed = {"text": ""}
+
+    def show(delta: str) -> None:
+        streamed["text"] += delta
+        print(delta, end="", flush=True)
+
+    def log(line: str) -> None:
+        if streamed["text"] and not streamed["text"].endswith("\n"):
+            print(flush=True)
+        streamed["text"] = ""
+        print(f"  · {line}", flush=True)
+
     loop = NativeAgent(
         Client(endpoint), toolbox, permissions, system, config=config, transcript=transcript,
         on_status=lambda s: db.set_status(agent_id, s),
         inbox=lambda: _drain(db, agent_id),
-        log=lambda line: print(f"  · {line}", flush=True),
+        log=log, on_text=show,
     )
     if resume and loop.load(resume):
         print(f"copse: resumed the conversation ({len(loop.messages)} messages)", flush=True)
@@ -268,13 +281,17 @@ def run_native(db: DB, agent_id: str, resume: str | None = None, *,
             continue
         turn += 1
         print(f"\n── copse: turn {turn} ──\n{_preview(msg.body)}\n", flush=True)
+        streamed["text"] = ""
         try:
             answer = loop.run(msg.body)
         except ClientError as e:
             print(f"\n── copse: the model endpoint failed: {e}; this worker has stopped ──", flush=True)
             return 1
         loop.save(saved)
-        print(f"\n{_preview(answer, 12)}\n── copse: turn finished ──", flush=True)
+        if streamed["text"].strip():  # the answer is already on screen
+            print(f"\n── copse: turn finished ──", flush=True)
+        else:
+            print(f"\n{_preview(answer, 12)}\n── copse: turn finished ──", flush=True)
         agent = db.get_agent(agent_id)
         if agent is None:
             return 0

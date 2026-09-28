@@ -377,6 +377,27 @@ def test_write_creates_parents_and_edit_replaces_exactly_once(box, tmp_path):
     assert box.call("Edit", {"path": "pkg/mod.py", "old_string": "", "new_string": "x"}).is_error
 
 
+def test_write_refuses_to_replace_a_file_the_model_has_not_read(box, tmp_path):
+    """A model that has lost the thread "creates" README.md over the real one
+    (seen on qwen3-coder: 661 lines replaced by a 3-line stub). An existing
+    file is only replaced whole once the model has looked at it, by Read or
+    by an Edit of it; a file it wrote itself counts as seen too."""
+    (tmp_path / "README.md").write_text("# real\n" * 100)
+    r = box.call("Write", {"path": "README.md", "content": "# stub\n"})
+    assert r.is_error and "haven't read it" in r.content
+    assert (tmp_path / "README.md").read_text() == "# real\n" * 100
+    box.call("Read", {"path": "README.md", "limit": 1})
+    r = box.call("Write", {"path": "README.md", "content": "# rewritten\n"})
+    assert not r.is_error and (tmp_path / "README.md").read_text() == "# rewritten\n"
+    # Edit reads the file to match, so it counts as having seen it.
+    (tmp_path / "other.txt").write_text("x = 1\n")
+    box.call("Edit", {"path": "other.txt", "old_string": "x = 1", "new_string": "x = 2"})
+    assert not box.call("Write", {"path": "other.txt", "content": "x = 3\n"}).is_error
+    # A file the model created itself can be rewritten freely.
+    box.call("Write", {"path": "new.txt", "content": "a\n"})
+    assert not box.call("Write", {"path": "new.txt", "content": "b\n"}).is_error
+
+
 def test_file_tools_stay_inside_the_working_directory(box, tmp_path):
     outside = tmp_path.parent / "outside.txt"
     outside.write_text("secret")
