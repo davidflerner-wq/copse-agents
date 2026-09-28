@@ -10,7 +10,7 @@ import time
 import pytest
 
 from conftest import sh
-from copse import git, mcp_server, workspaces
+from copse import agents, git, mcp_server, tmux, workspaces
 from copse.db import Agent
 
 
@@ -147,18 +147,77 @@ def test_merge_workspace_reports_non_conflict_sync_failure(db, repo, boss):
     assert not (repo / "f.txt").exists()  # main untouched
 
 
-def test_merge_workspace_skips_sync_when_worker_is_busy(db, repo, boss):
+CLAUDE_IDLE = "⏺ Done.\n\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+
+
+def _stale_branch_with_worker(db, repo, mode="assign", result=None):
+    """A branch behind main, with worker w1 marked processing in it."""
     ws = workspaces.create(db, str(repo), "feature").workspace
     open(os.path.join(ws.path, "f.txt"), "w").write("f")
     git.commit_all(ws.path, "feature work")
     _advance_base(repo)
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", "boss", mode, "processing",
+                        "@1", result, time.time()))
+    return ws
+
+
+@pytest.fixture
+def live_worker(monkeypatch):
+    """Workers' windows count as alive, with a screen reconcile can't read
+    (so the hook status stands)."""
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: "")
+
+
+@pytest.mark.parametrize("mode", ["assign", "handoff", "handoff_detached"])
+def test_merge_workspace_skips_sync_when_worker_is_busy(db, repo, boss, live_worker, mode):
+    ws = _stale_branch_with_worker(db, repo, mode)
+
+    out = asyncio.run(mcp_server.merge_workspace(ws.id))
+
+    assert out == "Not merged: w1 is still working on feature; retry once it reports."
+    assert not os.path.exists(os.path.join(ws.path, "base.txt"))  # sync never ran
+
+
+def test_merge_workspace_ignores_busy_worker_when_no_sync_needed(db, repo, boss, live_worker):
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    open(os.path.join(ws.path, "new.py"), "w").write("x = 1\n")
+    git.commit_all(ws.path, "work")
     db.add_agent(Agent("w1", ws.id, "developer", "claude", "boss", "assign", "processing",
                         "@1", None, time.time()))
 
     out = asyncio.run(mcp_server.merge_workspace(ws.id))
 
-    assert out == "Not merged: w1 is still working on feature."
-    assert not os.path.exists(os.path.join(ws.path, "base.txt"))  # sync never ran
+    assert out.startswith("Merged feature into main")
+
+
+def test_merge_workspace_ignores_worker_whose_window_is_dead(db, repo, boss):
+    ws = _stale_branch_with_worker(db, repo)  # "@1" isn't a live window
+
+    out = asyncio.run(mcp_server.merge_workspace(ws.id))
+
+    assert out.startswith("Merged feature into main")
+    assert (repo / "f.txt").exists()
+
+
+def test_merge_workspace_reconciles_a_stale_processing_worker(db, repo, boss, monkeypatch):
+    ws = _stale_branch_with_worker(db, repo)
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
+
+    out = asyncio.run(mcp_server.merge_workspace(ws.id))
+
+    assert out.startswith("Merged feature into main")
+    assert db.get_agent("w1").status == "idle"
+
+
+def test_merge_workspace_ignores_worker_that_already_reported(db, repo, boss, live_worker):
+    # report_result was called; its Stop hook just hasn't fired yet.
+    ws = _stale_branch_with_worker(db, repo, "handoff", result="done")
+
+    out = asyncio.run(mcp_server.merge_workspace(ws.id))
+
+    assert out.startswith("Merged feature into main")
 
 
 def test_merge_workspace_does_not_block_a_worker_merging_its_own_branch(db, repo, monkeypatch):

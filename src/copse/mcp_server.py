@@ -48,12 +48,18 @@ def _ws(db: DB, ref: str) -> Workspace:
 
 
 def _busy_worker(db: DB, ws: Workspace, exclude_id: str | None) -> Agent | None:
-    """A worker (not a reviewer) still running in ``ws``, other than the
-    caller itself. Used to avoid racing a worker mid-commit."""
+    """A live worker (not a reviewer) still at work in ``ws``, other than the
+    caller itself. Used to avoid racing a worker mid-commit. A worker whose
+    result is already recorded is finished even if its Stop hook hasn't
+    fired yet."""
+    modes = tuple(m for m in agents.REPORTING_MODES if m != "review")
     for a in db.list_agents(ws.id):
-        if a.id == exclude_id:
+        if a.id == exclude_id or a.mode not in modes or a.result is not None:
             continue
-        if a.mode in ("handoff", "assign") and a.status in ("processing", "waiting"):
+        if not agents.is_alive(a):
+            continue
+        a = agents.reconcile(db, a, samples=1)
+        if a.status in ("processing", "waiting"):
             return a
     return None
 
@@ -276,8 +282,10 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
     lists the conflicting files. If it succeeds and adds a commit, that
     commit hasn't been reviewed yet (when this repo requires review), so
     nothing is merged; the reply asks for a fresh request_review instead.
-    This sync is skipped while a worker is still active in the workspace, to
-    avoid racing its commits.
+    If the branch needs that sync while another worker is still at work in
+    the workspace (alive and not yet reported), nothing is done, to avoid
+    racing its commits: the reply says to retry once it reports. A worker
+    merging its own branch is never blocked by itself.
 
     Then copse checks the merge gates in the workspace: everything committed,
     a reviewer's approval of this commit (in autopilot sessions, or when the
@@ -292,11 +300,13 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
         pilot = autopilot.for_agent(db, caller.id) if caller else None
         review = cfg.review if cfg.review is not None else bool(pilot and pilot.enabled)
 
-        busy = _busy_worker(db, ws, caller.id if caller else None)
-        if busy:
-            return f"Not merged: {busy.id} is still working on {ws.branch}."
-
         try:
+            behind, _ahead = git.ahead_behind(ws.path, workspaces.require_base(ws))
+            if behind:
+                busy = _busy_worker(db, ws, caller.id if caller else None)
+                if busy:
+                    return (f"Not merged: {busy.id} is still working on {ws.branch}; "
+                            "retry once it reports.")
             sync_result = workspaces.sync_with_base(ws)
         except git.GitError as e:
             return f"Not merged: {e}"

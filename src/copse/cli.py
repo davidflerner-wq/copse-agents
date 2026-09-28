@@ -626,8 +626,11 @@ def rm(
     db = DB()
     ws = _ws(db, workspace)
     if ws.base_branch and os.path.isdir(ws.path) and not delete_branch:
-        st = git.status(ws.path, ws.base_branch)
-        if st.ahead and st.unpushed != 0:
+        try:
+            st = git.status(ws.path, ws.base_branch)
+        except git.GitError:
+            st = None  # e.g. the base branch is gone; the note is only a courtesy
+        if st and st.ahead and st.unpushed != 0:
             typer.secho(
                 f"note: {ws.branch} has {st.ahead} commit(s) not in {ws.base_branch} "
                 "and not pushed; the branch is kept.", fg="yellow",
