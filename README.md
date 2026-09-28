@@ -46,10 +46,11 @@ who's waiting for your approval. Tell the supervisor what you want. It splits th
 work between workers, each on its own branch, then reviews and merges their
 branches. It starts in under a second.
 
-**The sidebar follows you.** There's one sidebar pane per repo, not one per
-window: switch to any other copse window or session (⏎ in the sidebar, `copse
-attach`, prefix-L back, clicking a pane) and it relocates there too, always
-beside whatever you're looking at, never spawning a second dashboard. Scroll it
+**The sidebar follows you.** There's one sidebar pane per session root, not
+one per window: switch to any other copse window or session (⏎ in the
+sidebar, `copse attach`, prefix-L back, clicking a pane) and it relocates
+there too, always beside whatever you're looking at, never spawning a second
+dashboard. Scroll it
 with the mouse wheel, PageUp/PageDown, or Home/End when there's more than fits;
 moving the ↑↓ selection scrolls to keep it in view.
 

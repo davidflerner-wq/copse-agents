@@ -76,6 +76,24 @@ def test_claude_command_wires_hooks_mcp_and_profile():
     assert '"disableAgentView": true' in settings
 
 
+def test_disable_agent_view_follows_mode_not_profile_name():
+    """disableAgentView is about how copse drives the pane (a human's own
+    interactive chat vs. one copse pastes messages into), not the profile's
+    name -- a custom-named profile run interactively must still get the
+    agent view, and a non-interactive one must still lose it."""
+    from dataclasses import replace
+
+    custom = replace(load_profile("developer"), name="my-custom-profile")
+
+    def settings_for(mode):
+        argv = ClaudeCode().command(LaunchContext("abc", custom, "hi", mode=mode))
+        return argv[argv.index("--settings") + 1]
+
+    assert '"disableAgentView": false' in settings_for("interactive")
+    assert '"disableAgentView": true' in settings_for("assign")
+    assert '"disableAgentView": true' in settings_for("handoff")
+
+
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
 def test_shell_agent_in_tmux_end_to_end(db, ws):
     a = agents.spawn(db, ws, "developer", provider_name="shell")

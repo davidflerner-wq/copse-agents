@@ -43,6 +43,7 @@ class LaunchContext:
     resume: str | None = None   # the CLI's session id to continue, if it supports that
     cwd: str | None = None      # the workspace it runs in
     session_id: str | None = None  # a new session's id, for CLIs that let copse choose it
+    mode: str | None = None     # the agent's mode ('interactive', 'handoff', 'assign', ...)
 
 
 class Provider:
@@ -153,10 +154,10 @@ class ClaudeCode(Provider):
             # ordinary empty chat input; a message copse pastes there either
             # starts a brand-new session or lands in the wrong one. See
             # paste_blocked below for a screen-based fallback. Only disabled
-            # for worker/reviewer agents, which copse drives by pasting into
-            # their pane -- the supervisor is a human's own chat, who may
-            # want the agent view themselves.
-            "disableAgentView": ctx.profile.name != "supervisor",
+            # for agents copse drives by pasting into their pane (handoff,
+            # assign, ...) -- an interactive session is a human's own chat,
+            # who may want the agent view themselves, whatever it's named.
+            "disableAgentView": ctx.mode != "interactive",
         }
         mcp = {"mcpServers": {"copse": mcp_server_spec(ctx.agent_id)}}
         p = ctx.profile
