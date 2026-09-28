@@ -156,9 +156,10 @@ def start(
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the copse watch dashboard in a pane under the agent."),
     autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="The supervisor drives toward a goal until it's verified (default: on, or `autopilot` in .copse/config.json)."),
 ) -> None:
-    """Start a fresh chat with an agent here (default: a supervisor), with the
-    dashboard of every agent in this repo beneath it. A session still running
-    here is paused first; `copse continue` brings paused sessions back."""
+    """Start a fresh chat with an agent here (default: a supervisor), with the dashboard alongside.
+
+    A session still running here is paused first; `copse continue` brings
+    paused sessions back."""
     from copse.config import load_repo_config
 
     db = DB()
@@ -294,9 +295,14 @@ def sessions_cmd() -> None:
 
 @app.command()
 def prune() -> None:
-    """Apply the retention rules now: drop paused sessions beyond the newest few or
-    older than a week, and old scratch sessions with nothing left to transfer.
-    Never merges or deletes branches; worktrees with uncommitted changes stay."""
+    """Clean up now: old paused sessions, merged worktrees and leftover tmux sessions.
+
+    Drops paused sessions beyond the newest few or older than a week, and old
+    scratch sessions with nothing left to transfer. Removes the worktrees of
+    finished workers whose branch is already merged, copse tmux sessions that
+    only hold idle shells and no running agent, leftover copse tmux servers,
+    stale locks and empty worktree folders. Never merges or deletes branches;
+    worktrees with uncommitted changes stay."""
     from copse import sessions
 
     db = DB()
@@ -309,7 +315,7 @@ def prune() -> None:
     typer.echo(f"dropped {dropped} paused session(s), removed {removed} old scratch session(s)")
     from copse import cull
 
-    for line in cull.sweep(db):
+    for line in cull.prune(db):
         typer.echo(line)
 
 
@@ -816,11 +822,23 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent")) -> No
         typer.echo(out)
 
 
+def _helper_db() -> DB:
+    """The DB for a detached helper (``_after-launch``, ``_cull``, ...). One
+    can outlive whatever started it; if its copse home is gone by then (a
+    finished test run's temp dir), it stops rather than recreate the home
+    and act on an empty DB."""
+    from copse.config import db_path
+
+    if not db_path().exists():
+        raise typer.Exit(0)
+    return DB()
+
+
 @app.command("_after-launch", hidden=True)
 def after_launch_cmd(agent_id: str) -> None:
     from copse.providers import get_provider
 
-    db = DB()
+    db = _helper_db()
     a = db.get_agent(agent_id)
     if a and a.tmux_window:
         get_provider(a.provider).after_launch(a.tmux_window)
@@ -846,7 +864,7 @@ def ended_cmd(agent_id: str) -> None:
 def close_cmd(agent_id: str, delay: float = typer.Option(0.0)) -> None:
     time.sleep(delay)
     try:
-        agents.kill(DB(), agent_id)
+        agents.kill(_helper_db(), agent_id)
     except agents.AgentError:
         pass
 
@@ -877,7 +895,7 @@ def sidebar_follow_cmd(session: str) -> None:
 def cull_cmd(repo: Optional[str] = typer.Option(None, "--repo")) -> None:
     from copse import cull, sessions
 
-    db = DB()
+    db = _helper_db()
     if repo:
         try:
             sessions.enforce(db, repo)
@@ -889,7 +907,7 @@ def cull_cmd(repo: Optional[str] = typer.Option(None, "--repo")) -> None:
 @app.command("_flush", hidden=True)
 def flush_cmd(agent_id: str, delay: float = typer.Option(0.0)) -> None:
     time.sleep(delay)
-    agents.flush(DB(), agent_id)
+    agents.flush(_helper_db(), agent_id)
 
 
 @app.command("_deliver-checks", hidden=True)
@@ -899,7 +917,7 @@ def deliver_checks_cmd(reviewer_id: str, workspace_id: str) -> None:
     and get delivered even if the MCP server that started it has exited."""
     from copse.config import load_repo_config
 
-    db = DB()
+    db = _helper_db()
     ws = db.get_workspace(workspace_id)
     if ws is None:
         return
@@ -912,4 +930,4 @@ def pool_fill_cmd(repo_root: str) -> None:
     claim and at supervisor start (see `workspaces.create`, `start`)."""
     from copse import pool
 
-    pool.fill_locked(DB(), repo_root)
+    pool.fill_locked(_helper_db(), repo_root)

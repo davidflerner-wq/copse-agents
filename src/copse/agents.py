@@ -784,6 +784,20 @@ def format_message(db: DB, body: str, sender_id: str | None) -> str:
     return f"[Message from {who}. Reply with the copse send_message tool, to_agent_id={sender_id}]\n\n{body}"
 
 
+def message_lead(db: DB, agent: Agent, sender_id: str | None) -> str | None:
+    """The line copse types (not pastes) before a message it delivers into an
+    agent's chat, so the agent can tell a copse delivery from pasted text of
+    unknown origin (see tmux.paste). None for a plain shell, where it would
+    become part of the command."""
+    if agent.provider == "shell":
+        return None
+    if not sender_id:
+        return "copse delivered this message:"
+    sender = db.get_agent(sender_id)
+    who = f"{sender.profile} agent {sender_id}" if sender else f"agent {sender_id}"
+    return f"copse delivered this message from {who}:"
+
+
 def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None) -> str:
     """Deliver now if the agent is idle; otherwise queue until it is.
     Returns ``"delivered"`` or ``"queued"``."""
@@ -804,7 +818,7 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None) ->
         db.enqueue(agent.id, text, sender_id)
         return "delivered" if agent.status == "idle" else "queued"
     if not provider.uses_hooks:
-        tmux.paste(agent.tmux_window, text)
+        tmux.paste(agent.tmux_window, text, lead=message_lead(db, agent, sender_id))
         return "delivered"
     message_id = db.enqueue(agent.id, text, sender_id)
     reconcile(db, agent)
@@ -892,7 +906,7 @@ def flush(db: DB, agent_id: str) -> bool:
         return False
     agent = db.get_agent(agent_id)
     assert agent is not None
-    tmux.paste(agent.tmux_window, msg.body)
+    tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id))
     return True
 
 

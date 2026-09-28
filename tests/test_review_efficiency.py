@@ -319,7 +319,7 @@ def pasted(monkeypatch):
     typing it: these tests are about the stored task, and a shell pane on a CI
     runner can be gone before the paste's Enter arrives."""
     texts = []
-    monkeypatch.setattr(agents.tmux, "paste", lambda target, text, submit=True: texts.append(text))
+    monkeypatch.setattr(agents.tmux, "paste", lambda target, text, submit=True, **k: texts.append(text))
     return texts
 
 

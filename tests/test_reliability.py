@@ -197,7 +197,7 @@ def test_worker_stopping_unreported_wakes_an_idle_supervisor(db, root, monkeypat
     assert db.get_agent("boss").status == "idle"
 
     pasted = []
-    monkeypatch.setattr(tmux, "paste", lambda target, text: pasted.append(text))
+    monkeypatch.setattr(tmux, "paste", lambda target, text, **k: pasted.append(text))
     out = agents.handle_hook(db, "w1", "stop", {})
     assert out and "report_result" in out["reason"]
     assert pasted == []   # reminded once first; nothing to tell yet
@@ -216,7 +216,7 @@ def test_worker_stopping_unreported_is_queued_for_a_busy_supervisor(db, root, mo
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_BUSY)
     monkeypatch.setattr(time, "sleep", lambda s: None)
     pasted = []
-    monkeypatch.setattr(tmux, "paste", lambda target, text: pasted.append(text))
+    monkeypatch.setattr(tmux, "paste", lambda target, text, **k: pasted.append(text))
     agents.handle_hook(db, "w1", "stop", {"stop_hook_active": True})
     assert pasted == []
     out = agents.handle_hook(db, "boss", "stop", {})
@@ -370,7 +370,7 @@ def test_reconciled_to_idle_delivers_queued_message(db, root, monkeypatch):
     add_agent(db, ws, "w1", status="processing")
     db.enqueue("w1", "hello", "boss")
     pasted = []
-    monkeypatch.setattr(tmux, "paste", lambda target, text: pasted.append(text))
+    monkeypatch.setattr(tmux, "paste", lambda target, text, **k: pasted.append(text))
     agents.reconcile(db, db.get_agent("w1"), gap=0)
     assert pasted == ["hello"]
     assert db.pending_count("w1") == 0
@@ -385,7 +385,7 @@ def test_single_sample_reconcile_never_flushes_a_queued_message(db, root, monkey
     db.enqueue("w1", "hello", "boss")
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
     pasted = []
-    monkeypatch.setattr(tmux, "paste", lambda target, text: pasted.append(text))
+    monkeypatch.setattr(tmux, "paste", lambda target, text, **k: pasted.append(text))
     agents.reconcile(db, db.get_agent("w1"), samples=1, gap=0)
     assert db.get_agent("w1").status == "idle"
     assert pasted == []
@@ -402,7 +402,7 @@ def test_send_message_delivered_when_reconcile_already_flushed_it(db, root, monk
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
     monkeypatch.setattr(time, "sleep", lambda s: None)
     pasted = []
-    monkeypatch.setattr(tmux, "paste", lambda target, text: pasted.append(text))
+    monkeypatch.setattr(tmux, "paste", lambda target, text, **k: pasted.append(text))
     result = agents.send_message(db, "w1", "hello", sender_id="boss")
     assert result == "delivered"
     assert len(pasted) == 1
@@ -421,7 +421,7 @@ def test_send_message_reports_queued_when_an_older_message_is_flushed_instead(db
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
     monkeypatch.setattr(time, "sleep", lambda s: None)
     pasted = []
-    monkeypatch.setattr(tmux, "paste", lambda target, text: pasted.append(text))
+    monkeypatch.setattr(tmux, "paste", lambda target, text, **k: pasted.append(text))
     result = agents.send_message(db, "w1", "newer", sender_id="boss")
     assert pasted == ["older"]
     assert result == "queued"
@@ -436,7 +436,7 @@ def test_worker_stopping_unreported_tells_a_hookless_parent(db, root, monkeypatc
     add_agent(db, ws, "w1", status="processing")
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
     pasted = []
-    monkeypatch.setattr(tmux, "paste", lambda target, text: pasted.append(text))
+    monkeypatch.setattr(tmux, "paste", lambda target, text, **k: pasted.append(text))
     agents.handle_hook(db, "w1", "stop", {"stop_hook_active": True})
     assert len(pasted) == 1
     assert "w1" in pasted[0] and "won't be reminded again on its own" in pasted[0]

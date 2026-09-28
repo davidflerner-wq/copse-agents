@@ -12,25 +12,67 @@ def sh(cmd: str, cwd: Path) -> str:
     ).stdout.strip()
 
 
+def _reap_dead_test_servers() -> None:
+    """Servers (and socket files) of earlier runs that died before their
+    teardown, e.g. killed by a command timeout."""
+    from copse import procs, tmux
+
+    for name in tmux.other_servers("copse-test-"):
+        pid = name.removeprefix("copse-test-")
+        if pid.isdigit() and not procs.alive(int(pid)):
+            tmux.reap_server(name)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def private_tmux_server():
     """Run every test's tmux sessions on a private server, so parallel test
-    runs (e.g. two copse workers testing at once) can't collide."""
+    runs (e.g. two copse workers testing at once) can't collide. Nothing of
+    it survives the run: a watchdog stops the server and removes its socket
+    once this process is gone, even if it was killed before teardown."""
     import os
 
     from copse import tmux
 
+    _reap_dead_test_servers()
     old = os.environ.get("COPSE_TMUX_SOCKET")
-    os.environ["COPSE_TMUX_SOCKET"] = f"copse-test-{os.getpid()}"
+    name = f"copse-test-{os.getpid()}"
+    os.environ["COPSE_TMUX_SOCKET"] = name
+    watchdog = subprocess.Popen(
+        ["/bin/sh", "-c",
+         'while kill -0 "$1" 2>/dev/null; do sleep 1; done; '
+         'tmux -L "$2" kill-server 2>/dev/null; rm -f "$3"',
+         "copse-test-watchdog", str(os.getpid()), name, str(tmux.socket_dir() / name)],
+        start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     yield
     try:
         tmux.kill_server()
     except tmux.TmuxError:
         pass
+    watchdog.kill()
+    watchdog.wait()
     if old is None:
         os.environ.pop("COPSE_TMUX_SOCKET", None)
     else:
         os.environ["COPSE_TMUX_SOCKET"] = old
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    """Each test's sessions end with it, so none outlive the test that made
+    them (or leak into the next one). Runs after every fixture's teardown,
+    so a test's monkeypatching (of subprocess, say) is undone by then."""
+    import os
+
+    from copse import tmux
+
+    yield
+    if os.environ.get("COPSE_TMUX_SOCKET") == f"copse-test-{os.getpid()}":
+        try:
+            tmux.kill_server()
+        except tmux.TmuxError:
+            pass
 
 
 @pytest.fixture(autouse=True)
