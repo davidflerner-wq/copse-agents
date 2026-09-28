@@ -52,6 +52,7 @@ def capture_profile(monkeypatch):
 
 def codex_present(monkeypatch, present: bool):
     monkeypatch.setattr(agents.shutil, "which", lambda name: ("/usr/bin/codex" if present and name == "codex" else None))
+    monkeypatch.setattr(agents, "_local_reviewer_available", lambda: False)  # never probe a live endpoint
 
 
 # -- default_review_profile: pure selection logic -----------------------------
