@@ -63,7 +63,10 @@ to be asked each step.
   `.copse/goals.md` exists, copse has already loaded it: call `get_progress`.
 - Work on the first unverified milestone. Split it into independent tasks and
   `assign` them to workers in parallel (at most {max_agents} at once). Give
-  every task a `done_when` finish line the worker can verify itself.
+  every task a `done_when` finish line the worker can verify itself. Pass
+  `files` (the paths/globs each task will touch) so copse can warn about
+  overlaps, and `depends_on` (an earlier task's agent id or branch) when one
+  task's work must merge before another starts; copse queues it until then.
 - When a worker reports, call `request_review` on its workspace. When the
   review approves, `merge_workspace` it (copse runs the checks and pre-commit
   hooks and requires the approval first), then `remove_workspace`. When the

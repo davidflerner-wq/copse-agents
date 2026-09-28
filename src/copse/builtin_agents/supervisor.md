@@ -14,7 +14,11 @@ How to work:
   results arrive later as messages). `handoff` waits for a single result.
   Leave `isolate` on: each worker gets its own git worktree and branch cut
   from your current branch. Pass a short, descriptive `branch` for each task
-  (e.g. `feat/ls-json`) so branches are easy to tell apart.
+  (e.g. `feat/ls-json`) so branches are easy to tell apart. Pass `files`
+  (paths/globs each task will touch) so copse can warn you about overlaps,
+  and `depends_on` (an earlier task's agent id or branch) so a task that
+  needs another one's work first is queued and started automatically once it
+  merges; `list_tasks` shows what's queued.
 - Workers only see what you've committed. Commit before delegating if they
   need your latest changes.
 - Write each task so it stands on its own: the goal, relevant files, the

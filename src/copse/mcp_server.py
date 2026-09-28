@@ -9,7 +9,7 @@ import subprocess
 
 from mcp.server.mcpserver import MCPServer
 
-from copse import agents, autopilot, gates, git, history, workspaces
+from copse import agents, autopilot, gates, git, history, tasks, workspaces
 from copse.config import RepoConfig, load_repo_config
 from copse.db import DB, Agent, Workspace
 from copse.profiles import list_profiles
@@ -120,6 +120,7 @@ def _await_worker(db: DB, worker_id: str, wait_seconds: int) -> str:
 async def handoff(
     agent_profile: str, task: str, isolate: bool = True, branch: str | None = None,
     wait_seconds: int = DEFAULT_WAIT_SECONDS, done_when: str | None = None,
+    files: list[str] | None = None, depends_on: list[str] | None = None,
 ) -> str:
     """Give a task to a new worker agent and wait for its result.
 
@@ -137,17 +138,38 @@ async def handoff(
     for read-only tasks. done_when is a finish line the worker can verify
     (e.g. "uv run pytest tests/test_auth.py passes"); Claude workers keep
     going until it's met.
+
+    files: paths/globs this task expects to touch. If they overlap another
+    active worker's declared or actually-changed files, the worker still
+    starts, but the reply includes a warning. depends_on: agent ids or branch
+    names of earlier tasks that must be merged into your branch first; if any
+    aren't yet, this task is queued instead of starting, and started
+    automatically (cut from your branch as it stands then) once
+    merge_workspace resolves them. list_tasks shows what's queued.
     """
     def run() -> str:
         db = DB()
         caller, ws = _caller(db)
+        unmet = tasks.unmet_dependencies(db, ws, depends_on)
+        if unmet:
+            t = tasks.enqueue(
+                db, caller, ws, agent_profile, task, "handoff", isolate=isolate, branch=branch,
+                done_when=done_when, files=files, depends_on=depends_on,
+            )
+            return f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
+        warning = tasks.overlap_warning(db, ws, files)
         worker, wws = agents.delegate(
             db, caller, ws, agent_profile, task, "handoff", isolate=isolate, branch=branch,
             done_when=done_when,
         )
+        tasks.record_started(
+            db, ws, worker, agent_profile, task, "handoff", isolate=isolate, branch=branch,
+            done_when=done_when, files=files, depends_on=depends_on,
+        )
         if not agents.runs_process(worker):
             return agents.subagent_brief(worker, wws)
-        return _await_worker(db, worker.id, wait_seconds)
+        result = _await_worker(db, worker.id, wait_seconds)
+        return f"{result}\n\nWarning: {warning}" if warning else result
 
     return await asyncio.to_thread(run)
 
@@ -166,7 +188,8 @@ async def wait_for_worker(agent_id: str, wait_seconds: int = DEFAULT_WAIT_SECOND
 @mcp.tool()
 async def assign(
     agent_profile: str, task: str, isolate: bool = True, branch: str | None = None,
-    done_when: str | None = None,
+    done_when: str | None = None, files: list[str] | None = None,
+    depends_on: list[str] | None = None,
 ) -> str:
     """Start a worker agent on a task and return immediately.
 
@@ -175,17 +198,39 @@ async def assign(
     Pass a short descriptive branch (e.g. "feat/ls-json") to name the worker's branch.
     done_when is a finish line the worker can verify (e.g. "uv run pytest
     tests/test_ls.py passes"); Claude workers keep going until it's met.
+
+    files: paths/globs this task expects to touch. If they overlap another
+    active worker's declared or actually-changed files, the worker still
+    starts, but the reply includes a warning. depends_on: agent ids or branch
+    names of earlier tasks that must be merged into your branch first; if any
+    aren't yet, this task is queued instead of starting, and started
+    automatically (cut from your branch as it stands then) once
+    merge_workspace resolves them. list_tasks shows what's queued.
     """
     def run() -> str:
         db = DB()
         caller, ws = _caller(db)
+        unmet = tasks.unmet_dependencies(db, ws, depends_on)
+        if unmet:
+            t = tasks.enqueue(
+                db, caller, ws, agent_profile, task, "assign", isolate=isolate, branch=branch,
+                done_when=done_when, files=files, depends_on=depends_on,
+            )
+            return f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
+        warning = tasks.overlap_warning(db, ws, files)
         worker, wws = agents.delegate(
             db, caller, ws, agent_profile, task, "assign", isolate=isolate, branch=branch,
             done_when=done_when,
         )
+        tasks.record_started(
+            db, ws, worker, agent_profile, task, "assign", isolate=isolate, branch=branch,
+            done_when=done_when, files=files, depends_on=depends_on,
+        )
         if not agents.runs_process(worker):
             return agents.subagent_brief(worker, wws)
         text = f"Started worker {worker.id} ({worker.profile}) in workspace {wws.id} on branch {wws.branch}."
+        if warning:
+            text += f"\nWarning: {warning}"
         u = autopilot.usage()
         if u and u["used"] >= load_repo_config(wws.repo_root).usage_limit - 15:
             text += f"\nNote: {autopilot.usage_note(u)}."
@@ -249,6 +294,16 @@ def list_agents() -> str:
                 f"ws={ws.id} branch={ws.branch}"
             )
     return "\n".join(lines) or "No agents."
+
+
+@mcp.tool()
+def list_tasks() -> str:
+    """Coordination tasks (assign/handoff calls given files or depends_on)
+    that are queued or were cancelled: what a queued one is waiting on, and
+    why a cancelled one was cancelled. Started tasks show in list_agents."""
+    db = DB()
+    _, here = _caller(db)
+    return tasks.list_text(db, here.repo_root)
 
 
 @mcp.tool()
@@ -335,6 +390,7 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
             db, ws.repo_root, "merge", agent=caller, with_usage=True, branch=ws.branch,
             task=f"merge {ws.branch} into {ws.base_branch}", result=text,
         )
+        tasks.on_merged(db, ws)
         if pilot:
             db.bump_progress(pilot.root_id)
             if pilot.goal:
@@ -345,7 +401,7 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
 
 
 @mcp.tool()
-async def request_review(workspace: str, focus: str | None = None) -> str:
+async def request_review(workspace: str, focus: str | None = None, profile: str | None = None) -> str:
     """Start a reviewer agent on a worker's branch. It doesn't edit code; its
     verdict arrives as a message and is recorded for merge_workspace, which
     only accepts an approval of the branch's current commit. The repo's
@@ -353,6 +409,10 @@ async def request_review(workspace: str, focus: str | None = None) -> str:
     message once they finish (so this returns right away instead of blocking
     on the full suite, and the delivery survives even if this MCP server
     exits first). focus: anything the reviewer should look at especially.
+    profile: the reviewer profile to use; defaults to the repo's
+    `review_profile` config, else the built-in `reviewer-codex` profile (a
+    different model from a Claude worker) when Codex is installed, else
+    `reviewer`.
     """
     def start() -> tuple[Agent, Workspace, RepoConfig] | str:
         db = DB()
@@ -361,7 +421,7 @@ async def request_review(workspace: str, focus: str | None = None) -> str:
         if ws.kind != "worktree":
             return "Only a worker's workspace (its own branch and worktree) can be reviewed this way."
         cfg = load_repo_config(ws.repo_root)
-        reviewer = agents.request_review(db, caller, ws, cfg.reviewer, focus, cfg)
+        reviewer = agents.request_review(db, caller, ws, profile, focus, cfg)
         return reviewer, ws, cfg
 
     result = await asyncio.to_thread(start)
@@ -405,9 +465,21 @@ def submit_review(approved: bool, summary: str) -> str:
 @mcp.tool()
 def remove_workspace(workspace: str, delete_branch: bool = False, force: bool = False) -> str:
     """Remove a workspace's worktree and stop its agents. The branch is kept
-    unless delete_branch=true (which only deletes it if merged, unless force)."""
+    unless delete_branch=true (which only deletes it if merged, unless force).
+    If a queued task (see assign/handoff's depends_on) was waiting on this
+    workspace's branch and it still had unmerged commits, that task is
+    cancelled and its caller is told."""
     db = DB()
     ws = _ws(db, workspace)
+    unmerged = False
+    if ws.kind == "worktree" and ws.base_branch and os.path.isdir(ws.path):
+        try:
+            _behind, ahead = git.ahead_behind(ws.path, ws.base_branch)
+            unmerged = ahead > 0
+        except git.GitError:
+            pass
+    if unmerged:
+        tasks.on_removed_unmerged(db, ws)
     removed = workspaces.remove(db, ws, force=force, delete_branch=delete_branch)
     return f"Removed {ws.id}. {removed.branch_note or 'branch deleted'}"
 

@@ -174,6 +174,31 @@ CREATE TABLE IF NOT EXISTS history_usage_mark (
     cache_read_tokens INTEGER NOT NULL,
     cache_creation_tokens INTEGER NOT NULL
 );
+-- A coordination task declared through assign/handoff: the files it expects
+-- to touch and any earlier tasks (by agent id or branch name) that must be
+-- merged first. Most tasks start right away and just get a 'started' row
+-- here (so overlap checks on later tasks can see their files); one with
+-- unmet dependencies gets a 'pending' row instead, with no worker yet, until
+-- copse.tasks.on_merged starts it. See copse.tasks.
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    repo_root TEXT NOT NULL,
+    agent_id TEXT,                 -- the worker's agent id, once started
+    caller_id TEXT,
+    caller_ws_id TEXT NOT NULL,
+    profile TEXT NOT NULL,
+    task_text TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    isolate INTEGER NOT NULL,
+    branch TEXT,
+    done_when TEXT,
+    files TEXT,                    -- JSON list of globs this task expects to touch
+    depends_on TEXT,               -- JSON list of agent ids / branch names to wait on
+    state TEXT NOT NULL,           -- pending | started | cancelled
+    created_at REAL NOT NULL,
+    started_at REAL
+);
+CREATE INDEX IF NOT EXISTS tasks_repo_root ON tasks(repo_root);
 """
 
 
@@ -291,6 +316,26 @@ class Message:
     body: str
     created_at: float
     delivered_at: float | None
+
+
+@dataclass
+class Task:
+    id: str
+    repo_root: str
+    agent_id: str | None
+    caller_id: str | None
+    caller_ws_id: str
+    profile: str
+    task_text: str
+    mode: str
+    isolate: int
+    branch: str | None
+    done_when: str | None
+    files: str | None
+    depends_on: str | None
+    state: str
+    created_at: float
+    started_at: float | None = None
 
 
 def _load(cls, row):
@@ -747,3 +792,37 @@ class DB:
             self._prune_usage_marks(c)
             after = c.execute("SELECT COUNT(*) FROM history_usage_mark").fetchone()[0]
             return before - after
+
+    # -- tasks (copse.tasks) ---------------------------------------------------
+
+    def add_task(self, t: Task) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO tasks (id, repo_root, agent_id, caller_id, caller_ws_id, profile, "
+                "task_text, mode, isolate, branch, done_when, files, depends_on, state, "
+                "created_at, started_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (t.id, t.repo_root, t.agent_id, t.caller_id, t.caller_ws_id, t.profile,
+                 t.task_text, t.mode, int(t.isolate), t.branch, t.done_when, t.files,
+                 t.depends_on, t.state, t.created_at, t.started_at),
+            )
+
+    def get_task(self, task_id: str) -> Task | None:
+        row = self.conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        return _load(Task, row) if row else None
+
+    def list_tasks(self, repo_root: str | None = None, state: str | None = None) -> list[Task]:
+        clauses, args = [], []
+        if repo_root:
+            clauses.append("repo_root=?")
+            args.append(repo_root)
+        if state:
+            clauses.append("state=?")
+            args.append(state)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.conn.execute(f"SELECT * FROM tasks {where} ORDER BY created_at", args)
+        return [_load(Task, r) for r in rows]
+
+    def update_task(self, task_id: str, **fields: object) -> None:
+        cols = ", ".join(f"{k}=?" for k in fields)
+        with self.tx() as c:
+            c.execute(f"UPDATE tasks SET {cols} WHERE id=?", (*fields.values(), task_id))

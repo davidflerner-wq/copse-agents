@@ -51,6 +51,7 @@ class RepoConfig:
     checks: list[str] = field(default_factory=list)  # must pass in a branch before it merges
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer"         # agent profile that reviews branches
+    review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
     pre_commit: bool = True            # run pre-commit (the framework) over a branch before merging
     max_agents: int = 4                # workers running at once per session; 0 means no cap
     check_timeout: int = 900           # seconds allowed for each check command
@@ -87,7 +88,8 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
         merged = _merge_commands(list(shared.get(key, [])), local.get(key))
         setattr(cfg, key, merged)
     for key in ("base_branch", "branch_prefix", "default_agent", "fetch", "autopilot", "review",
-                "reviewer", "pre_commit", "max_agents", "check_timeout", "usage_limit"):
+                "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
+                "usage_limit"):
         if key in local:
             setattr(cfg, key, local[key])
         elif key in shared:

@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import time
 import uuid
@@ -806,10 +807,24 @@ def is_linear_since(ws: Workspace, prev_sha: str) -> bool:
     return not git.out(["rev-list", "--merges", f"{prev_sha}..HEAD"], ws.path)
 
 
-def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str,
+def default_review_profile(cfg: RepoConfig, worker: Agent | None) -> str:
+    """The reviewer profile to use when none was asked for explicitly:
+    ``cfg.review_profile`` if set, else the built-in Codex reviewer when
+    Codex is installed and the worker being reviewed ran on Claude (so the
+    review comes from a different model), else ``cfg.reviewer``."""
+    if cfg.review_profile:
+        return cfg.review_profile
+    if worker and worker.provider == "claude" and shutil.which("codex"):
+        return "reviewer-codex"
+    return cfg.reviewer
+
+
+def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                    focus: str | None = None, cfg: RepoConfig | None = None) -> Agent:
     """Start a reviewer in a worker's workspace right away. Its verdict is
     recorded for the merge gate and forwarded to ``caller`` as a message.
+    ``profile`` picks the reviewer profile; None uses
+    ``default_review_profile``.
 
     ``cfg.checks`` are NOT run here (that would block the caller on the full
     suite): the caller runs them in the background and delivers a pass/fail
@@ -818,13 +833,17 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str,
     earlier commit, the reviewer is pointed at just what changed since then,
     when that's a plain diff (see ``is_linear_since``)."""
     from copse import gates
+    from copse.config import load_repo_config
+
+    cfg = cfg or load_repo_config(ws.repo_root)
+    worker = workspace_worker(db, ws)
+    profile = profile or default_review_profile(cfg, worker)
 
     base = ws.base_branch or "the base branch"
     task = (f"Review the changes on branch `{ws.branch}` (workspace {ws.id}) against `{base}`: "
             f"run `git diff $(git merge-base HEAD {base})` or use the copse workspace_diff tool. "
             "Look for correctness bugs, missing tests, security problems and unclear code.")
 
-    worker = workspace_worker(db, ws)
     if worker and worker.task:
         task += f"\n\nThe worker's original task:\n{worker.task.strip()[:TASK_TRIM]}"
     if worker and worker.done_when:
