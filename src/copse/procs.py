@@ -149,7 +149,7 @@ def all_agent_ids(procs: dict[int, Proc] | None = None) -> set[str]:
     return ids
 
 
-def _alive(pid: int) -> bool:
+def alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -170,10 +170,10 @@ def terminate(pids: set[int] | list[int], grace: float = 3.0) -> int:
         except (ProcessLookupError, PermissionError):
             pass
     deadline = time.time() + grace
-    while sent and time.time() < deadline and any(_alive(p) for p in sent):
+    while sent and time.time() < deadline and any(alive(p) for p in sent):
         time.sleep(0.1)
     for pid in sent:
-        if _alive(pid):
+        if alive(pid):
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):

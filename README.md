@@ -202,7 +202,7 @@ your own status line prints, so what you see doesn't change.
 | `copse init` | write a starter `.copse/config.json` |
 | `copse new BRANCH [-b BASE] [-a PROFILE] [-p PROMPT]` | worktree + branch + agent |
 | `copse continue [ID]` / `copse -c` | resume a paused session (default: the most recent) |
-| `copse sessions` / `copse prune` | list paused sessions / apply the retention rules now |
+| `copse sessions` / `copse prune` | list paused sessions / apply the retention rules now and remove merged worktrees and leftover tmux sessions |
 | `copse start [-a PROFILE] [-p PROMPT] [--no-watch] [--no-autopilot]` | the same, with options |
 | `copse autopilot [on\|off\|check]` | the goal's progress; turn autopilot on or off; run the checks now |
 | `copse transfer [REPO] [--from SESSION] [-b BRANCH]` | move a scratch session's work into a real repo |
@@ -304,7 +304,12 @@ background daemon, where it would otherwise keep running. copse also cleans up o
 own, from the sidebar every minute and whenever `copse` starts: it stops anything left
 running for agents that are paused, closed or whose window is gone, and closes workers
 that reported and have been idle for `stale_after` minutes. Closing never touches a
-worktree or branch, so unmerged work stays reviewable and mergeable.
+worktree or branch, so unmerged work stays reviewable and mergeable. A worktree whose
+branch is already merged into its base and whose agents are all finished drops out of
+the sidebar; `copse prune` then removes it (the branch stays, and a worktree with
+uncommitted changes is kept and listed). `prune` also kills copse tmux sessions that
+hold only idle shells and no running agent, stops leftover copse tmux servers, and
+removes stale locks and empty worktree folders.
 
 **Spending fewer tokens.** Workers run only the tests that cover their change while
 they work. The full suite runs once: as the repo's `checks` before a branch merges,

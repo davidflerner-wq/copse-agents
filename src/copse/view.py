@@ -28,6 +28,10 @@ _PARENT_NOT_RUNNING = ("paused", "exited", "done")
 # change. It stays resumable (`copse continue`); it just stops cluttering the
 # sidebar once none of its workers is running either.
 STOPPED_ROOT_LINGER = NATIVE_SUBAGENT_LINGER
+# A worktree that never had an agent is only treated as finished (see
+# ``retired``) once it's this old, so one just made by hand isn't hidden
+# before anything is started in it.
+UNUSED_WORKTREE_GRACE = 600.0
 
 
 def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False,
@@ -152,10 +156,37 @@ def _stopped_root(db: DB, a: Agent, alive: set[str], now: float) -> bool:
     return True
 
 
+def _finished(a: Agent) -> bool:
+    return a.dismissed_at is not None or a.status == "done" or a.result is not None
+
+
+def retired(db: DB, ws: Workspace, alive: set[str], now: float | None = None,
+            everyone: list[Agent] | None = None) -> bool:
+    """A worker's worktree whose branch is merged into its base (it has no
+    commit the base lacks) and whose agents are all finished: closed, done or
+    reported, none still running. Uncommitted changes don't count against
+    it: the sidebar hides it all the same, but ``cull.prune_retired`` only
+    removes a clean one."""
+    now = time.time() if now is None else now
+    if ws.kind != "worktree" or not ws.base_branch or not os.path.isdir(ws.path):
+        return False
+    everyone = db.list_agents(ws.id) if everyone is None else everyone
+    if any(a.id in alive or not _finished(a) for a in everyone):
+        return False
+    if not everyone and now - ws.created_at <= UNUSED_WORKTREE_GRACE:
+        return False
+    try:
+        st = status_cache.cached_status(ws.path, ws.base_branch, now=now)
+    except git.GitError:
+        return False
+    return st.ahead == 0
+
+
 def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> list[dict]:
     """What the sidebar shows: agents closed with `copse close`, and stopped
     sessions with nothing left running, are left out, as is a worktree
-    whose agents are all left out that way."""
+    whose agents are all left out that way, and a finished worktree whose
+    branch is already merged (see ``retired``)."""
     now = time.time()
     by_parent = db.all_native_subagents()
     if panes is None:
@@ -167,6 +198,8 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
         shown = [a for a in everyone
                  if a.dismissed_at is None and not _stopped_root(db, a, alive, now)]
         if everyone and not shown and ws.kind != "main":
+            continue
+        if retired(db, ws, alive, now, everyone):
             continue
         entry = workspace_entry(db, ws, detail=True, native_subagents=by_parent, now=now,
                                 panes=panes, agent_list=shown, alive=alive)

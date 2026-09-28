@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from pathlib import Path
 
 
 class TmuxError(RuntimeError):
@@ -268,6 +269,101 @@ def move_pane(pane: str, target: str, columns: int = 30) -> None:
 
 def kill_server() -> None:
     _tmux("kill-server", check=False)
+    sock = os.environ.get("COPSE_TMUX_SOCKET")
+    if sock:
+        # tmux leaves a killed server's socket file behind; a private
+        # server's is ours to tidy (the default server's never is).
+        remove_socket(sock)
+
+
+def socket_dir() -> Path:
+    """Where tmux keeps its named sockets (``tmux -L <name>``)."""
+    return Path(os.environ.get("TMUX_TMPDIR") or "/tmp") / f"tmux-{os.getuid()}"
+
+
+def remove_socket(name: str) -> None:
+    try:
+        (socket_dir() / name).unlink()
+    except OSError:
+        pass
+
+
+def other_servers(prefix: str = "copse-") -> list[str]:
+    """Names of the named tmux servers (sockets) starting with ``prefix``,
+    other than the one copse is using, live or not."""
+    try:
+        names = [p.name for p in socket_dir().iterdir() if p.name.startswith(prefix)]
+    except OSError:
+        return []
+    return sorted(n for n in names if n != os.environ.get("COPSE_TMUX_SOCKET"))
+
+
+def _on(server: str, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["tmux", "-L", server, *args], capture_output=True, text=True)
+
+
+def server_homes(server: str) -> list[str | None] | None:
+    """The COPSE_HOME of each session on the named ``server`` (None for a
+    session without one), or None when no server is listening there."""
+    if not shutil.which("tmux"):
+        return None
+    proc = _on(server, "list-sessions", "-F", "#{session_name}")
+    if proc.returncode != 0:
+        return None
+    homes: list[str | None] = []
+    for name in proc.stdout.split():
+        env = _on(server, "show-environment", "-t", f"={name}", "COPSE_HOME").stdout.strip()
+        home = env.partition("=")[2] if env.startswith("COPSE_HOME=") else ""
+        homes.append(home or None)
+    return homes
+
+
+def reap_server(server: str) -> None:
+    """Stop the named ``server`` (if it's running) and remove its socket."""
+    if shutil.which("tmux"):
+        _on(server, "kill-server")
+    remove_socket(server)
+
+
+def list_sessions() -> list[tuple[str, bool]]:
+    """``(name, attached)`` for every session on copse's server; empty when
+    there is no server."""
+    try:
+        proc = _tmux("list-sessions", "-F", "#{session_name} #{session_attached}", check=False)
+    except TmuxError:
+        return []
+    if proc.returncode != 0:
+        return []
+    out = []
+    for line in proc.stdout.splitlines():
+        name, _, attached = line.rpartition(" ")
+        out.append((name, attached.strip() not in ("", "0")))
+    return out
+
+
+def session_pane_ids(session: str) -> list[str]:
+    proc = _tmux("list-panes", "-s", "-t", f"={session}", "-F", "#{pane_id}", check=False)
+    return proc.stdout.split() if proc.returncode == 0 else []
+
+
+SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu"}
+
+
+def session_idle(session: str) -> bool:
+    """Whether every pane of ``session`` is dead, an idle shell, or a copse
+    sidebar: nothing the person started (a dev server, an editor) runs in it."""
+    proc = _tmux("list-panes", "-s", "-t", f"={session}", "-F",
+                 "#{pane_dead}\t#{pane_current_command}\t#{pane_start_command}", check=False)
+    if proc.returncode != 0:
+        return False
+    for line in proc.stdout.splitlines():
+        dead, _, rest = line.partition("\t")
+        current, _, start = rest.partition("\t")
+        if dead == "1" or "watch --sidebar" in start:
+            continue
+        if current.lstrip("-") not in SHELLS:
+            return False
+    return True
 
 
 def kill_session(session: str) -> None:
