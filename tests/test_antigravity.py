@@ -82,7 +82,7 @@ def test_process_env_reads_another_process():
 
 def test_warmup_then_the_task(db, ws, monkeypatch):
     monkeypatch.setattr(agents.tmux, "ensure_session", lambda *a: None)
-    monkeypatch.setattr(agents.tmux, "new_window", lambda *a: "@9")
+    monkeypatch.setattr(agents.tmux, "new_window", lambda *a, **k: "@9")
     monkeypatch.setattr(agents.tmux, "apply_theme", lambda *a: None)
     monkeypatch.setattr(Antigravity, "command", lambda self, ctx: ["agy"])
     monkeypatch.setattr(Antigravity, "after_launch", lambda self, t: None)

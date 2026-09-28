@@ -168,11 +168,14 @@ def start(
     # processes, old paused sessions' worktrees and the pool refill are all
     # handled by the detached cull.
     _pause_running(db, ws, stop_procs=False)
-    _cull_detached(ws.repo_root)
     if autopilot is None:
         autopilot = agent == "supervisor" and _run(load_repo_config, ws.repo_root).autopilot
     a = _run(agents.spawn, db, ws, agent, prompt=prompt, provider_name=provider,
              watch_pane=watch, background_setup=True, autopilot=autopilot)
+    # After the chat's window exists and is recorded: the cull's session
+    # retention closes dropped sessions' windows by their stored pane ids,
+    # which a freshly started tmux server hands out again from %0.
+    _cull_detached(ws.repo_root)
     typer.echo(f"✓ {a.profile} agent {a.id} in {ws.id} ({ws.branch})")
     if autopilot:
         _say_autopilot(db, a.id)

@@ -278,7 +278,8 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     if agent.mode == "interactive":
         argv = _pause_when_done(agent.id, argv)
     tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
-    target = tmux.new_window(ws.tmux_session, name, ws.path, argv, agent_env(ws, agent.id, agent))
+    target = tmux.new_window(ws.tmux_session, name, ws.path, argv, agent_env(ws, agent.id, agent),
+                             tag=(AGENT_TAG, agent.id))
     db.update_agent(agent.id, tmux_window=target)
     agent.tmux_window = target
     if watch_pane:
@@ -294,7 +295,12 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
 
 
 SIDEBAR_COLUMNS = 30
-SIDEBAR_TAG = "@copse_sidebar"
+SIDEBAR_TAG = tmux.SIDEBAR_TAG
+# Set on every agent pane at creation (see _open_window), so a pane can say
+# whose it is: pane ids are a per-server counter that restarts at 0 when the
+# tmux server does, and a stored id alone can't tell an agent's own pane from
+# a newer session's that happens to have the same id (see pane_owners).
+AGENT_TAG = tmux.AGENT_TAG
 
 
 def root_of(db: DB, agent_id: str) -> str:
@@ -827,12 +833,26 @@ def is_alive(agent: Agent, panes: dict[str, bool] | None = None) -> bool:
     return tmux.window_alive(agent.tmux_window)
 
 
-def pane_owners(db: DB) -> dict[str, str]:
+def pane_owners(db: DB, panes: dict[str, bool] | None = None) -> dict[str, str]:
     """Which agent each recorded pane id belongs to. tmux reuses pane ids once
     its server restarts (a reboot, `tmux kill-server`), so an old agent's
     stored pane can now belong to a newer agent: only the newest agent
-    recorded on a pane can be the one running in it."""
-    return {a.tmux_window: a.id for a in db.list_agents() if a.tmux_window}  # oldest first
+    recorded on a pane can be the one running in it.
+
+    A pane that carries a tag (AGENT_TAG, or SIDEBAR_TAG for the dashboard)
+    has the last word over the DB: it names its agent itself, or says it's
+    nobody's. That covers a pane the DB doesn't know about yet (a launch
+    records the pane id a moment after the pane exists) and the sidebar,
+    which no agent row ever names. ``panes`` is a pre-fetched
+    ``tmux.list_panes()`` snapshot, which already carries the tags; without
+    one, this fetches its own."""
+    owners = {a.tmux_window: a.id for a in db.list_agents() if a.tmux_window}  # oldest first
+    tags = getattr(panes, "tags", None)
+    if tags is None:
+        tags = tmux.list_panes().tags
+    for pane, found in tags.items():
+        owners[pane] = found.get(AGENT_TAG, "")  # a sidebar is no agent's pane
+    return owners
 
 
 def owns_pane(db: DB, agent: Agent, owners: dict[str, str] | None = None) -> bool:

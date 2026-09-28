@@ -180,3 +180,45 @@ def test_an_env_only_hook_prefers_the_agent_that_owns_the_session(db, repo, root
     assert res.exit_code == 0, res.output
     assert db.get_agent("new").status == "processing"
     assert db.get_agent("old").status == "idle"
+
+
+# -- a pane says whose it is ------------------------------------------------------
+#
+# The DB alone can't tell an agent's own pane from a newer pane with the same
+# id (a restarted server counts from %0 again) until the newer agent's row
+# records it, and the sidebar's pane is never recorded by any agent. Panes
+# carry a tag from the moment they exist (agents.AGENT_TAG, SIDEBAR_TAG).
+
+
+def test_a_tagged_pane_belongs_only_to_the_agent_it_names(db, repo, root):
+    pane = running_window(root)
+    add(db, root, "stale", window=pane, age=LONG_AGO)
+    # The new chat's pane exists and is tagged, but its row doesn't name it yet.
+    tmux.set_pane_tag(pane, agents.AGENT_TAG, "launching")
+    assert not agents.owns_pane(db, db.get_agent("stale"))
+    assert "stale" not in view.live_agents(db, tmux.list_panes())
+    tmux.set_pane_tag(pane, agents.AGENT_TAG, "stale")
+    assert agents.owns_pane(db, db.get_agent("stale"))
+
+
+def test_the_sidebar_pane_is_no_agents(db, repo, root):
+    pane = running_window(root)
+    add(db, root, "stale", window=pane, age=LONG_AGO)
+    tmux.set_pane_tag(pane, agents.SIDEBAR_TAG, "someroot")
+    assert not agents.owns_pane(db, db.get_agent("stale"))
+
+
+def test_an_untagged_pane_still_goes_by_the_db(db, repo, root):
+    """Panes from before tagging (an older copse's sessions) keep working."""
+    pane = running_window(root)
+    add(db, root, "stale", window=pane, age=LONG_AGO)
+    assert agents.owns_pane(db, db.get_agent("stale"))
+    add(db, root, "current", window=pane)
+    assert not agents.owns_pane(db, db.get_agent("stale"))
+
+
+def test_spawn_tags_the_pane_with_its_agent(db, repo):
+    ws = workspaces.create(db, str(repo), "feat-tag").workspace
+    a = agents.spawn(db, ws, "developer", prompt="hi", provider_name="shell", mode="handoff")
+    assert tmux.get_pane_tag(a.tmux_window, agents.AGENT_TAG) == a.id
+    assert agents.owns_pane(db, a)

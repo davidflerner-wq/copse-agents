@@ -124,7 +124,7 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
 
 def live_agents(db: DB, panes: dict[str, bool]) -> set[str]:
     """Ids of every agent that is running (see agents.owns_pane)."""
-    owners = agents.pane_owners(db)
+    owners = agents.pane_owners(db, panes)
     return {a.id for a in db.list_agents()
             if agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)}
 

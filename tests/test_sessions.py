@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from copse import agents, git, sessions, workspaces
+from copse import agents, git, sessions, tmux, workspaces
 from copse.db import Agent
 
 
@@ -105,3 +105,49 @@ def test_resume_rebuilds_worker_decoration_when_the_session_cant_be_resumed(db, 
     assert prompt.startswith("/goal Finish line: tests/test_x.py passes")
     assert "report_result" in prompt  # WORKER_FOOTER
     assert prompt.endswith(agents.RESUME_NOTE)
+
+
+# -- dropping a session must never touch a newer session's windows ----------------
+#
+# Regression: the first `copse` after a tmux server restart (a reboot, or the
+# previous session's end taking the server with it) got the chat's pane as %1
+# and the sidebar as %2, the same ids every earlier session's chat had. The
+# detached cull's retention then dropped the oldest paused session and closed
+# its windows by those stored ids: the new chat and its sidebar vanished,
+# leaving the person on the session's bare shell window.
+
+
+def _live_pane(root, tag=None):
+    tmux.ensure_session(root.tmux_session, root.path, {})
+    return tmux.new_window(root.tmux_session, "chat", root.path, ["sleep", "300"], {}, tag=tag)
+
+
+def test_dropping_a_session_spares_a_pane_that_now_belongs_to_a_launching_chat(db, root):
+    pane = _live_pane(root, tag=(agents.AGENT_TAG, "launching"))  # its row isn't recorded yet
+    for i in range(3):
+        add(db, root, f"s{i}", since=2000 + i)
+    add(db, root, "old", since=1000)
+    db.update_agent("old", tmux_window=pane)  # the same id, on the server that's gone
+    assert sessions.enforce(db, root.repo_root, now=2100) == 1
+    assert db.get_agent("old") is None
+    assert tmux.window_alive(pane)
+
+
+def test_dropping_a_session_spares_the_sidebar(db, root):
+    pane = _live_pane(root, tag=(agents.SIDEBAR_TAG, "someroot"))
+    for i in range(3):
+        add(db, root, f"s{i}", since=2000 + i)
+    add(db, root, "old", since=1000)
+    db.update_agent("old", tmux_window=pane)
+    sessions.enforce(db, root.repo_root, now=2100)
+    assert tmux.window_alive(pane)
+
+
+def test_dropping_a_session_still_closes_its_own_leftover_window(db, root):
+    pane = _live_pane(root, tag=(agents.AGENT_TAG, "old"))
+    for i in range(3):
+        add(db, root, f"s{i}", since=2000 + i)
+    add(db, root, "old", since=1000)
+    db.update_agent("old", tmux_window=pane)
+    sessions.enforce(db, root.repo_root, now=2100)
+    assert not tmux.window_alive(pane)

@@ -43,17 +43,22 @@ def ensure_session(session: str, cwd: str, env: dict[str, str]) -> None:
     _tmux("new-session", "-d", "-s", session, "-n", "shell", "-c", cwd, *env_args)
 
 
-def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[str, str]) -> str:
+def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[str, str],
+               tag: tuple[str, str] | None = None) -> str:
     """Open a window running ``command``. Returns the agent's PANE id (``%<n>``),
     not the window's: a window can hold more than one pane (e.g. the watch
     dashboard beside a supervisor), and keys sent to a window go to whichever
-    pane happens to be active."""
+    pane happens to be active. ``tag`` (a pane option name and value, see
+    set_pane_tag) is set on the pane before this returns, so the pane says
+    whose it is from the moment anything else can see it."""
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
     proc = _tmux(
         "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"={session}:",
         "-n", name, "-c", cwd, *env_args, "--", *command,
     )
     target = proc.stdout.strip()
+    if tag:
+        set_pane_tag(target, *tag)
     # Keep the agent's pane around after it exits so its output can be read.
     _tmux("set-option", "-p", "-t", target, "remain-on-exit", "on", check=False)
     return target
@@ -167,26 +172,51 @@ def window_alive(target: str) -> bool:
     return proc.returncode == 0 and proc.stdout.strip() == "0"
 
 
-def list_panes() -> dict[str, bool]:
+# Pane-level user options copse sets to say what a pane is: an agent's (its
+# id; see agents.AGENT_TAG) or the dashboard's (its session root's id; see
+# agents.SIDEBAR_TAG). list_panes reads them along with liveness, in the same
+# call, so no caller needs a second one.
+AGENT_TAG = "@copse_agent"
+SIDEBAR_TAG = "@copse_sidebar"
+PANE_TAGS = (AGENT_TAG, SIDEBAR_TAG)
+
+
+class PaneSnapshot(dict):
+    """list_panes' result: pane (and window) id -> alive, plus ``tags``,
+    pane id -> {tag: value} for every live-or-dead pane that carries one of
+    PANE_TAGS."""
+
+    tags: dict[str, dict[str, str]]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tags = {}
+
+
+def list_panes() -> PaneSnapshot:
     """Every pane's liveness across every session on this server, in one
     call, keyed by pane id (and also by window id, for agents whose stored
     ``tmux_window`` predates pane-id tracking -- a window counts as alive if
-    any of its panes are). A snapshot with several agents can share this
-    instead of one ``display-message`` per agent. Empty (not an error) when
-    there is no server running, or tmux isn't installed at all."""
+    any of its panes are), with each pane's copse tags (see PANE_TAGS). A
+    snapshot with several agents can share this instead of one
+    ``display-message`` per agent. Empty (not an error) when there is no
+    server running, or tmux isn't installed at all."""
+    result = PaneSnapshot()
+    fmt = "\t".join(["#{window_id}", "#{pane_id}", "#{pane_dead}", *(f"#{{{k}}}" for k in PANE_TAGS)])
     try:
-        proc = _tmux("list-panes", "-a", "-F", "#{window_id} #{pane_id} #{pane_dead}", check=False)
+        proc = _tmux("list-panes", "-a", "-F", fmt, check=False)
     except TmuxError:
-        return {}
+        return result
     if proc.returncode != 0:
-        return {}
-    result: dict[str, bool] = {}
+        return result
     for line in proc.stdout.splitlines():
-        window_id, _, rest = line.partition(" ")
-        pane_id, _, dead = rest.partition(" ")
+        window_id, pane_id, dead, *values = line.split("\t")
         alive = dead.strip() == "0"
         result[pane_id] = alive
         result[window_id] = result.get(window_id, False) or alive
+        tags = {k: v for k, v in zip(PANE_TAGS, values) if v}
+        if tags:
+            result.tags[pane_id] = tags
     return result
 
 

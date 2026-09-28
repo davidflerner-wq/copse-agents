@@ -59,7 +59,7 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     now = time.time() if now is None else now
     panes = tmux.list_panes()
     table = procs.table()
-    owners = agents.pane_owners(db)
+    owners = agents.pane_owners(db, panes)
     done: list[str] = []
 
     def alive(a: Agent) -> bool:
@@ -127,7 +127,7 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     may be looking at its pane. The screen is read here too, since a trust
     dialog comes up before any hook runs to report it."""
     done = []
-    owners = agents.pane_owners(db)
+    owners = agents.pane_owners(db, panes)
     for a in db.list_agents():
         if (a.mode not in agents.REPORTING_MODES or not a.parent_id or a.result is not None
                 or a.dismissed_at is not None or a.status not in ("starting", "processing", "waiting")
