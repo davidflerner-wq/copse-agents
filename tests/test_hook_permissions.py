@@ -8,7 +8,7 @@ from dataclasses import replace
 
 import pytest
 
-from copse import agents, profiles, workspaces
+from copse import agents, cull, profiles, workspaces
 from copse.db import Agent
 from copse.native.permissions import uncovered_part
 from copse.profiles import load_profile
@@ -97,3 +97,19 @@ def test_uncovered_part_follows_cd_across_parts(tmp_path):
     assert uncovered_part(specs, "cd - && ls", cd_root=root) == "cd -"
     # Without a root, cd is an ordinary uncovered command, as before.
     assert uncovered_part(specs, "cd a && ls") == "cd a"
+
+
+def test_stuck_message_says_when_auto_mode_should_have_answered(db, ws, monkeypatch):
+    """The built-in developer profile runs in Claude Code's auto mode, so a
+    prompt from it means auto mode is off in that session; the supervisor
+    is told, and a profile without auto mode gets no such note."""
+    from dataclasses import replace
+
+    from copse.profiles import load_profile
+
+    a = Agent("w1", ws.id, "developer", "claude", "boss", "assign", "waiting", "%w1", None, time.time())
+    assert "auto mode" in cull.auto_mode_note(a, ws)
+    monkeypatch.setattr("copse.profiles.load_profile",
+                        lambda name, root=None: replace(load_profile("developer"), permission_mode="acceptEdits"))
+    assert cull.auto_mode_note(a, ws) == ""
+    assert cull.auto_mode_note(replace(a, provider="native"), ws) == ""

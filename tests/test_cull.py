@@ -150,18 +150,3 @@ def test_another_copse_homes_agents_are_left_alone(proc_cleanup, monkeypatch):
     assert "fedcba98" not in procs.all_agent_ids()
     assert procs.agent_pids(["fedcba98"]) == {}
 
-
-def test_stuck_message_says_when_auto_mode_should_have_answered(db, ws, monkeypatch):
-    """The built-in developer profile runs in Claude Code's auto mode, so a
-    prompt from it means auto mode is off in that session; the supervisor
-    is told, and a profile without auto mode gets no such note."""
-    from dataclasses import replace
-
-    from copse.profiles import load_profile
-
-    a = Agent("w1", ws.id, "developer", "claude", "boss", "assign", "waiting", "%w1", None, time.time())
-    assert "auto mode" in cull.auto_mode_note(a, ws)
-    monkeypatch.setattr("copse.profiles.load_profile",
-                        lambda name, root=None: replace(load_profile("developer"), permission_mode="acceptEdits"))
-    assert cull.auto_mode_note(a, ws) == ""
-    assert cull.auto_mode_note(replace(a, provider="native"), ws) == ""
