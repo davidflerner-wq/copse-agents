@@ -236,14 +236,20 @@ def dirty_files(path: str | Path) -> list[str]:
     return [line[3:] for line in proc.stdout.splitlines() if line]
 
 
+def ahead_behind(path: str | Path, ref: str) -> tuple[int, int]:
+    """(behind, ahead) commit counts between ``ref`` and HEAD."""
+    proc = run(["rev-list", "--left-right", "--count", f"{ref}...HEAD"], path, check=False)
+    if proc.returncode != 0:
+        return 0, 0
+    behind, ahead = (int(x) for x in proc.stdout.split())
+    return behind, ahead
+
+
 def status(path: str | Path, base: str | None) -> Status:
     branch = current_branch(path)
     ahead = behind = 0
     if base:
-        ref = base_ref(path, base)
-        counts = run(["rev-list", "--left-right", "--count", f"{ref}...HEAD"], path, check=False)
-        if counts.returncode == 0:
-            behind, ahead = (int(x) for x in counts.stdout.split())
+        behind, ahead = ahead_behind(path, base_ref(path, base))
     unpushed: int | None = None
     up = run(["rev-list", "--count", "@{upstream}..HEAD"], path, check=False)
     if up.returncode == 0:
@@ -277,6 +283,10 @@ def commit_all(path: str | Path, message: str) -> str | None:
     return out(["rev-parse", "--short", "HEAD"], path)
 
 
+def conflicting_files(path: str | Path) -> list[str]:
+    return out(["diff", "--name-only", "--diff-filter=U"], path).splitlines()
+
+
 def sync(path: str | Path, base: str, strategy: str = "rebase") -> str:
     """Bring ``base``'s latest commits into this branch. Raises on conflict,
     leaving the rebase/merge in progress so an agent or human can resolve it."""
@@ -290,13 +300,28 @@ def sync(path: str | Path, base: str, strategy: str = "rebase") -> str:
     else:
         raise ValueError(f"unknown strategy {strategy!r}")
     if proc.returncode != 0:
-        conflicts = out(["diff", "--name-only", "--diff-filter=U"], path).splitlines()
+        conflicts = conflicting_files(path)
         raise GitError(
             f"{strategy} onto {ref} stopped with conflicts in: {', '.join(conflicts) or '?'}\n"
             f"Resolve them in {path} and run `git {strategy} --continue`, "
             f"or `git {strategy} --abort`."
         )
     return ref
+
+
+def merge_local_base(path: str | Path, base: str) -> tuple[str, list[str]]:
+    """Merge the local ``base`` branch into HEAD, ignoring origin entirely:
+    ``base`` here is the local branch a workspace merges back into, not its
+    remote-tracking counterpart, so this never fetches. On conflict, aborts
+    and leaves the worktree clean, returning the pre-merge HEAD sha and the
+    conflicting files instead of raising. Returns (new_sha, []) on success."""
+    before = out(["rev-parse", "HEAD"], path)
+    proc = run(["merge", "--no-edit", base], path, check=False)
+    if proc.returncode != 0:
+        conflicts = conflicting_files(path)
+        run(["merge", "--abort"], path, check=False)
+        return before, conflicts
+    return out(["rev-parse", "HEAD"], path), []
 
 
 def merge_into(root: str | Path, target_path: str | Path, branch: str, squash: bool) -> None:

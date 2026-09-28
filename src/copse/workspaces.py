@@ -369,6 +369,31 @@ def require_base(ws: Workspace) -> str:
     return ws.base_branch
 
 
+@dataclass
+class SyncResult:
+    status: str  # "skipped", "up_to_date", "synced" or "conflict"
+    new_sha: str | None = None
+    conflicts: list[str] | None = None
+
+
+def sync_with_base(ws: Workspace) -> SyncResult:
+    """Merge the branch's local base into it before merge gates run, so a
+    passing check reflects the code as it will actually be merged. Only acts
+    on a clean worktree; a dirty one is left for the gates to report as
+    usual ("skipped"). Compares against the local base branch (what
+    merge_back targets), never origin."""
+    if git.dirty_files(ws.path):
+        return SyncResult("skipped")
+    base = require_base(ws)
+    behind, _ahead = git.ahead_behind(ws.path, base)
+    if behind == 0:
+        return SyncResult("up_to_date")
+    new_sha, conflicts = git.merge_local_base(ws.path, base)
+    if conflicts:
+        return SyncResult("conflict", conflicts=conflicts)
+    return SyncResult("synced", new_sha=new_sha)
+
+
 def pull_request(ws: Workspace, title: str | None = None, draft: bool = False) -> str:
     """Push, then open a PR with ``gh`` when available, else return the
     compare URL for the browser."""

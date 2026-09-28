@@ -256,7 +256,15 @@ def workspace_diff(workspace: str, stat_only: bool = False) -> str:
 async def merge_workspace(workspace: str, squash: bool = False) -> str:
     """Merge a workspace's branch into its base branch (for workers: your branch).
 
-    First copse checks the merge gates in the workspace: everything committed,
+    Before the gates run, if the branch is behind its (local) base and the
+    worktree is clean, copse merges the base into the branch first, so a
+    passing check reflects the code as it will actually be merged. If that
+    sync conflicts, it's aborted, the worktree is left clean, and the reply
+    lists the conflicting files. If it succeeds and adds a commit, that
+    commit hasn't been reviewed yet (when this repo requires review), so
+    nothing is merged; the reply asks for a fresh request_review instead.
+
+    Then copse checks the merge gates in the workspace: everything committed,
     a reviewer's approval of this commit (in autopilot sessions, or when the
     repo requires review), pre-commit hooks, and the repo's `checks` commands.
     If a gate fails nothing is merged, and the reply says what to fix.
@@ -268,13 +276,26 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
         cfg = load_repo_config(ws.repo_root)
         pilot = autopilot.for_agent(db, caller.id) if caller else None
         review = cfg.review if cfg.review is not None else bool(pilot and pilot.enabled)
+
+        sync_result = workspaces.sync_with_base(ws)
+        if sync_result.status == "conflict":
+            files = ", ".join(sync_result.conflicts) or "?"
+            return (f"Not merged: {ws.branch} conflicts with {ws.base_branch} in: {files}. "
+                    f"Ask the worker to merge {ws.base_branch} and resolve.")
+        if sync_result.status == "synced" and review:
+            return (f"Not merged: synced {ws.branch} with {ws.base_branch} "
+                    f"(new commit {sync_result.new_sha[:8]}); request_review again, then merge.")
+
         report = gates.run(db, ws, cfg, review_required=review)
         if not report.ok:
             return f"Not merged. {report.problem}"
         if gates.head(ws) != report.sha:
             return (f"Not merged: {ws.branch} got new commits while the gates ran. "
                     "Call merge_workspace again to check the new commits.")
-        target = workspaces.merge_back(db, ws, squash=squash)
+        try:
+            target = workspaces.merge_back(db, ws, squash=squash)
+        except git.GitError as e:
+            return f"Not merged: {e}"
         text = f"Merged {ws.branch} into {ws.base_branch} at {target} ({report.summary()})."
         if pilot:
             db.bump_progress(pilot.root_id)
