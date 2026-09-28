@@ -166,20 +166,29 @@ def native_checks(repo_root: str | None) -> list[Check]:
                              f"{base_url} {detail}: only needed for {who}. For Ollama: "
                              f"`ollama serve`, then `ollama pull {model}`"))
     # Ollama silently drops the start of a conversation that outgrows its context.
+    # Group profiles by endpoint to avoid duplicate warnings.
+    endpoint_profiles: dict[tuple[str, str], list[tuple[object, runner.Endpoint]]] = {}
     for p, ep in profiles:
         if (ep.base_url, ep.model) not in reachable or not p.context_tokens or not runner.is_ollama(ep):
             continue
-        fix = f"OLLAMA_CONTEXT_LENGTH={p.context_tokens + 8192} ollama serve"
+        endpoint_profiles.setdefault((ep.base_url, ep.model), []).append((p, ep))
+    
+    for (base_url, model), profile_eps in endpoint_profiles.items():
+        # Find the maximum context_tokens among all profiles using this endpoint
+        max_context_tokens = max(p.context_tokens for p, _ in profile_eps if p.context_tokens)
+        fix = f"OLLAMA_CONTEXT_LENGTH={max_context_tokens + 8192} ollama serve"
+        ep = profile_eps[0][1]  # Use the first profile's endpoint for context check
         ctx = runner.server_context(ep)
+        profile_names = ", ".join(p.name for p, _ in profile_eps)
         if ctx is None:
-            out.append(Check(WARN, f"context {p.name}",
+            out.append(Check(WARN, f"context {profile_names}",
                              f"{ep.base_url} doesn't report its context length; Ollama truncates "
-                             f"silently past it, so it must be at least {p.context_tokens} "
+                             f"silently past it, so it must be at least {max_context_tokens} "
                              f"(context_tokens): {fix}"))
-        elif ctx < p.context_tokens:
-            out.append(Check(WARN, f"context {p.name}",
+        elif ctx < max_context_tokens:
+            out.append(Check(WARN, f"context {profile_names}",
                              f"{ep.base_url} runs {ep.model} with a {ctx}-token context, less than "
-                             f"the profile's context_tokens ({p.context_tokens}); Ollama truncates "
+                             f"the profile's context_tokens ({max_context_tokens}); Ollama truncates "
                              f"silently. Restart with: {fix}"))
     return out
 
