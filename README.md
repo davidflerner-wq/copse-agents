@@ -61,7 +61,6 @@ running 1m`, so you can see what it's fanned out to without leaving copse.
 **Closing and coming back.** When you quit the supervisor's chat, the copse window
 closes cleanly and you're back at your prompt. The whole session is paused: its
 workers stop too, and everything is kept (branches, worktrees,
-session: its workers stop too, and everything is kept (branches, worktrees,
 queued messages, and each agent's Claude conversation). `copse continue` (or
 `copse -c`) picks up the most recent paused session and lists the others by id
 (`copse continue <id>`). Plain `copse` always starts fresh. `copse sessions` lists
@@ -85,6 +84,36 @@ copse diff fix-login --stat
 copse pr fix-login                          # push + gh pr create
 copse rm fix-login                          # keeps the branch
 ```
+
+## Recommended use
+
+copse pays off when work splits into pieces that can proceed in parallel, or
+runs long enough that you want it reviewed and merged without babysitting. For a
+one-line fix, plain `claude` is quicker; the supervisor will also just do small
+things itself instead of starting workers.
+
+1. **Start in the repo, on a clean base.** Commit or stash first: workers branch
+   from the supervisor's committed work, not your uncommitted edits.
+2. **Give it a goal with checks.** For anything bigger than one sitting, tell the
+   supervisor what "done" means in commands (a test file, `npm test`, a build), or
+   write `.copse/goals.md` yourself. Milestones with real checks are what let
+   autopilot keep going without you and stop when the work is actually done.
+3. **Set `checks` in `.copse/config.json`** (usually your full test suite) so no
+   branch merges red, and a `setup` if new worktrees need `npm install` or similar.
+4. **Watch the sidebar, not every window.** It flags agents waiting on you (◆);
+   ⏎ jumps to one, `p` peeks at it, `?` lists every key. Workers that need a
+   decision surface through the supervisor's `need_user`.
+5. **Step away freely.** Quit the chat to pause everything; `copse continue`
+   resumes the session, workers included. `copse history` shows what ran, what
+   merged and what it cost.
+6. **Clean up.** Finished workers close on their own after `stale_after` minutes,
+   and `copse` sweeps leftover processes at start. `copse close --exited` and
+   `copse prune` do it on demand. Branches are never deleted for you.
+
+For a large task: write the milestones first (each with a check), keep each worker's
+task to one area of the code with its own test command, and let the supervisor run up
+to `max_agents` workers at once. Use a cheaper profile (see [Cheap workers](#cheap-workers))
+for mechanical edits and a Codex reviewer for a second model's opinion.
 
 ## Autopilot
 
@@ -149,8 +178,9 @@ your own status line prints, so what you see doesn't change.
 
 | | |
 |---|---|
-| `copse new BRANCH [-b BASE] [-a PROFILE] [-p PROMPT]` | worktree + branch + agent |
 | `copse` | a fresh supervisor chat here, dashboard alongside |
+| `copse init` | write a starter `.copse/config.json` |
+| `copse new BRANCH [-b BASE] [-a PROFILE] [-p PROMPT]` | worktree + branch + agent |
 | `copse continue [ID]` / `copse -c` | resume a paused session (default: the most recent) |
 | `copse sessions` / `copse prune` | list paused sessions / apply the retention rules now |
 | `copse start [-a PROFILE] [-p PROMPT] [--no-watch] [--no-autopilot]` | the same, with options |
@@ -162,14 +192,35 @@ your own status line prints, so what you see doesn't change.
 | `copse attach / cd / open [WS]` | tmux session / path / editor |
 | `copse status / diff [--stat] [WS]` | compared with the base branch (committed + uncommitted) |
 | `copse sync [--merge] [WS]` | rebase (or merge) the latest base into the branch |
-| `copse commit -m MSG / push / pr [WS]` | ship it |
+| `copse commit / push / pr [WS]` | commit everything (`-m MSG`), push with upstream, open a PR |
 | `copse merge [--squash] [WS]` | merge into the base locally |
 | `copse rm WS [-f] [-D]` | remove the worktree; `-D` deletes the branch too, only if merged unless `-f` |
 | `copse close AGENT` / `copse close --exited` | hide an agent (or every stopped one) from the dashboard, stopping it if it's running; its worktree and branch stay |
 | `copse send AGENT MSG` | message an agent; waits in its inbox until it's idle |
 | `copse agent spawn/kill/peek/profiles` | manage agents |
+| `copse setup [WS]` | re-run the repo's setup commands in a workspace |
+| `copse mcp` | the MCP server agents talk to (launched for them; you don't run it) |
 
 With no `WS` argument, commands act on the workspace you're in.
+
+### Agent tools
+
+Agents launched by copse get these MCP tools. You don't call them yourself, but
+knowing them helps when you tell the supervisor how to work.
+
+| Tool | Used by | |
+|---|---|---|
+| `assign` / `handoff` / `wait_for_worker` | supervisor | start a worker (return now / wait for its result / keep waiting) |
+| `send_message` | any agent | message another agent; delivered when it's idle |
+| `list_agents` / `list_tasks` / `list_agent_profiles` | supervisor | who's running, what's queued, which profiles exist |
+| `workspace_diff` | supervisor | a worker branch's changes against its base |
+| `request_review` / `submit_review` | supervisor / reviewer | start a reviewer on a branch / record its verdict |
+| `merge_workspace` / `remove_workspace` | supervisor | merge through the gates / delete the worktree |
+| `report_result` | worker | finish a task and hand back the result |
+| `complete_subagent` | supervisor | record the result of a `subagent`-profile task |
+| `set_goal` / `get_progress` / `check_milestone` | supervisor | autopilot's goal, its progress, and running the checks |
+| `need_user` | supervisor | stop autopilot and ask you a question |
+| `transfer_to_repo` | supervisor | move a scratch session's work into a repository |
 
 ## Token usage and history
 
@@ -209,7 +260,7 @@ skipped.
 }
 ```
 
-The last three are for autopilot and merge gates:
+Autopilot, merge gates and cleanup:
 
 | Key | Default | |
 |---|---|---|
@@ -224,6 +275,7 @@ The last three are for autopilot and merge gates:
 | `usage_limit` | `90` | autopilot stops pushing on at this % of your Claude usage limit |
 | `graphify` | if the graph is there | point agents at the repo's [graphify](https://github.com/safishamsi/graphify) code map (`false` turns it off) |
 | `stale_after` | `30` | minutes before a worker that reported and sat idle is closed (`0`: never) |
+| `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
 
 **Closing and cleaning up.** Press `x` on an agent in the sidebar (twice for one
 that's still running) or run `copse close <id>` to stop it and hide it. Stopping means
@@ -242,7 +294,6 @@ installed, copse tells the supervisor and every worker to find code with
 `graphify query` before grepping or reading whole files. Those commands are
 pre-approved, and copse refreshes the graph's code (`graphify update`, no LLM) in
 the background after each merge.
-| `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
 
 When `pool_size` is greater than `0`, a claimed worktree keeps the path and
 port block it was built with -- it's never moved, and its port block is fixed
