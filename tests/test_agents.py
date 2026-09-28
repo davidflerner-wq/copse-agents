@@ -1,5 +1,6 @@
 import shutil
 import time
+from pathlib import Path
 
 import pytest
 
@@ -539,3 +540,17 @@ def test_lightweight_fields_are_ignored_by_other_providers(monkeypatch):
     argv = Codex().command(LaunchContext("abc", profile, "do it"))
     for flag in ("-p", "--strict-mcp-config", "--setting-sources", "--effort"):
         assert flag not in argv
+
+
+def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws):
+    from copse.providers import get_provider
+
+    prompt = agents.decorate_worker_prompt("add a flag", "w1", ws, None, get_provider("claude"), headless=False)
+    assert "run only the tests that cover your change" in prompt
+    assert "Run the full suite once, just before you commit." in prompt
+    (Path(ws.repo_root) / ".copse").mkdir(exist_ok=True)
+    (Path(ws.repo_root) / ".copse" / "config.json").write_text('{"checks": ["uv run pytest -q"]}')
+    prompt = agents.decorate_worker_prompt("add a flag", "w1", ws, None, get_provider("claude"), headless=False)
+    assert "Don't run the full suite yourself" in prompt and "`uv run pytest -q`" in prompt
+    sub = agents.subagent_prompt("You are a subagent.", "add a flag", ws, None)
+    assert "Don't run the full suite yourself" in sub

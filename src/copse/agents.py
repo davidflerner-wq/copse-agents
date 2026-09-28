@@ -33,6 +33,7 @@ WORKER_FOOTER = """
 
 ---
 You are running as a copse worker (agent id {agent_id}) on branch `{branch}`.
+{guidance}
 When you have finished:
 1. Commit your work to this branch with a clear message (do not push or merge).
 2. Call the `report_result` tool from the `copse` MCP server with a concise
@@ -57,6 +58,7 @@ Work only in `{path}`: a git worktree on branch `{branch}` that is yours alone.
 Your shell may start in another directory, so begin every Bash command with
 `cd {path} && ` (or use `git -C {path}`), and give file tools absolute paths
 under that directory. Don't change files anywhere else, and don't switch branches.
+{guidance}
 When you have finished:
 1. Commit your work there on `{branch}` with a clear message (do not push or merge).
 2. Don't call any copse tools. End with a concise summary: what you changed,
@@ -83,6 +85,31 @@ def new_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
+def test_guidance(checks: list[str]) -> str:
+    """How a worker should test: the tests for its change as it goes, and
+    the full suite once. Full-suite runs are the slowest thing a worker does,
+    and several workers running them at once slow each other down."""
+    targeted = ("Testing: while you work, run only the tests that cover your change (one "
+                "test file, or a -k filter), not the whole suite.")
+    if checks:
+        shown = "; ".join(f"`{c}`" for c in checks)
+        return (f"{targeted} Don't run the full suite yourself: copse runs the repo's checks "
+                f"({shown}) on your branch once, before it merges, and sends you any failures.")
+    return f"{targeted} Run the full suite once, just before you commit."
+
+
+def worker_guidance(ws: Workspace) -> str:
+    """How a worker should find code (the code map, if any) and test it."""
+    from copse import codemap
+    from copse.config import load_repo_config
+
+    try:
+        checks = load_repo_config(ws.repo_root).checks
+    except ValueError:
+        checks = []
+    return "\n".join(p for p in (codemap.guidance(ws.repo_root), test_guidance(checks)) if p)
+
+
 def agent_env(ws: Workspace, agent_id: str) -> dict[str, str]:
     return {**workspaces.workspace_env(ws), "COPSE_AGENT_ID": agent_id}
 
@@ -99,7 +126,8 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
     prompt = task
     if done_when:
         prompt += f"\n\nFinish line: {done_when.strip()}"
-    prompt += WORKER_FOOTER.format(agent_id=agent_id, branch=ws.branch)
+    prompt += WORKER_FOOTER.format(agent_id=agent_id, branch=ws.branch,
+                                   guidance=worker_guidance(ws))
     if done_when and provider.name == "claude" and not headless:
         # /goal is an interactive command; headless workers get the finish
         # line above and the Stop hook's reminder to report.
@@ -187,7 +215,9 @@ def _pause_when_done(agent_id: str, argv: list[str]) -> list[str]:
 
 
 def _profile_for(db: DB, agent: Agent, ws: Workspace):
-    """``agent``'s profile as launched: autopilot sessions add their guide."""
+    """``agent``'s profile as launched: autopilot sessions add their guide,
+    and a chat (a supervisor) learns about the code map, if there is one.
+    Workers get the code map in their task instead (see worker_guidance)."""
     from dataclasses import replace
 
     from copse import autopilot as pilot
@@ -196,6 +226,12 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace):
     profile = load_profile(agent.profile, ws.repo_root)
     if db.get_autopilot(agent.id):
         profile = replace(profile, prompt=profile.prompt + pilot.guide(load_repo_config(ws.repo_root)))
+    if agent.mode == "interactive":
+        from copse import codemap
+
+        note = codemap.guidance(ws.repo_root)
+        if note:
+            profile = replace(profile, prompt=f"{profile.prompt}\n\n{note}".strip())
     if agent.headless:
         profile = replace(profile, headless=True)
     return profile
@@ -822,7 +858,8 @@ def subagent_prompt(profile_prompt: str, task: str, ws: Workspace, done_when: st
     if done_when:
         parts.append(f"Finish line: {done_when.strip()}")
     body = "\n\n".join(p for p in parts if p)
-    return body + SUBAGENT_FOOTER.format(path=ws.path, branch=ws.branch)
+    return body + SUBAGENT_FOOTER.format(path=ws.path, branch=ws.branch,
+                                         guidance=worker_guidance(ws))
 
 
 def subagent_brief(agent: Agent, ws: Workspace) -> str:

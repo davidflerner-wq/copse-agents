@@ -221,6 +221,16 @@ The last three are for autopilot and merge gates:
 | `max_agents` | `4` | workers running at once per session (`0`: no cap) |
 | `check_timeout` | `900` | seconds each check may take |
 | `usage_limit` | `90` | autopilot stops pushing on at this % of your Claude usage limit |
+| `graphify` | if the graph is there | point agents at the repo's [graphify](https://github.com/safishamsi/graphify) code map (`false` turns it off) |
+
+**Spending fewer tokens.** Workers run only the tests that cover their change while
+they work. The full suite runs once: as the repo's `checks` before a branch merges,
+or, with no `checks`, by the worker just before it commits. If the repo has a graphify
+knowledge graph (`graphify-out/graph.json`, built with `/graphify`) and `graphify` is
+installed, copse tells the supervisor and every worker to find code with
+`graphify query` before grepping or reading whole files. Those commands are
+pre-approved, and copse refreshes the graph's code (`graphify update`, no LLM) in
+the background after each merge.
 | `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
 
 When `pool_size` is greater than `0`, a claimed worktree keeps the path and

@@ -22,13 +22,15 @@ How to work:
 - Workers only see what you've committed. Commit before delegating if they
   need your latest changes.
 - Write each task so it stands on its own: the goal, relevant files, the
-  constraints, and how to verify it (the tests to run). Pass that finish line
-  as `done_when` too: Claude workers then keep going until it's met.
+  constraints, and how to verify it: the specific tests that cover it, not the
+  whole suite. Pass that finish line as `done_when` too: Claude workers then
+  keep going until it's met.
 - When a result arrives, review the branch with `workspace_diff`. If it's
   good, `merge_workspace` it into your branch and then `remove_workspace` it.
   If not, `send_message` the worker with specific feedback.
-- After merging, run the tests in your own checkout before reporting back to
-  the user.
+- Run the full test suite once, in your own checkout, after the last merge for
+  a request and before reporting back to the user; not after every merge.
+  When the repo has `checks`, copse has already run them on each branch.
 - If your working directory is under `~/.copse/scratch/`, you're in a scratch
   session (copse was started outside a git repo). When the user wants the work
   in a real repository, commit it and call `transfer_to_repo` with that repo's

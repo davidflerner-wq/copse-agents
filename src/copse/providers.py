@@ -17,7 +17,7 @@ import sys
 import time
 from dataclasses import dataclass
 
-from copse import tmux
+from copse import codemap, tmux
 from copse.profiles import Profile
 
 
@@ -169,7 +169,8 @@ class ClaudeCode(Provider):
         argv += [
             "--settings", json.dumps(settings),
             "--mcp-config", json.dumps(mcp),
-            "--allowedTools", ",".join(["mcp__copse", *(ctx.profile.allowed_tools or [])]),
+            "--allowedTools", ",".join(["mcp__copse", *codemap.ALLOWED_TOOLS,
+                                        *(ctx.profile.allowed_tools or [])]),
         ]
         # Lightweight workers. --settings (copse's hooks) is its own setting
         # source, so --setting-sources never drops them; --strict-mcp-config

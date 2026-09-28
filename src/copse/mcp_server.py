@@ -9,7 +9,7 @@ import subprocess
 
 from mcp.server.mcpserver import MCPServer
 
-from copse import agents, autopilot, gates, git, history, tasks, workspaces
+from copse import agents, autopilot, codemap, gates, git, history, tasks, workspaces
 from copse.config import RepoConfig, load_repo_config
 from copse.db import DB, Agent, Workspace
 from copse.profiles import list_profiles
@@ -397,6 +397,7 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
             task=f"merge {ws.branch} into {ws.base_branch}", result=text,
         )
         tasks.on_merged(db, ws)
+        codemap.refresh_later(ws.repo_root)
         if pilot:
             db.bump_progress(pilot.root_id)
             if pilot.goal:
