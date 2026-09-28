@@ -12,6 +12,8 @@ from typing import Optional
 import typer
 
 from copse import agents, git, tmux, view, workspaces
+from copse import history as history_mod
+from copse.usage import format_tokens
 from copse.config import write_template
 from copse.db import DB, Workspace
 from copse.profiles import list_profiles
@@ -477,7 +479,40 @@ def list_cmd(
         typer.secho(f"{ws.id}", bold=True, nl=False)
         typer.echo(f"  [{ws.branch}]{info}")
         for a in e["agents"]:
-            typer.echo(f"    {a['id']}  {a['profile']:<12} {a['provider']:<7} {a['status']:<11} {a['mode']}")
+            tokens = f"  {a['tokens']}" if a.get("tokens") else ""
+            typer.echo(f"    {a['id']}  {a['profile']:<12} {a['provider']:<7} {a['status']:<11} {a['mode']}{tokens}")
+
+
+@app.command()
+def history(
+    limit: int = typer.Option(50, "--limit", help="Most recent rows to show."),
+    kind: Optional[str] = typer.Option(
+        None, "--kind", help=f"Only this kind: one of {', '.join(history_mod.KINDS)}."
+    ),
+    all_repos: bool = typer.Option(False, "--all", help="Every repo, not just this one."),
+) -> None:
+    """Durable history of worker results, reviews, merges and milestone checks."""
+    db = DB()
+    repo_root = None
+    if not all_repos:
+        try:
+            repo_root = git.main_repo_root(os.getcwd())
+        except git.GitError:
+            typer.echo("not in a git repo: showing all repos")
+    rows = db.list_history(repo_root, kind, limit)
+    if not rows:
+        typer.echo("no history")
+        return
+    total = 0
+    for r in rows:
+        when = time.strftime("%m-%d %H:%M", time.localtime(r.ts))
+        tokens = history_mod.tokens_summary(r.tokens)
+        total += history_mod.tokens_total(r.tokens)
+        branch = r.branch or "-"
+        typer.echo(
+            f"{when}  {r.kind:<13} {branch:<28} {tokens:<16} {history_mod.row_summary(r)}"
+        )
+    typer.echo(f"\ntotal tokens: {format_tokens(total)}")
 
 
 @app.command()
@@ -626,8 +661,11 @@ def rm(
     db = DB()
     ws = _ws(db, workspace)
     if ws.base_branch and os.path.isdir(ws.path) and not delete_branch:
-        st = git.status(ws.path, ws.base_branch)
-        if st.ahead and st.unpushed != 0:
+        try:
+            st = git.status(ws.path, ws.base_branch)
+        except git.GitError:
+            st = None  # e.g. the base branch is gone; the note is only a courtesy
+        if st and st.ahead and st.unpushed != 0:
             typer.secho(
                 f"note: {ws.branch} has {st.ahead} commit(s) not in {ws.base_branch} "
                 "and not pushed; the branch is kept.", fg="yellow",
@@ -769,3 +807,17 @@ def statusline_cmd() -> None:
 def flush_cmd(agent_id: str, delay: float = typer.Option(0.0)) -> None:
     time.sleep(delay)
     agents.flush(DB(), agent_id)
+
+
+@app.command("_deliver-checks", hidden=True)
+def deliver_checks_cmd(reviewer_id: str, workspace_id: str) -> None:
+    """Run a repo's checks for a reviewer and deliver the summary to its
+    inbox. Started detached from request_review, so the checks still finish
+    and get delivered even if the MCP server that started it has exited."""
+    from copse.config import load_repo_config
+
+    db = DB()
+    ws = db.get_workspace(workspace_id)
+    if ws is None:
+        return
+    agents.deliver_check_summary(db, reviewer_id, ws, load_repo_config(ws.repo_root))

@@ -171,6 +171,8 @@ def render(snap: list[dict], now: float, width: int = 80, pilot: dict | None = N
             detail = [label + (f" for {ago(now - since)}" if since else "")]
             if a.get("pending"):
                 detail.append(f"{plural(a['pending'], 'message')} queued")
+            if a.get("tokens"):
+                detail.append(a["tokens"])
             detail.append(a["id"][:6])
             lines += [Line(t, "dim", workspace=ws) for t in _wrap(" · ".join(detail), width, "    ")]
             for sub in a.get("subagents") or []:

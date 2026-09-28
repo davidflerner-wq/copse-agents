@@ -92,7 +92,12 @@ or put the goal in `.copse/goals.md`, and it works like a project manager:
    they keep going until it's met.
 3. **Gated merges.** A branch merges only when everything is committed, a
    reviewer agent has approved that exact commit, your pre-commit hooks pass,
-   and your `checks` pass. copse runs these itself before `merge_workspace`.
+   and your `checks` pass. copse runs these itself before `merge_workspace`,
+   and caches a clean commit's passing result so it isn't re-run for every
+   review and merge attempt at the same sha. `request_review` starts the
+   reviewer immediately and runs `checks` in the background, delivering a
+   pass/fail summary (output only for failures) as a message once they
+   finish, instead of asking the reviewer to run the whole suite itself.
 4. **It keeps going.** If the supervisor stops while milestones are still
    unverified and no worker is running, copse tells it to continue. It stops
    when every check passes, when it needs a decision from you, after three
@@ -133,6 +138,7 @@ your own status line prints, so what you see doesn't change.
 | `copse autopilot [on\|off\|check]` | the goal's progress; turn autopilot on or off; run the checks now |
 | `copse transfer [REPO] [--from SESSION] [-b BRANCH]` | move a scratch session's work into a real repo |
 | `copse ls [--all]` | workspaces and agents |
+| `copse history [--limit N] [--kind K] [--all]` | durable log of worker results, reviews, merges and milestone checks |
 | `copse watch [--all] [--once]` | the dashboard on its own (the same view as the sidebar): enter attaches, `p` peeks |
 | `copse attach / cd / open [WS]` | tmux session / path / editor |
 | `copse status / diff [--stat] [WS]` | compared with the base branch (committed + uncommitted) |
@@ -144,6 +150,27 @@ your own status line prints, so what you see doesn't change.
 | `copse agent spawn/kill/peek/profiles` | manage agents |
 
 With no `WS` argument, commands act on the workspace you're in.
+
+## Token usage and history
+
+Every Claude Code agent's token usage (input, cached, output, model) is read
+straight from its own transcript JSONL under `~/.claude/projects/`, summed
+incrementally so it's cheap to check often. It shows up:
+
+- in the sidebar and `copse ls`, next to each agent (e.g. `191k tok`)
+- appended to the result a worker or reviewer forwards to its supervisor
+  (e.g. `tokens: 182k in (160k cached, 20k written) · 9k out · sonnet`)
+- in `copse history`, per row, with a total across the rows shown. Each row
+  holds only what its agent used since that agent's previous row, so the
+  total never double counts
+
+`copse history` is an append-only log of what happened: a worker's report, a
+reviewer's verdict, a successful merge, and a milestone check (reports and
+merges carry tokens). Unlike `copse ls`, it survives session pruning (`copse prune`), so
+it's the place to look for what an agent did after its session is gone. It's
+capped at 5000 rows per repo, oldest dropped first. Recording usage or
+history never blocks a report, merge or check: a failure there is logged and
+skipped.
 
 ## Repo config: `.copse/config.json`
 

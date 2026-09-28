@@ -90,6 +90,10 @@ def enforce(db: DB, repo_root: str, now: float | None = None) -> int:
         if i >= KEEP or too_old:
             _forget(db, s)
             dropped += 1
+    if dropped:
+        # _forget deletes agent rows; a dropped agent's usage mark (if its
+        # history rows are gone too, e.g. never reported) is now dead weight.
+        db.prune_usage_marks()
     return dropped
 
 
