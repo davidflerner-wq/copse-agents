@@ -13,12 +13,12 @@ from copse import agents, autopilot, tmux, workspaces
 from copse.db import Agent
 
 CLAUDE_IDLE = "⏺ Done.\n\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
-BOX = "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
-# Real Claude Code 2.1.283 layout: a spinner line directly above the input
-# box (contiguous, no blank line) while a turn runs, e.g.
-# "✻ Tomfoolering… (7m 22s · ↓ 35.0k tokens · thinking)".
-CLAUDE_BUSY = "✻ Tomfoolering… (7m 22s · ↓ 35.0k tokens · thinking)\n" + BOX
-CLAUDE_DONE = "✻ Sautéed for 7m 49s · done 7:57 PM\n" + BOX
+# Real Claude Code 2.1.283 layout: a blank line sits between the box's top
+# border and the spinner line above it (and another below the bottom
+# border), e.g. "✻ Tomfoolering… (7m 22s · ↓ 35.0k tokens · thinking)".
+BOX = "\n────\n❯ \n────\n\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+CLAUDE_BUSY = "✻ Tomfoolering… (7m 22s · ↓ 35.0k tokens · thinking)" + BOX
+CLAUDE_DONE = "✻ Sautéed for 7m 49s · done 7:57 PM" + BOX
 LONG_AGO = time.time() - autopilot.IDLE_GRACE_SECONDS - 1
 
 
@@ -146,6 +146,31 @@ def test_stale_idle_status_of_a_busy_worker_is_corrected_not_flagged(db, root, m
     assert autopilot.split_workers(db, "boss", screen=True)[1] == []
     assert db.get_agent("w1").status == "processing"
     assert autopilot.on_stop(db, agent, {}) is None
+
+
+def test_stale_idle_status_is_corrected_against_a_real_captured_busy_screen(db, root, monkeypatch):
+    # An exact capture of a real Claude Code 2.1.283 pane: a blank line above
+    # and below the box, a truncated transcript line further up, and a
+    # spinner directly above the top blank line.
+    real_capture = (
+        '     os.environ.setdefault("GIT_COMMITTER_EMAIL", "t@example.c…\n'
+        "\n"
+        "✽ Hashing… (2m 53s · ↓ 7.6k tokens · thinking)\n"
+        "\n"
+        "────────────────────────────────────────\n"
+        "❯ \n"
+        "────────────────────────────────────────\n"
+        "\n"
+        "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n"
+    )
+    agent, ws = root
+    with_goal(db)
+    add_agent(db, ws, "w1", status="idle", status_since=LONG_AGO)
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: real_capture)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    assert autopilot.split_workers(db, "boss", screen=True)[1] == []
+    assert db.get_agent("w1").status == "processing"
 
 
 def test_reconcile_corrects_stale_idle_to_processing(db, root, monkeypatch):

@@ -202,19 +202,26 @@ class ClaudeCode(Provider):
         return None
 
     def busy_in_footer(self, screen: str) -> bool:
-        """Whether the busy spinner is in the contiguous block of non-blank
-        lines directly above the input box's top border (the spinner itself,
-        plus any todo list above it), so it can't be a transcript quoting it
-        further up the scrollback. Needed before an 'idle' status is
-        overridden to busy."""
+        """Whether the busy spinner is in the status block above the input
+        box. Real screens put a blank line between the box's top border and
+        the spinner (and another below the bottom border), so this skips the
+        border and that blank padding, then takes the contiguous non-blank
+        block above it (the spinner itself, plus any todo list above it). A
+        transcript quoting the phrase further up the scrollback, past
+        another blank line, is out of that block; one quoting it right next
+        to the box, with no padding at all, is still excluded by the anchored
+        regex itself. Needed before an 'idle' status is overridden to busy."""
         lines = screen.rstrip().splitlines()
         box = [i for i, line in enumerate(lines) if line.lstrip().startswith("❯")]
         top = box[-1] if box else len(lines)
-        i = top
-        while i > 0 and lines[i - 1].strip():
-            i -= 1
-        header = lines[i:top]
-        return any(self.BUSY_SPINNER.search(line) or "esc to interrupt" in line for line in header)
+        i = max(0, top - 1)  # the border line directly above the box
+        while i > 0 and not lines[i - 1].strip():
+            i -= 1  # the blank padding between the border and the status area
+        start = i
+        while start > 0 and lines[start - 1].strip():
+            start -= 1  # the status block itself: spinner, plus any todo list
+        return any(self.BUSY_SPINNER.search(line) or "esc to interrupt" in line
+                   for line in lines[start:i])
 
     def after_launch(self, target: str) -> None:
         # A fresh worktree is a folder Claude Code hasn't seen, so it asks
