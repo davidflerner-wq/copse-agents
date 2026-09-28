@@ -173,8 +173,22 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
         review = db.last_review(ws.id)
         # The latest reviewer verdict, so the sidebar can flag rows that need you.
         entry["review"] = None if review is None else ("approved" if review.approved else "changes")
+        entry["autopilot"], entry["asking"] = _autopilot_flags(db, shown)
         out.append(entry)
     return out
+
+
+def _autopilot_flags(db: DB, shown: list[Agent]) -> tuple[bool, str | None]:
+    """Whether these agents' session runs on autopilot (it reviews its own
+    workers, so their reports don't wait on the person), and the id of the one
+    among them that is a session root with an open need_user question."""
+    on, asking = False, None
+    for a in shown:
+        ap = db.get_autopilot(agents.root_of(db, a.id))
+        on = on or bool(ap and ap.enabled)
+        if ap and a.parent_id is None and ap.state == "blocked":
+            asking = a.id
+    return on, asking
 
 
 def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> dict | None:

@@ -100,15 +100,24 @@ def elide_middle(text: str, width: int) -> str:
 WORKERS = ("assign", "handoff")
 
 
-def needs_you(agent: dict, ws: dict) -> str | None:
-    """Why ``agent``'s row needs the person, or None: it asked for input, or
-    it is a worker that reported and hasn't been approved yet."""
-    if agent["status"] == "waiting":
-        return "needs you"
+def awaiting_review(agent: dict, ws: dict) -> str | None:
+    """How a worker that reported and hasn't been approved yet reads, or None."""
     if (agent.get("mode") in WORKERS and agent.get("reported")
             and agent["status"] not in ("processing", "starting")):
         return {"approved": None, "changes": "changes requested"}.get(ws.get("review"), "to review")
     return None
+
+
+def needs_you(agent: dict, ws: dict) -> str | None:
+    """Why a person must act on ``agent``'s row, or None: it is waiting on a
+    prompt or dialog, it is a supervisor with an open need_user question, or
+    it is a worker awaiting review in a session without autopilot (with
+    autopilot on, the supervisor reviews it)."""
+    if agent["status"] == "waiting":
+        return "needs you"
+    if ws.get("asking") == agent["id"]:
+        return "has a question"
+    return None if ws.get("autopilot") else awaiting_review(agent, ws)
 
 
 def ago(seconds: float | None) -> str:
@@ -230,6 +239,8 @@ def render_agent(a: dict, ws: dict, now: float, width: int) -> list[Line]:
         icon, label = "✓", "done"
     if (reason := needs_you(a, ws)):
         icon, label, style = "◆", reason, "alert"
+    elif (pending_review := awaiting_review(a, ws)):  # autopilot will review it
+        icon, label, style = "◇", pending_review, "dim"
     name = a["profile"].replace("-", " ").capitalize()
     if a["provider"] != "claude":
         name += f" ({a['provider']})"
@@ -345,7 +356,8 @@ def help_lines(width: int, in_tmux: bool = False) -> list[Line]:
     """The `?` overlay, drawn in place of the list."""
     lines = [Line("Keys", "bold")]
     lines += [Line(fit(f"{k:<{KEY_COLUMN}}{what}", width)) for k, what in KEYS]
-    lines += [Line(""), Line(fit("◆ needs you", width), "alert")]
+    lines += [Line(""), Line(fit("◆ needs you", width), "alert"),
+              Line(fit("◇ autopilot will review", width), "dim")]
     if in_tmux:
         lines += [Line(t, "dim") for t in _wrap("prefix L: back from an agent", width, "")]
     lines += [Line(t, "dim") for t in _wrap("any key to go back", width, "")]

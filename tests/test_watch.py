@@ -41,6 +41,11 @@ def test_queued_messages_and_reports_are_shown():
     i = next(i for i, ln in enumerate(lines) if ln.agent)
     assert lines[i].style == "alert" and "◆ Developer" in lines[i].text
     assert "to review" in lines[i + 1].text
+    # Under autopilot the supervisor reviews it: a quiet marker, not an alert.
+    lines = watch.render([ws([agent("idle", reported=True)], autopilot=True)], now=1005)
+    i = next(i for i, ln in enumerate(lines) if ln.agent)
+    assert lines[i].style == "dim" and "◇ Developer" in lines[i].text and not lines[i].needs
+    assert "to review" in lines[i + 1].text and lines[0].text == "all quiet"
 
 
 def test_empty_state():

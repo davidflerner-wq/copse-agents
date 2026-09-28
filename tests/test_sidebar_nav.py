@@ -4,8 +4,10 @@ follows its agent, and text that fits a 30-column pane. Everything here runs
 against ``render`` and ``handle_key``, so no curses screen is needed."""
 
 import curses
+import time
 
-from copse import view, watch, workspaces
+from copse import autopilot, view, watch, workspaces
+from copse.db import Agent
 
 # The sidebar pane is 30 columns; text starts after the selection bar and
 # stops one short of the edge (see watch._loop).
@@ -95,6 +97,33 @@ def test_what_needs_you():
     assert watch.needs_you(agent("a", "processing", reported=True), w) is None  # still going
     assert watch.needs_you(agent("a", mode="interactive", reported=True), w) is None
     assert watch.needs_you(agent("a"), w) is None
+    assert watch.needs_you(agent("sup", mode="interactive"), {**w, "asking": "sup"}) == "has a question"
+
+
+def test_under_autopilot_only_a_human_prompt_or_question_needs_you():
+    w = ws([], autopilot=True)
+    assert watch.needs_you(agent("a", reported=True), w) is None
+    assert watch.needs_you(agent("a", reported=True), {**w, "review": "changes"}) is None
+    assert watch.needs_you(agent("a", "waiting"), w) == "needs you"
+    assert watch.needs_you(agent("sup", mode="interactive"), {**w, "asking": "sup"}) == "has a question"
+    assert watch.awaiting_review(agent("a", reported=True), w) == "to review"
+
+
+def test_under_autopilot_a_report_is_quiet_unpinned_and_skipped_by_n():
+    snap = [ws([agent("busy01", "processing"), agent("done01", reported=True),
+                agent("wait01", "waiting")], id="w1", autopilot=True),
+            ws([agent("sup001", mode="interactive")], id="w0", branch="main", autopilot=True,
+               asking="sup001")]
+    lines = watch.render(snap, 1090, WIDTH)
+    order = [ln.agent["id"] for ln in lines if ln.agent]
+    assert order[:3] == ["wait01", "busy01", "done01"]  # the report keeps its place
+    done = next(ln for ln in lines if ln.agent and ln.agent["id"] == "done01")
+    assert done.text.startswith("  ◇ ") and done.style == "dim" and not done.needs
+    sup = next(ln for ln in lines if ln.agent and ln.agent["id"] == "sup001")
+    assert sup.text.startswith("  ◆ ") and sup.needs
+    state = watch.NavState()
+    seen = [selected_agent(state, press(state, snap, "n")[1]) for _ in range(3)]
+    assert seen == ["sup001", "wait01", "sup001"]
 
 
 def test_rows_needing_you_are_marked_and_pinned_to_the_top_of_their_group():
@@ -346,3 +375,27 @@ def test_snapshot_carries_the_latest_review_verdict(db, repo):
     assert entry()["review"] == "changes"
     db.add_review(w.id, "def456", None, True, "lgtm")
     assert entry()["review"] == "approved"
+
+
+def test_last_review_uses_an_index(db):
+    plan = " ".join(r["detail"] for r in db.conn.execute(
+        "EXPLAIN QUERY PLAN SELECT * FROM reviews WHERE workspace_id=? ORDER BY id DESC LIMIT 1",
+        ("w",)))
+    assert "reviews_workspace_id" in plan
+
+
+def test_snapshot_carries_the_sessions_autopilot_and_open_question(db, repo):
+    w = workspaces.create(db, str(repo), "auto").workspace
+    now = time.time()
+    db.add_agent(Agent("root01", w.id, "supervisor", "claude", None, "interactive", "idle",
+                       "%991", None, now))
+    db.add_agent(Agent("work01", w.id, "developer", "claude", "root01", "assign", "idle",
+                       "%992", "done", now))
+    entry = lambda: next(e for e in view.snapshot(db, str(repo)) if e["id"] == w.id)  # noqa: E731
+    assert (entry()["autopilot"], entry()["asking"]) == (False, None)
+    db.add_autopilot("root01")
+    assert (entry()["autopilot"], entry()["asking"]) == (True, None)
+    autopilot.need_user(db, "root01", "Which database?")
+    assert (entry()["autopilot"], entry()["asking"]) == (True, "root01")
+    autopilot.set_enabled(db, "root01", False)
+    assert entry()["autopilot"] is False
