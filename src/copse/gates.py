@@ -43,32 +43,49 @@ def head(ws: Workspace) -> str:
 
 
 def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: int) -> tuple[bool, str]:
-    """Run ``cmd`` in ``ws``, or reuse the cached result for the same (workspace,
-    HEAD sha, command) if the tree was clean when that result was cached. A
-    dirty tree always runs fresh and is never cached, since the result then
-    reflects more than just the commit at ``sha``."""
+    """Run ``cmd`` in ``ws``, or reuse the cached PASSING result for the same
+    (workspace, HEAD sha, command) if the tree was clean when that result was
+    cached. A dirty tree always runs fresh and is never cached, since the
+    result then reflects more than just the commit at ``sha``. A failure or
+    timeout is never cached either, so a retry always re-runs it; and a
+    result is only cached if the sha and clean state still hold *after* the
+    command ran, in case it took long enough for something else to commit or
+    leave files behind."""
     sha = head(ws)
     dirty = bool(git.dirty_files(ws.path))
     if not dirty:
         cached = db.get_check(ws.id, sha, cmd)
-        if cached is not None:
-            return bool(cached.ok), cached.output or ""
+        if cached is not None and cached.ok:
+            return True, cached.output or ""
     ok, out = autopilot.run_check(cmd, ws.path, env, timeout)
-    if not dirty:
+    if ok and not dirty and head(ws) == sha and not git.dirty_files(ws.path):
         db.set_check(ws.id, sha, cmd, ok, out)
     return ok, out
 
 
+MAX_FAILURE_CHARS = 4_000
+
+
 def check_summary(db: DB, ws: Workspace, cfg: RepoConfig) -> str:
     """Run each of ``cfg.checks`` (cached by sha) and produce a short pass/fail
-    summary for a reviewer, with output only for the ones that failed."""
+    summary for a reviewer, with output only for the ones that failed, capped
+    so one big failure can't blow up the reviewer's prompt."""
     if not cfg.checks:
         return ""
     env = workspaces.workspace_env(ws)
     lines = []
+    budget = MAX_FAILURE_CHARS
     for cmd in cfg.checks:
         ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
-        lines.append(f"PASS `{cmd}`" if ok else f"FAIL `{cmd}`\n{out}")
+        if ok:
+            lines.append(f"PASS `{cmd}`")
+            continue
+        if budget <= 0:
+            lines.append(f"FAIL `{cmd}` (output omitted; failure budget spent)")
+            continue
+        shown = out if len(out) <= budget else out[:budget] + "\n... (truncated)"
+        budget -= len(shown)
+        lines.append(f"FAIL `{cmd}`\n{shown}")
     return "\n".join(lines)
 
 

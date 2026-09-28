@@ -9,11 +9,21 @@ import os
 from mcp.server.mcpserver import MCPServer
 
 from copse import agents, autopilot, gates, git, workspaces
-from copse.config import load_repo_config
+from copse.config import RepoConfig, load_repo_config
 from copse.db import DB, Agent, Workspace
 from copse.profiles import list_profiles
 
 MAX_DIFF_CHARS = 60_000
+
+# Background tasks (e.g. a reviewer's check summary) need a strong reference
+# kept somewhere, or asyncio may garbage-collect them mid-flight.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _run_in_background(coro) -> None:
+    task = asyncio.ensure_future(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 mcp = MCPServer(
     "copse",
@@ -285,21 +295,40 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
     return await asyncio.to_thread(run)
 
 
+def _deliver_checks(reviewer_id: str, ws_id: str, cfg: RepoConfig) -> None:
+    """Run in a background thread (see request_review): reopens its own DB
+    connection, since sqlite3 connections aren't shared across threads."""
+    db = DB()
+    ws = db.get_workspace(ws_id)
+    if ws is not None:
+        agents.deliver_check_summary(db, reviewer_id, ws, cfg)
+
+
 @mcp.tool()
-def request_review(workspace: str, focus: str | None = None) -> str:
+async def request_review(workspace: str, focus: str | None = None) -> str:
     """Start a reviewer agent on a worker's branch. It doesn't edit code; its
     verdict arrives as a message and is recorded for merge_workspace, which
     only accepts an approval of the branch's current commit. The repo's
-    checks are run once here and handed to the reviewer as a pass/fail
-    summary, so it isn't re-running the whole suite itself. focus: anything
-    the reviewer should look at especially."""
-    db = DB()
-    caller, _ = _caller(db)
-    ws = _ws(db, workspace)
-    if ws.kind != "worktree":
-        return "Only a worker's workspace (its own branch and worktree) can be reviewed this way."
-    cfg = load_repo_config(ws.repo_root)
-    reviewer = agents.request_review(db, caller, ws, cfg.reviewer, focus, cfg)
+    checks run in the background and are delivered to the reviewer as a
+    message once they finish (so this returns right away instead of blocking
+    on the full suite). focus: anything the reviewer should look at especially.
+    """
+    def start() -> tuple[Agent, Workspace, RepoConfig] | str:
+        db = DB()
+        caller, _ = _caller(db)
+        ws = _ws(db, workspace)
+        if ws.kind != "worktree":
+            return "Only a worker's workspace (its own branch and worktree) can be reviewed this way."
+        cfg = load_repo_config(ws.repo_root)
+        reviewer = agents.request_review(db, caller, ws, cfg.reviewer, focus, cfg)
+        return reviewer, ws, cfg
+
+    result = await asyncio.to_thread(start)
+    if isinstance(result, str):
+        return result
+    reviewer, ws, cfg = result
+    if cfg.checks:
+        _run_in_background(asyncio.to_thread(_deliver_checks, reviewer.id, ws.id, cfg))
     return (f"Reviewer {reviewer.id} ({reviewer.profile}/{reviewer.provider}) is reviewing "
             f"{ws.branch}. Its verdict will arrive as a message.")
 

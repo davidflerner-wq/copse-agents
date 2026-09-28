@@ -90,9 +90,13 @@ CREATE TABLE IF NOT EXISTS reviews (
     summary TEXT,
     created_at REAL NOT NULL
 );
--- A check command's result at one commit, so gates.run and request_review
--- don't re-run the same command against the same tree. Only written when the
--- tree was clean at that sha (see gates.run_checked).
+-- A check command's PASSING result at one commit, so gates.run and
+-- request_review don't re-run the same command against the same tree. Only
+-- written when the tree was clean before and after the run (see
+-- gates.run_checked); failures are never cached, so a flaky or broken check
+-- always gets a fresh run. "Clean" is `git status --porcelain`, which does
+-- not see changes to gitignored files, so a check whose result depends on
+-- one of those isn't fully captured by this key.
 CREATE TABLE IF NOT EXISTS check_cache (
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     sha TEXT NOT NULL,

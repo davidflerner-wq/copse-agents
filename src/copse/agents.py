@@ -81,6 +81,26 @@ def agent_env(ws: Workspace, agent_id: str) -> dict[str, str]:
     return {**workspaces.workspace_env(ws), "COPSE_AGENT_ID": agent_id}
 
 
+def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: str | None,
+                           provider, headless: bool) -> str:
+    """The prompt actually sent to a handoff/assign worker's CLI: the raw
+    ``task`` plus its finish line, the WORKER_FOOTER reminder to report, and
+    (for an interactive Claude worker with a finish line) the ``/goal``
+    wrapper. Used at spawn time, and again by ``resume`` to rebuild it when a
+    paused worker's CLI session can't be resumed and must restart fresh."""
+    from copse import autopilot as pilot
+
+    prompt = task
+    if done_when:
+        prompt += f"\n\nFinish line: {done_when.strip()}"
+    prompt += WORKER_FOOTER.format(agent_id=agent_id, branch=ws.branch)
+    if done_when and provider.name == "claude" and not headless:
+        # /goal is an interactive command; headless workers get the finish
+        # line above and the Stop hook's reminder to report.
+        prompt = pilot.worker_goal(prompt, done_when, ws.branch) or prompt
+    return prompt
+
+
 def spawn(
     db: DB,
     ws: Workspace,
@@ -106,28 +126,27 @@ def spawn(
     # Headless is a Claude Code mode; other CLIs ignore the profile field.
     headless = bool(profile.headless and provider.name == "claude")
 
+    # Stored as the agent's task: the raw text for a handoff/assign worker (so
+    # a reviewer reading it later isn't given WORKER_FOOTER or the /goal
+    # wrapper), but the fully decorated prompt for a subagent (that text IS
+    # what's handed to the supervisor's own Agent tool) or a reviewer.
+    raw_task = prompt
     if not provider.launches_process:
         if mode not in ("handoff", "assign"):
             raise AgentError(
                 f"profile {profile.name!r} uses the {provider.name} provider, which runs in "
                 "a supervisor's own Agent tool: use it through the copse handoff or assign tools"
             )
-        prompt = subagent_prompt(profile.prompt, prompt or "", ws, done_when)
+        prompt = raw_task = subagent_prompt(profile.prompt, prompt or "", ws, done_when)
     elif prompt and mode in ("handoff", "assign"):
-        if done_when:
-            prompt += f"\n\nFinish line: {done_when.strip()}"
-        prompt += WORKER_FOOTER.format(agent_id=agent_id, branch=ws.branch)
-        if done_when and provider.name == "claude" and not headless:
-            # /goal is an interactive command; headless workers get the finish
-            # line above and the Stop hook's reminder to report.
-            prompt = pilot.worker_goal(prompt, done_when, ws.branch) or prompt
+        prompt = decorate_worker_prompt(prompt, agent_id, ws, done_when, provider, headless)
     elif prompt and mode == "review":
-        prompt += REVIEW_FOOTER.format(agent_id=agent_id, branch=ws.branch)
+        prompt = raw_task = prompt + REVIEW_FOOTER.format(agent_id=agent_id, branch=ws.branch)
 
     agent = Agent(
         id=agent_id, workspace_id=ws.id, profile=profile.name, provider=provider.name,
         parent_id=parent_id, mode=mode, status="starting", tmux_window="",
-        result=None, created_at=time.time(), task=prompt, headless=int(headless) or None,
+        result=None, created_at=time.time(), task=raw_task, headless=int(headless) or None,
         done_when=done_when,
     )
     db.add_agent(agent)
@@ -428,7 +447,15 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True) -> list[Agent]:
         ref = a.session_ref if provider.name in ("claude", "antigravity") and a.session_ref else None
         if ref and not provider.can_resume(ref):
             ref = None  # nothing was ever said in it: start that agent fresh
-        prompt = None if ref else ((a.task + RESUME_NOTE) if a.task else None)
+        if ref:
+            prompt = None
+        elif a.task and a.mode in ("handoff", "assign") and provider.launches_process:
+            # a.task is the raw task now (see decorate_worker_prompt); a fresh
+            # start needs the same decoration it got the first time.
+            prompt = decorate_worker_prompt(a.task, a.id, ws, a.done_when, provider,
+                                            bool(a.headless)) + RESUME_NOTE
+        else:
+            prompt = (a.task + RESUME_NOTE) if a.task else None
         _launch(db, a, ws, prompt=prompt, resume=ref,
                 watch_pane=watch_pane and a.id == root_id, background_setup=True)
         resumed.append(a)
@@ -746,15 +773,28 @@ def workspace_worker(db: DB, ws: Workspace) -> Agent | None:
     return workers[0] if workers else None
 
 
+def is_linear_since(ws: Workspace, prev_sha: str) -> bool:
+    """Whether ``prev_sha`` is a plain ancestor of HEAD with no merge commits
+    between them, i.e. ``git diff prev_sha..HEAD`` alone captures everything
+    new since that commit. False after a rebase (prev_sha is no longer
+    reachable from HEAD) or a merge (the range isn't just the worker's own
+    commits)."""
+    if not git.ok(["merge-base", "--is-ancestor", prev_sha, "HEAD"], ws.path):
+        return False
+    return not git.out(["rev-list", "--merges", f"{prev_sha}..HEAD"], ws.path)
+
+
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str,
                    focus: str | None = None, cfg: RepoConfig | None = None) -> Agent:
-    """Start a reviewer in a worker's workspace. Its verdict is recorded for
-    the merge gate and forwarded to ``caller`` as a message.
+    """Start a reviewer in a worker's workspace right away. Its verdict is
+    recorded for the merge gate and forwarded to ``caller`` as a message.
 
-    The repo's ``cfg.checks`` are run once here (cached by sha) and handed to
-    the reviewer as a pass/fail summary, instead of asking it to run them
-    itself. If the workspace already has a review at an earlier commit, the
-    reviewer is pointed at just what changed since then."""
+    ``cfg.checks`` are NOT run here (that would block the caller on the full
+    suite): the caller runs them in the background and delivers a pass/fail
+    summary to the reviewer as a message once they finish, via
+    ``deliver_check_summary``. If the workspace already has a review at an
+    earlier commit, the reviewer is pointed at just what changed since then,
+    when that's a plain diff (see ``is_linear_since``)."""
     from copse import gates
 
     base = ws.base_branch or "the base branch"
@@ -768,24 +808,50 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str,
     if worker and worker.done_when:
         task += f"\n\nIts finish line: {worker.done_when.strip()}"
 
-    if cfg:
-        summary = gates.check_summary(db, ws, cfg)
-        if summary:
-            task += f"\n\nChecks (already run for you; don't run the whole suite yourself):\n{summary}"
+    if cfg and cfg.checks:
+        task += ("\n\nThe repo's checks are running now; a pass/fail summary will arrive as a "
+                 "message shortly. Review the diff meanwhile, and don't call submit_review "
+                 "until you've received it.")
 
     prev = db.last_review(ws.id)
     sha = gates.head(ws)
     if prev and prev.sha != sha:
-        task += (
-            f"\n\nA previous review at {prev.sha[:8]} found:\n{(prev.summary or '').strip()}\n\n"
-            f"Focus on what changed since then (`git diff {prev.sha}..HEAD`), plus a final sanity "
-            "pass over the rest; you don't need to re-review it from scratch."
-        )
+        prior = f"\n\nA previous review at {prev.sha[:8]} found:\n{(prev.summary or '').strip()}\n\n"
+        if is_linear_since(ws, prev.sha):
+            task += (prior + f"Focus on what changed since then (`git diff {prev.sha}..HEAD`), "
+                     "plus a final sanity pass over the rest; you don't need to re-review it "
+                     "from scratch.")
+        else:
+            task += (prior + "The branch has diverged since then (for example a rebase or a "
+                     "merge), so review the whole current diff rather than just the recent "
+                     "changes.")
 
     if focus:
         task += f"\n\nFocus: {focus}"
     return spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
                  mode="review")
+
+
+def deliver_check_summary(db: DB, reviewer_id: str, ws: Workspace, cfg: RepoConfig) -> None:
+    """Run ``cfg.checks`` for ``ws`` and deliver a pass/fail summary to the
+    reviewer's inbox: delivered right away if it's idle, or handed over at its
+    next Stop, exactly like any other queued message (see ``send_message``).
+    Meant to run in a background thread from the MCP server, after
+    ``request_review`` has already spawned the reviewer. Always delivers
+    something, even if a check crashes, since the reviewer was told to wait
+    for this before approving."""
+    from copse import gates
+
+    if db.get_agent(reviewer_id) is None:
+        return
+    try:
+        summary = gates.check_summary(db, ws, cfg)
+    except Exception as e:
+        summary = f"(running the checks crashed: {e})"
+    text = (f"Checks for {ws.branch} at {gates.head(ws)[:8]}:\n\n{summary}" if summary
+            else "No checks are configured for this repo.")
+    db.enqueue(reviewer_id, text, None)
+    flush(db, reviewer_id)
 
 
 # -- hook entry point --------------------------------------------------------

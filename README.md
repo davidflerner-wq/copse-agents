@@ -89,10 +89,11 @@ or put the goal in `.copse/goals.md`, and it works like a project manager:
 3. **Gated merges.** A branch merges only when everything is committed, a
    reviewer agent has approved that exact commit, your pre-commit hooks pass,
    and your `checks` pass. copse runs these itself before `merge_workspace`,
-   and caches a clean commit's result so it isn't re-run for every review and
-   merge attempt at the same sha. `request_review` runs `checks` once up
-   front and hands the reviewer a pass/fail summary (with output only for
-   failures) instead of asking it to run the whole suite itself.
+   and caches a clean commit's passing result so it isn't re-run for every
+   review and merge attempt at the same sha. `request_review` starts the
+   reviewer immediately and runs `checks` in the background, delivering a
+   pass/fail summary (output only for failures) as a message once they
+   finish, instead of asking the reviewer to run the whole suite itself.
 4. **It keeps going.** If the supervisor stops while milestones are still
    unverified and no worker is running, copse tells it to continue. It stops
    when every check passes, when it needs a decision from you, after three
