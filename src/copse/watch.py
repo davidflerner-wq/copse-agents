@@ -226,6 +226,33 @@ def scroll_into_view(offset: int, index: int, visible: int, total: int) -> int:
     return clamp_scroll(offset, total, visible)
 
 
+def content_layout(total: int, height: int, offset: int) -> tuple[int, bool, bool]:
+    """How many rows of ``lines`` actually fit in ``height``, and whether the
+    "more above"/"more below" indicators are needed -- each gets its own
+    reserved row rather than overwriting a content row. Top's need doesn't
+    depend on how many rows remain (only on ``offset``), so this doesn't have
+    to iterate: reserving a row for it can only ever make "more below" more
+    true, never flip it back to false."""
+    show_above = offset > 0
+    content_rows = max(0, height - (1 if show_above else 0))
+    show_below = content_rows > 0 and offset + content_rows < total
+    if show_below:
+        content_rows -= 1
+    return content_rows, show_above, show_below
+
+
+def nearest_visible_row(rows: list[int], offset: int, visible: int) -> int:
+    """After a page-only scroll (PageUp/PageDown/Home/End), the index into
+    ``rows`` (agent row positions) closest to the new page, so the selection
+    follows it instead of scrolling off screen."""
+    if not rows:
+        return 0
+    in_view = [i for i, r in enumerate(rows) if offset <= r < offset + max(visible, 1)]
+    if in_view:
+        return in_view[0]
+    return min(range(len(rows)), key=lambda i: abs(rows[i] - offset))
+
+
 # PawDelta palette as xterm-256 colours (closest matches): indigo accent,
 # soft green / amber / rose for states, slate greys for secondary text.
 PALETTE_256 = {
@@ -361,12 +388,14 @@ def _loop(stdscr, repo_root: str | None) -> None:
         help_ = [t for text in (HELP_IN_TMUX if os.environ.get("TMUX") else HELP)
                  for t in _wrap(text, w - 1, "")]
         top = (len(LOGO) + 1) if h >= 18 else 2
-        visible = max(0, h - top - 1 - len(help_))
-        offset = clamp_scroll(offset, len(lines), visible)
+        raw_visible = max(0, h - top - 1 - len(help_))
+        offset = clamp_scroll(offset, len(lines), raw_visible)
+        visible, show_above, show_below = content_layout(len(lines), raw_visible, offset)
+        content_top = top + (1 if show_above else 0)
         stdscr.erase()
         _draw_logo(stdscr, w, styles) if h >= 18 else _draw_compact_logo(stdscr, w, styles)
         page = lines[offset:offset + visible]
-        for y, (i, ln) in enumerate(enumerate(page, start=offset), start=top):
+        for y, (i, ln) in enumerate(enumerate(page, start=offset), start=content_top):
             attr = styles.get(ln.style, curses.A_NORMAL)
             if rows and i == rows[selected]:
                 # A purple bar and a subtle highlight, not inverted colours.
@@ -375,12 +404,12 @@ def _loop(stdscr, repo_root: str | None) -> None:
                                styles["select"] | (attr & curses.A_BOLD))
                 continue
             stdscr.addnstr(y, 1, ln.text, w - 2, attr)
-        if visible > 0 and offset > 0:
+        if show_above:
             text = "↑ more"
             stdscr.addnstr(top, max(0, w - 1 - len(text)), text, w - 1, styles["dim"])
-        if visible > 0 and offset + visible < len(lines):
+        if show_below:
             text = "↓ more"
-            stdscr.addnstr(top + visible - 1, max(0, w - 1 - len(text)), text, w - 1, styles["dim"])
+            stdscr.addnstr(content_top + visible, max(0, w - 1 - len(text)), text, w - 1, styles["dim"])
         for y, text in enumerate(help_, start=h - len(help_)):
             stdscr.addnstr(y, 1, text, w - 2, styles["dim"])
         stdscr.refresh()
@@ -396,7 +425,7 @@ def _loop(stdscr, repo_root: str | None) -> None:
             elif bstate & BUTTON5_PRESSED:
                 offset = clamp_scroll(offset + 3, len(lines), visible)
             elif bstate & curses.BUTTON1_CLICKED and rows:
-                clicked = my - top + offset
+                clicked = my - content_top + offset
                 if clicked in rows:
                     selected = rows.index(clicked)
                     offset = scroll_into_view(offset, rows[selected], visible, len(lines))
@@ -414,12 +443,16 @@ def _loop(stdscr, repo_root: str | None) -> None:
                 offset = scroll_into_view(offset, rows[selected], visible, len(lines))
         elif key == curses.KEY_NPAGE:
             offset = clamp_scroll(offset + max(1, visible), len(lines), visible)
+            selected = nearest_visible_row(rows, offset, visible)
         elif key == curses.KEY_PPAGE:
             offset = clamp_scroll(offset - max(1, visible), len(lines), visible)
+            selected = nearest_visible_row(rows, offset, visible)
         elif key == curses.KEY_HOME:
             offset = 0
+            selected = nearest_visible_row(rows, offset, visible)
         elif key == curses.KEY_END:
             offset = clamp_scroll(len(lines), len(lines), visible)
+            selected = nearest_visible_row(rows, offset, visible)
         elif rows and key in (curses.KEY_ENTER, 10, 13, ord("a")):
             ln = lines[rows[selected]]
             _attach(ln.agent, ln.workspace, db)

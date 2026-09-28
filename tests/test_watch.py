@@ -73,6 +73,39 @@ def test_scroll_into_view_leaves_offset_when_selection_already_visible():
     assert watch.scroll_into_view(4, index=6, visible=5, total=20) == 4
 
 
+def test_content_layout_shows_no_indicators_when_everything_fits():
+    rows, above, below = watch.content_layout(total=10, height=10, offset=0)
+    assert (rows, above, below) == (10, False, False)
+
+
+def test_content_layout_reserves_a_row_for_more_below():
+    rows, above, below = watch.content_layout(total=11, height=10, offset=0)
+    assert (rows, above, below) == (9, False, True)
+
+
+def test_content_layout_reserves_rows_for_both_indicators():
+    rows, above, below = watch.content_layout(total=20, height=10, offset=5)
+    assert (rows, above, below) == (8, True, True)
+
+
+def test_content_layout_only_more_above_when_scrolled_to_the_end():
+    rows, above, below = watch.content_layout(total=15, height=10, offset=6)
+    assert (rows, above, below) == (9, True, False)
+
+
+def test_nearest_visible_row_prefers_a_row_already_on_the_new_page():
+    assert watch.nearest_visible_row([2, 8, 15], offset=5, visible=10) == 1  # row 8
+
+
+def test_nearest_visible_row_falls_back_to_the_closest_row_when_none_are_visible():
+    assert watch.nearest_visible_row([2, 30], offset=10, visible=5) == 0
+    assert watch.nearest_visible_row([2, 30], offset=25, visible=5) == 1
+
+
+def test_nearest_visible_row_with_no_agents_is_zero():
+    assert watch.nearest_visible_row([], offset=5, visible=10) == 0
+
+
 def test_scroll_into_view_clamps_to_content_bounds():
     assert watch.scroll_into_view(0, index=19, visible=5, total=20) == 15
     assert watch.scroll_into_view(0, index=0, visible=5, total=3) == 0

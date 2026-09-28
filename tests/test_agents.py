@@ -71,6 +71,9 @@ def test_claude_command_wires_hooks_mcp_and_profile():
     assert "_hook" in settings and "Stop" in settings
     assert '"COPSE_AGENT_ID": "abc"' in argv[argv.index("--mcp-config") + 1]
     assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+    # Agent view (background sessions) is where a pasted message can land in
+    # the wrong conversation or start a brand-new one; disable it outright.
+    assert '"disableAgentView": true' in settings
 
 
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
@@ -107,9 +110,44 @@ def test_claude_screen_state(screen, want):
 
 
 CLAUDE_TYPING = "⏺ Done.\n\n────\n❯ half a message I'm still writ\n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+# The real agent-view screen: its footer ("ctrl+x to delete") is the reliable
+# anchor, not the loose "moved to the background" phrasing, which can appear
+# quoted in an ordinary transcript (see CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES).
 CLAUDE_BACKGROUND = (
     "Your conversation moved to the background — enter opens it · esc returns to it\n"
     "────\n❯ describe a task for a new session\n────\n"
+    "⏵⏵ auto mode · enter to open · space to reply · ctrl+x to delete · ? for shortcuts\n"
+)
+CLAUDE_BACKGROUND_RETURN_FOOTER = (
+    "Some other session's last message\n"
+    "────\n❯ describe a task for a new session\n────\n"
+    "⏵⏵ auto mode · enter to return · space to reply · ctrl+x to delete · ? for shortcuts\n"
+)
+# A transcript that happens to quote both telltale phrases, above the last
+# border: must NOT be mistaken for the real agent-view footer.
+CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES = (
+    '⏺ I told them: "Your conversation moved to the background" and to press\n'
+    '  "ctrl+x to delete" if they wanted out.\n'
+    "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt\n"
+)
+# Claude Code's dim placeholder/suggestion in an otherwise-empty input box:
+# looks like typed text unless the styling (SGR 2, faint) is taken into account.
+CLAUDE_PLACEHOLDER = (
+    "⏺ Done.\n\n────\n"
+    '❯ \x1b[2mTry "create a util logging.py that..."\x1b[0m\n'
+    "────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+)
+CLAUDE_PLACEHOLDER_GREY_256 = (
+    "⏺ Done.\n\n────\n"
+    '❯ \x1b[38;5;244mTry "fix the flaky test in test_agents.py"\x1b[0m\n'
+    "────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+)
+# A pane whose foreground session has changed entirely: its box border now
+# carries a title instead of being a bare rule.
+CLAUDE_WRONG_SESSION_TITLE = (
+    "⏺ someone else's conversation\n"
+    "──── Copse efficiency improvements ────\n"
+    "❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt\n"
 )
 
 
@@ -120,6 +158,13 @@ CLAUDE_BACKGROUND = (
     (CLAUDE_TYPING, False, None),  # a worker's input box is never hand-typed
     (CLAUDE_BACKGROUND, True, "background"),
     (CLAUDE_BACKGROUND, False, "background"),  # workers can end up here too
+    (CLAUDE_BACKGROUND_RETURN_FOOTER, True, "background"),
+    (CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES, True, None),  # not the real footer
+    (CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES, False, None),
+    (CLAUDE_PLACEHOLDER, True, None),  # dim placeholder, not real input
+    (CLAUDE_PLACEHOLDER_GREY_256, True, None),  # grey 256-colour placeholder
+    (CLAUDE_WRONG_SESSION_TITLE, True, "wrong-session"),
+    (CLAUDE_WRONG_SESSION_TITLE, False, "wrong-session"),
 ])
 def test_claude_paste_blocked(screen, interactive, want):
     assert ClaudeCode().paste_blocked(screen, interactive) == want

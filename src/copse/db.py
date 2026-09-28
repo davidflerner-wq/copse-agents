@@ -127,11 +127,12 @@ CREATE TABLE IF NOT EXISTS native_subagents (
     started_at REAL,
     ended_at REAL
 );
--- The one `copse watch --sidebar` pane per repo (see agents.sidebar_follow):
--- its tmux pane id, so any of the repo's sessions can find and relocate it
--- instead of starting a second one.
+-- The one `copse watch --sidebar` pane per interactive session root (see
+-- agents.sidebar_follow): its tmux pane id, so any session in that root's
+-- tree can find and relocate it instead of starting a second one. Keyed by
+-- root, not repo, so a second supervisor in the same repo gets its own.
 CREATE TABLE IF NOT EXISTS sidebars (
-    repo_root TEXT PRIMARY KEY,
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
     pane TEXT NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -577,25 +578,25 @@ class DB:
         )
         return [_load(NativeSubagent, r) for r in rows]
 
-    # -- sidebar (one `copse watch --sidebar` pane per repo) -----------------
+    # -- sidebar (one `copse watch --sidebar` pane per session root) --------
 
-    def get_sidebar_pane(self, repo_root: str) -> str | None:
+    def get_sidebar_pane(self, root_id: str) -> str | None:
         row = self.conn.execute(
-            "SELECT pane FROM sidebars WHERE repo_root=?", (repo_root,)
+            "SELECT pane FROM sidebars WHERE root_id=?", (root_id,)
         ).fetchone()
         return row["pane"] if row else None
 
-    def set_sidebar_pane(self, repo_root: str, pane: str) -> None:
+    def set_sidebar_pane(self, root_id: str, pane: str) -> None:
         with self.tx() as c:
             c.execute(
-                "INSERT INTO sidebars (repo_root, pane, updated_at) VALUES (?,?,?) "
-                "ON CONFLICT(repo_root) DO UPDATE SET pane=excluded.pane, updated_at=excluded.updated_at",
-                (repo_root, pane, time.time()),
+                "INSERT INTO sidebars (root_id, pane, updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(root_id) DO UPDATE SET pane=excluded.pane, updated_at=excluded.updated_at",
+                (root_id, pane, time.time()),
             )
 
-    def clear_sidebar_pane(self, repo_root: str) -> None:
+    def clear_sidebar_pane(self, root_id: str) -> None:
         with self.tx() as c:
-            c.execute("DELETE FROM sidebars WHERE repo_root=?", (repo_root,))
+            c.execute("DELETE FROM sidebars WHERE root_id=?", (root_id,))
 
     def all_native_subagents(self) -> dict[str, list[NativeSubagent]]:
         """Every native subagent worth showing, grouped by parent id: one

@@ -772,8 +772,13 @@ def statusline_cmd() -> None:
 def sidebar_follow_cmd(session: str) -> None:
     """Run from the session-window-changed / client-session-changed hooks
     tmux.apply_theme sets on every copse session: relocate the sidebar pane
-    here (see agents.sidebar_follow)."""
-    agents.sidebar_follow(DB(), session)
+    here (see agents.sidebar_follow). Never raises: this runs from a tmux
+    hook, where an uncaught error would show as a message popup or a
+    nonzero exit tmux might complain about."""
+    try:
+        agents.sidebar_follow(DB(), session)
+    except Exception:
+        pass
 
 
 @app.command("_flush", hidden=True)

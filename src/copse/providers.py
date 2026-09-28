@@ -140,6 +140,13 @@ class ClaudeCode(Provider):
             # status line, so what they see doesn't change.
             "statusLine": {"type": "command", "command": " ".join(
                 f"'{a}'" for a in [*copse_invocation(), "_statusline"])},
+            # copse's panes are one agent, one conversation. The agent view
+            # (background sessions, "← for agents") lets a pane's foreground
+            # session change, or show a task-launcher that looks like an
+            # ordinary empty chat input; a message copse pastes there either
+            # starts a brand-new session or lands in the wrong one. See
+            # paste_blocked below for a screen-based fallback.
+            "disableAgentView": True,
         }
         mcp = {"mcpServers": {"copse": mcp_server_spec(ctx.agent_id)}}
         p = ctx.profile
@@ -188,30 +195,103 @@ class ClaudeCode(Provider):
             return "idle"
         return None
 
-    # Claude Code's "background sessions" launcher: reachable from the chat
-    # (e.g. "← for agents") and shown after backgrounding a turn. It has its
-    # own "❯ describe a task for a new session" prompt, which looks just like
-    # an empty chat input but starts a brand-new session instead of reaching
-    # this one.
-    BACKGROUND_VIEW = re.compile(r"moved to the background|describe a task for a new session", re.I)
+    # Claude Code's "background sessions" launcher (agent view): reachable
+    # from the chat (e.g. "← for agents") even with disableAgentView set on
+    # older builds or a session started before it applied. Its footer is the
+    # reliable anchor -- "ctrl+x to delete" is specific to that screen, unlike
+    # phrases such as "moved to the background", which can appear quoted in
+    # an ordinary transcript and would false-positive a plain substring
+    # search. Only trust the footer BELOW the last box-drawing border, so a
+    # transcript line above it can't be mistaken for the real status bar.
+    BORDER = re.compile(r"^[\s─]*$")
+    AGENT_VIEW_FOOTER = re.compile(r"ctrl\+x to delete", re.I)
+    # A session title woven into a box border ("──── some other session's
+    # title ────"): a worker's pane showing a title that isn't blank means
+    # Claude Code's foreground session in that pane has changed to something
+    # else entirely (not just the agent-view launcher) -- a paste there would
+    # land in the wrong conversation. A plain border never has non-dash text.
+    TITLED_BORDER = re.compile(r"─{2,}[^─\n]*[A-Za-z0-9][^─\n]*─{2,}")
+    ANSI_SGR = re.compile(r"\x1b\[([0-9;]*)m")
     # `.` doesn't cross lines, but `\s` does: keep the capture off of it so a
     # blank "❯ " line's trailing space can't slurp the newline and match into
     # the box-drawing line below.
     INPUT_LINE = re.compile(r"^\s*❯(.*)$", re.M)
+    # SGR codes used for dim/grey placeholder text (not something typed):
+    # 2 = faint, 90-97 = bright-black/grey foregrounds.
+    _DIM_CODES = {"2", "90", "91", "92", "93", "94", "95", "96", "97"}
+
+    @classmethod
+    def _strip_ansi(cls, text: str) -> str:
+        return cls.ANSI_SGR.sub("", text)
+
+    @classmethod
+    def _is_placeholder_text(cls, styled_tail: str) -> bool:
+        """Whether the first visible character in ``styled_tail`` (raw text
+        just after the ❯, captured WITH escape codes) is styled dim or grey:
+        Claude Code's empty-input placeholder/suggestion, not real input."""
+        active: set[str] = set()
+        i = 0
+        while i < len(styled_tail):
+            m = cls.ANSI_SGR.match(styled_tail, i)
+            if m:
+                body = m.group(1)
+                codes = body.split(";") if body else ["0"]
+                j = 0
+                while j < len(codes):
+                    c = codes[j]
+                    if c in ("", "0"):
+                        active.clear()
+                    elif c == "38" and j + 2 < len(codes) and codes[j + 1] == "5":
+                        if codes[j + 2].isdigit() and 232 <= int(codes[j + 2]) <= 253:
+                            active.add("grey256")
+                        j += 2
+                    else:
+                        active.add(c)
+                    j += 1
+                i = m.end()
+                continue
+            if styled_tail[i].strip():
+                return bool(active & cls._DIM_CODES) or "grey256" in active
+            i += 1
+        return False
 
     def paste_blocked(self, screen: str, interactive: bool) -> str | None:
-        """None if it's safe to paste into this pane now, else why not:
-        'background' when the screen above is showing, or 'typing' when the
-        chat's input box already holds text someone is mid-typing (checked
-        only for interactive chats; a worker's input is never hand-typed)."""
-        tail = "\n".join(screen.rstrip().splitlines()[-25:])
-        if self.BACKGROUND_VIEW.search(tail):
+        """None if it's safe to paste into this pane now, else why not.
+        ``screen`` must be captured WITH escape sequences (``tmux capture-pane
+        -e``): needed to tell a dim placeholder apart from real typed text.
+
+        - 'background': the agent-view launcher is showing (any mode -- a
+          blind paste there starts a brand-new session or reaches the wrong
+          one, whether it's an interactive chat or a worker).
+        - 'wrong-session': the pane's box border carries a title, meaning its
+          foreground session isn't a blank single-session view any more.
+        - 'typing': the chat's input box already holds text someone is
+          mid-typing (interactive only; a worker's input is never hand-typed)."""
+        plain_full = self._strip_ansi(screen)
+        plain_lines = plain_full.rstrip().splitlines()[-25:]
+        plain_tail = "\n".join(plain_lines)
+        border_idx = [i for i, ln in enumerate(plain_lines) if self.BORDER.match(ln) and ln.strip()]
+        footer = "\n".join(plain_lines[border_idx[-1] + 1:]) if border_idx else plain_tail
+        if self.AGENT_VIEW_FOOTER.search(footer):
             return "background"
-        if interactive:
-            lines = self.INPUT_LINE.findall(tail)
-            if lines and lines[-1].strip():
-                return "typing"
-        return None
+        if self.TITLED_BORDER.search(plain_tail):
+            return "wrong-session"
+        if not interactive:
+            return None
+        styled_lines = screen.rstrip().splitlines()[-25:]
+        candidates = [ln for ln in styled_lines if self.INPUT_LINE.match(self._strip_ansi(ln))]
+        if not candidates:
+            return None
+        styled_line = candidates[-1]
+        plain_line = self._strip_ansi(styled_line)
+        m = self.INPUT_LINE.match(plain_line)
+        if not (m and m.group(1).strip()):
+            return None
+        idx = styled_line.find("❯")
+        styled_tail = styled_line[idx + 1:] if idx != -1 else styled_line
+        if self._is_placeholder_text(styled_tail):
+            return None
+        return "typing"
 
     def after_launch(self, target: str) -> None:
         # A fresh worktree is a folder Claude Code hasn't seen, so it asks

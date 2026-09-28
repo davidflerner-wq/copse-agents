@@ -117,11 +117,19 @@ FOLLOW_HOOKS = ("session-window-changed", "client-session-changed")
 
 
 def set_follow_hooks(session: str) -> None:
+    """``session`` is baked in literally rather than read back from tmux's
+    own ``#{hook_session_name}`` format variable: that variable came back
+    empty for client-session-changed in testing (with and without -b), while
+    a hook set with ``-t <session>`` only ever fires for that session anyway,
+    so there's nothing it would tell us that we don't already know. The
+    command redirects its own output and always exits 0, so a bug in it can
+    never surface as a visible tmux error or message popup."""
     from copse.providers import copse_invocation
 
     cmd = " ".join(shlex.quote(a) for a in [*copse_invocation(), "_sidebar-follow", session])
+    shell = f"{cmd} >/dev/null 2>&1 || true"
     for hook in FOLLOW_HOOKS:
-        _tmux("set-hook", "-t", session, hook, f"run-shell -b {shlex.quote(cmd)}", check=False)
+        _tmux("set-hook", "-t", session, hook, f"run-shell -b {shlex.quote(shell)}", check=False)
 
 
 def split_left(target: str, cwd: str, command: list[str], env: dict[str, str],
@@ -183,6 +191,22 @@ def active_window(session: str) -> str | None:
     return proc.stdout.strip() or None
 
 
+def set_pane_tag(pane: str, key: str, value: str) -> None:
+    _tmux("set-option", "-p", "-t", pane, key, value, check=False)
+
+
+def get_pane_tag(pane: str, key: str) -> str | None:
+    """The pane-level user option ``key``, or None if unset or ``pane`` is
+    gone. Pane ids (``%N``) are a per-server counter that restarts at 0 after
+    a tmux server restart, so an id from a stale DB row can silently mean a
+    completely different, unrelated pane; tagging the pane at creation with
+    an id of ours (see agents.SIDEBAR_TAG) lets callers tell the two apart."""
+    proc = _tmux("show-options", "-p", "-q", "-t", pane, "-v", key, check=False)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
 def agent_pane_in_window(window: str, sidebar: str | None) -> str | None:
     """The pane to anchor the sidebar beside in ``window``: its active pane,
     or (if that's the sidebar itself) any other pane there. None if the
@@ -200,8 +224,15 @@ def move_pane(pane: str, target: str, columns: int = 30) -> None:
     """Relocate ``pane`` (e.g. the sidebar) to sit at the left of ``target``'s
     window, keeping focus on whatever's already active there. Re-points the
     window-resize pin (see split_left) at the new window and clears it from
-    the old one, so a resize never tries to resize a pane that's moved on."""
+    the old one, so a resize never tries to resize a pane that's moved on.
+    A no-op if ``pane`` is the only pane in its current window: join-pane
+    would leave that window with nothing in it, killing it."""
     old_window = pane_window(pane)
+    if old_window:
+        others = [p for p in _tmux("list-panes", "-t", old_window, "-F", "#{pane_id}",
+                                   check=False).stdout.split() if p != pane]
+        if not others:
+            return
     _tmux("join-pane", "-h", "-b", "-d", "-l", str(columns), "-s", pane, "-t", target, check=False)
     if old_window:
         _tmux("set-hook", "-w", "-t", old_window, "-u", "window-resized", check=False)
@@ -217,8 +248,11 @@ def kill_session(session: str) -> None:
     _tmux("kill-session", "-t", f"={session}", check=False)
 
 
-def capture(target: str, lines: int = 200) -> str:
-    return _tmux("capture-pane", "-p", "-J", "-t", target, "-S", f"-{lines}").stdout
+def capture(target: str, lines: int = 200, escapes: bool = False) -> str:
+    """``escapes`` includes SGR colour/attribute codes (capture-pane -e):
+    needed to tell styled placeholder text apart from something typed."""
+    flags = ["-e"] if escapes else []
+    return _tmux("capture-pane", "-p", "-J", *flags, "-t", target, "-S", f"-{lines}").stdout
 
 
 def paste(target: str, text: str, submit: bool = True) -> None:
