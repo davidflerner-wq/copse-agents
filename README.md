@@ -46,6 +46,10 @@ who's waiting for your approval. Tell the supervisor what you want. It splits th
 work between workers, each on its own branch, then reviews and merges their
 branches. It starts in under a second.
 
+When an agent uses Claude Code's own Agent tool, its built-in subagents (Explore,
+Plan, ...) show up nested underneath it in the sidebar too, e.g. `↳ Explore ·
+running 1m`, so you can see what it's fanned out to without leaving copse.
+
 **Closing and coming back.** When you quit the supervisor's chat, the copse window
 closes cleanly and you're back at your prompt. The whole session is paused: its
 workers stop too, and everything is kept (branches, worktrees,

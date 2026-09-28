@@ -15,6 +15,16 @@ from typing import Iterator
 
 from copse.config import db_path
 
+# Claude Code's own subagents (native_subagents table, see below). A crash
+# can skip SubagentStop, so a subagent still "running" past this age is
+# treated as crashed: view.py hides it from the sidebar, and
+# start_native_subagent prunes it here. view.py's own NATIVE_SUBAGENT_LINGER
+# (how long a *finished* one keeps showing "done") sits next to this concern
+# but is a display-only choice, so it stays in view.py.
+NATIVE_SUBAGENT_STALE = 2 * 3600
+# Ended rows are dropped from the table entirely after this long.
+NATIVE_SUBAGENT_PRUNE_AFTER = 3600
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS workspaces (
     id TEXT PRIMARY KEY,
@@ -89,6 +99,17 @@ CREATE TABLE IF NOT EXISTS reviews (
     summary TEXT,
     created_at REAL NOT NULL
 );
+-- Claude Code's own built-in subagents (its Agent tool), reported by the
+-- SubagentStart/SubagentStop hooks. Purely informational for the sidebar:
+-- kept out of `agents` so they never affect message delivery, is_alive,
+-- pause/resume, autopilot worker counts, list_agents, kill or retention.
+CREATE TABLE IF NOT EXISTS native_subagents (
+    id TEXT PRIMARY KEY,            -- Claude's agent_id
+    parent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
+    agent_type TEXT,
+    started_at REAL,
+    ended_at REAL
+);
 """
 
 
@@ -161,6 +182,15 @@ class Review:
     approved: int
     summary: str | None
     created_at: float
+
+
+@dataclass
+class NativeSubagent:
+    id: str
+    parent_id: str
+    agent_type: str | None
+    started_at: float
+    ended_at: float | None
 
 
 @dataclass
@@ -436,3 +466,58 @@ class DB:
             (workspace_id, sha),
         ).fetchone()
         return _load(Review, row) if row else None
+
+    # -- native subagents ----------------------------------------------------
+
+    def start_native_subagent(self, sub_id: str, parent_id: str, agent_type: str | None) -> None:
+        """Record a SubagentStart. One write: also prunes ``parent_id``'s own
+        ended rows (older than NATIVE_SUBAGENT_PRUNE_AFTER) and abandoned
+        still-"running" rows (older than NATIVE_SUBAGENT_STALE, e.g. a crash
+        that skipped SubagentStop), so this table doesn't grow forever."""
+        now = time.time()
+        with self.tx() as c:
+            c.execute(
+                "DELETE FROM native_subagents WHERE parent_id=? AND "
+                "((ended_at IS NOT NULL AND ended_at<?) OR (ended_at IS NULL AND started_at<?))",
+                (parent_id, now - NATIVE_SUBAGENT_PRUNE_AFTER, now - NATIVE_SUBAGENT_STALE),
+            )
+            c.execute(
+                "INSERT OR REPLACE INTO native_subagents (id, parent_id, agent_type, started_at, ended_at) "
+                "VALUES (?,?,?,?,NULL)",
+                (sub_id, parent_id, agent_type, now),
+            )
+
+    def stop_native_subagent(self, sub_id: str) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE native_subagents SET ended_at=? WHERE id=?", (time.time(), sub_id))
+
+    def end_native_subagents(self, parent_id: str) -> None:
+        """Mark every still-running native subagent of ``parent_id`` as ended:
+        for when the parent itself stops (paused or killed), since a dead
+        parent's own SubagentStop hooks will never fire."""
+        with self.tx() as c:
+            c.execute(
+                "UPDATE native_subagents SET ended_at=? WHERE parent_id=? AND ended_at IS NULL",
+                (time.time(), parent_id),
+            )
+
+    def native_subagents(self, parent_id: str) -> list[NativeSubagent]:
+        rows = self.conn.execute(
+            "SELECT * FROM native_subagents WHERE parent_id=? ORDER BY started_at", (parent_id,)
+        )
+        return [_load(NativeSubagent, r) for r in rows]
+
+    def all_native_subagents(self) -> dict[str, list[NativeSubagent]]:
+        """Every native subagent worth showing, grouped by parent id: one
+        bounded query for a whole dashboard snapshot instead of one per agent."""
+        now = time.time()
+        rows = self.conn.execute(
+            "SELECT * FROM native_subagents WHERE (ended_at IS NULL AND started_at>?) "
+            "OR (ended_at IS NOT NULL AND ended_at>?) ORDER BY started_at",
+            (now - NATIVE_SUBAGENT_STALE, now - NATIVE_SUBAGENT_PRUNE_AFTER),
+        )
+        out: dict[str, list[NativeSubagent]] = {}
+        for r in rows:
+            sub = _load(NativeSubagent, r)
+            out.setdefault(sub.parent_id, []).append(sub)
+        return out
