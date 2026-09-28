@@ -20,6 +20,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from typing import Callable
 
 ANTHROPIC_VERSION = "2023-06-01"
 RETRY_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -126,18 +127,37 @@ class ClientError(Exception):
 
 
 class Client:
-    def __init__(self, endpoint: Endpoint, sleep=time.sleep):
+    def __init__(self, endpoint: Endpoint, sleep=time.sleep,
+                 on_text: Callable[[str], None] | None = None):
         self.endpoint = endpoint
         self._sleep = sleep
+        self.on_text = on_text
 
     # -- the one public call ------------------------------------------------
 
-    def complete(self, system: str | None, messages: list[dict], tools: list[ToolSpec]) -> Reply:
-        if self.endpoint.api == "anthropic":
-            payload = self._anthropic_request(system, messages, tools)
-            return self._parse_anthropic(self._post(payload))
-        payload = self._openai_request(system, messages, tools)
-        return self._parse_openai(self._post(payload))
+    def complete(self, system: str | None, messages: list[dict], tools: list[ToolSpec],
+                 on_text: Callable[[str], None] | None = None) -> Reply:
+        """One model call. With an ``on_text`` (here or on the client) the
+        reply is streamed and each text delta is handed to it as it arrives;
+        the Reply is the same either way. An endpoint that refuses the
+        stream request with an HTTP error is asked again without streaming."""
+        on_text = on_text or self.on_text
+        anthropic = self.endpoint.api == "anthropic"
+        payload = (self._anthropic_request if anthropic else self._openai_request)(system, messages, tools)
+        parse = self._parse_anthropic if anthropic else self._parse_openai
+        if on_text is None:
+            return parse(self._post(payload))
+        payload["stream"] = True
+        if not anthropic:
+            payload["stream_options"] = {"include_usage": True}
+        try:
+            return parse(self._post(payload, lambda resp: self._read_stream(resp, anthropic, on_text)))
+        except ClientError as e:
+            if e.status is None:
+                raise
+        payload["stream"] = False
+        payload.pop("stream_options", None)
+        return parse(self._post(payload))
 
     # -- transport ------------------------------------------------------------
 
@@ -155,7 +175,112 @@ class Client:
         h.update(self.endpoint.headers)
         return h
 
-    def _post(self, payload: dict) -> dict:
+    def _read_stream(self, resp, anthropic: bool, on_text: Callable[[str], None]) -> dict:
+        """Read an SSE response to its end and return the body a
+        non-streaming request would have had, so the ordinary parsers apply."""
+        if "event-stream" not in (resp.headers.get("Content-Type") or ""):
+            # The endpoint ignored "stream": a plain JSON body, shown in one piece.
+            body = resp.read().decode("utf-8", "replace")
+            try:
+                data = json.loads(body)
+            except ValueError as e:
+                raise ClientError(f"the endpoint's reply wasn't JSON: {e}", body=body[:2000]) from None
+            try:
+                shown = (self._parse_anthropic if anthropic else self._parse_openai)(data).text
+            except ClientError:
+                shown = ""
+            if shown:
+                on_text(shown)
+            return data
+        text: list[str] = []
+        finish = None
+        model = None
+        usage: dict = {}
+        oa_calls: dict[int, dict] = {}      # openai: tool calls by index
+        blocks: dict[int, dict] = {}        # anthropic: content blocks by index
+        stop_reason = None
+
+        def emit(t: str) -> None:
+            if t:
+                text.append(t)
+                on_text(t)
+
+        try:
+            for raw in resp:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue  # blank separators, 'event:' names, comments
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    ev = json.loads(payload)
+                except ValueError:
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                if ev.get("error") or ev.get("type") == "error":
+                    raise ClientError(f"error from the endpoint: {_error_text(json.dumps(ev))}")
+                if anthropic:
+                    kind = ev.get("type")
+                    if kind == "message_start":
+                        msg = ev.get("message") or {}
+                        model = msg.get("model") or model
+                        usage.update(msg.get("usage") or {})
+                    elif kind == "content_block_start":
+                        blocks[ev.get("index", 0)] = dict(ev.get("content_block") or {}, _json=[])
+                        first = blocks[ev.get("index", 0)]
+                        if first.get("type") == "text":
+                            emit(first.get("text") or "")
+                    elif kind == "content_block_delta":
+                        block = blocks.setdefault(ev.get("index", 0), {"type": "text", "_json": []})
+                        delta = ev.get("delta") or {}
+                        if delta.get("type") == "text_delta":
+                            block["text"] = block.get("text", "") + (delta.get("text") or "")
+                            emit(delta.get("text") or "")
+                        elif delta.get("type") == "input_json_delta":
+                            block["_json"].append(delta.get("partial_json") or "")
+                    elif kind == "message_delta":
+                        stop_reason = (ev.get("delta") or {}).get("stop_reason") or stop_reason
+                        usage.update(ev.get("usage") or {})
+                else:
+                    model = ev.get("model") or model
+                    usage = ev.get("usage") or usage
+                    for choice in ev.get("choices") or []:
+                        delta = choice.get("delta") or {}
+                        content = delta.get("content")
+                        if isinstance(content, str):
+                            emit(content)
+                        for c in delta.get("tool_calls") or []:
+                            slot = oa_calls.setdefault(c.get("index", len(oa_calls)),
+                                                       {"id": None, "name": "", "arguments": ""})
+                            slot["id"] = c.get("id") or slot["id"]
+                            fn = c.get("function") or {}
+                            slot["name"] += fn.get("name") or ""
+                            slot["arguments"] += fn.get("arguments") or ""
+                        finish = choice.get("finish_reason") or finish
+        except (OSError, TimeoutError) as e:
+            raise ClientError(f"the stream from {self.endpoint.url()} broke off: {e}") from None
+        joined = "".join(text)
+        if anthropic:
+            content = []
+            for _, b in sorted(blocks.items()):
+                raw_json = "".join(b.pop("_json", []))
+                if b.get("type") == "tool_use":
+                    b["input"] = raw_json if raw_json.strip() else b.get("input") or {}
+                content.append(b)
+            return {"type": "message", "model": model, "content": content,
+                    "stop_reason": stop_reason, "usage": usage}
+        message: dict = {"role": "assistant", "content": joined or None}
+        if oa_calls:
+            message["tool_calls"] = [
+                {"id": c["id"], "type": "function", "function": {"name": c["name"], "arguments": c["arguments"]}}
+                for _, c in sorted(oa_calls.items())]
+        return {"model": model, "choices": [{"message": message, "finish_reason": finish}], "usage": usage}
+
+    def _post(self, payload: dict, read: Callable | None = None) -> dict:
+        """POST ``payload``; ``read`` (given the open response) turns it into
+        the result, by default the JSON body."""
         data = json.dumps(payload).encode("utf-8")
         last: ClientError | None = None
         for attempt in range(self.endpoint.retries + 1):
@@ -163,6 +288,8 @@ class Client:
                                          method="POST")
             try:
                 with urllib.request.urlopen(req, timeout=self.endpoint.timeout) as resp:
+                    if read is not None:
+                        return read(resp)
                     body = resp.read().decode("utf-8", "replace")
                 try:
                     return json.loads(body)
