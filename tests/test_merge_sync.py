@@ -68,7 +68,7 @@ def test_sync_with_base_conflict_aborts_and_stays_clean(db, repo):
     assert result.conflicts == ["app.py"]
     # Left exactly as it was: clean, no merge in progress, same HEAD.
     assert git.dirty_files(ws.path) == []
-    assert not os.path.exists(os.path.join(ws.path, ".git", "MERGE_HEAD"))
+    assert not git.ok(["rev-parse", "-q", "--verify", "MERGE_HEAD"], ws.path)
     assert git.out(["rev-parse", "HEAD"], ws.path) == before
 
 
@@ -81,6 +81,23 @@ def test_sync_with_base_up_to_date_is_a_noop(db, repo):
 
     assert result.status == "up_to_date"
     assert result.new_sha is None
+
+
+def test_sync_with_base_raises_on_non_conflict_merge_failure(db, repo):
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    open(os.path.join(ws.path, "f.txt"), "w").write("f")
+    git.commit_all(ws.path, "feature work")
+    before = git.out(["rev-parse", "HEAD"], ws.path)
+    _advance_base(repo)
+    sh("git config merge.ff only", ws.path)  # diverged branches can't fast-forward
+
+    with pytest.raises(git.GitError, match="merging main failed"):
+        workspaces.sync_with_base(ws)
+
+    # Aborted cleanly, not mistaken for a conflict or a successful sync.
+    assert git.dirty_files(ws.path) == []
+    assert not git.ok(["rev-parse", "-q", "--verify", "MERGE_HEAD"], ws.path)
+    assert git.out(["rev-parse", "HEAD"], ws.path) == before
 
 
 def test_sync_with_base_skips_a_dirty_worktree(db, repo):
@@ -115,6 +132,48 @@ def test_merge_workspace_syncs_then_asks_for_a_new_review(db, repo, boss):
     assert not (repo / "f.txt").exists()  # main untouched
 
 
+def test_merge_workspace_reports_non_conflict_sync_failure(db, repo, boss):
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    open(os.path.join(ws.path, "f.txt"), "w").write("f")
+    git.commit_all(ws.path, "feature work")
+    _advance_base(repo)
+    sh("git config merge.ff only", ws.path)
+
+    out = asyncio.run(mcp_server.merge_workspace(ws.id))
+
+    assert out.startswith("Not merged: merging main failed")
+    assert git.dirty_files(ws.path) == []
+    assert not git.ok(["rev-parse", "-q", "--verify", "MERGE_HEAD"], ws.path)
+    assert not (repo / "f.txt").exists()  # main untouched
+
+
+def test_merge_workspace_skips_sync_when_worker_is_busy(db, repo, boss):
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    open(os.path.join(ws.path, "f.txt"), "w").write("f")
+    git.commit_all(ws.path, "feature work")
+    _advance_base(repo)
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", "boss", "assign", "processing",
+                        "@1", None, time.time()))
+
+    out = asyncio.run(mcp_server.merge_workspace(ws.id))
+
+    assert out == "Not merged: w1 is still working on feature."
+    assert not os.path.exists(os.path.join(ws.path, "base.txt"))  # sync never ran
+
+
+def test_merge_workspace_does_not_block_a_worker_merging_its_own_branch(db, repo, monkeypatch):
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    open(os.path.join(ws.path, "new.py"), "w").write("x = 1\n")
+    git.commit_all(ws.path, "work")
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "processing",
+                        "@1", None, time.time()))
+    monkeypatch.setenv("COPSE_AGENT_ID", "w1")
+
+    out = asyncio.run(mcp_server.merge_workspace(ws.id))
+
+    assert out.startswith("Merged feature into main")
+
+
 def test_merge_workspace_conflict_reports_files_and_stays_clean(db, repo, boss):
     ws = workspaces.create(db, str(repo), "feature").workspace
     open(os.path.join(ws.path, "app.py"), "w").write("mine\n")
@@ -129,7 +188,7 @@ def test_merge_workspace_conflict_reports_files_and_stays_clean(db, repo, boss):
         "Ask the worker to merge main and resolve."
     )
     assert git.dirty_files(ws.path) == []
-    assert not os.path.exists(os.path.join(ws.path, ".git", "MERGE_HEAD"))
+    assert not git.ok(["rev-parse", "-q", "--verify", "MERGE_HEAD"], ws.path)
 
 
 def test_merge_workspace_up_to_date_branch_merges_as_before(db, repo, boss):

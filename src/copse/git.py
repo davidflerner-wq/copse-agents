@@ -239,9 +239,7 @@ def dirty_files(path: str | Path, tracked_only: bool = False) -> list[str]:
 
 def ahead_behind(path: str | Path, ref: str) -> tuple[int, int]:
     """(behind, ahead) commit counts between ``ref`` and HEAD."""
-    proc = run(["rev-list", "--left-right", "--count", f"{ref}...HEAD"], path, check=False)
-    if proc.returncode != 0:
-        return 0, 0
+    proc = run(["rev-list", "--left-right", "--count", f"{ref}...HEAD"], path)
     behind, ahead = (int(x) for x in proc.stdout.split())
     return behind, ahead
 
@@ -313,14 +311,20 @@ def sync(path: str | Path, base: str, strategy: str = "rebase") -> str:
 def merge_local_base(path: str | Path, base: str) -> tuple[str, list[str]]:
     """Merge the local ``base`` branch into HEAD, ignoring origin entirely:
     ``base`` here is the local branch a workspace merges back into, not its
-    remote-tracking counterpart, so this never fetches. On conflict, aborts
-    and leaves the worktree clean, returning the pre-merge HEAD sha and the
-    conflicting files instead of raising. Returns (new_sha, []) on success."""
+    remote-tracking counterpart, so this never fetches. On a content conflict,
+    aborts and leaves the worktree clean, returning the pre-merge HEAD sha and
+    the conflicting files instead of raising. Returns (new_sha, []) on
+    success. A merge failure that isn't a content conflict (``merge.ff=only``,
+    a failing hook, a missing git identity, ...) is aborted the same way but
+    raised as a GitError, since there's nothing sensible to report as a sync
+    or a conflict."""
     before = out(["rev-parse", "HEAD"], path)
     proc = run(["merge", "--no-edit", base], path, check=False)
     if proc.returncode != 0:
         conflicts = conflicting_files(path)
         run(["merge", "--abort"], path, check=False)
+        if not conflicts:
+            raise GitError(f"merging {base} failed: {proc.stderr.strip() or proc.stdout.strip()}")
         return before, conflicts
     return out(["rev-parse", "HEAD"], path), []
 

@@ -388,9 +388,12 @@ def sync_with_base(ws: Workspace) -> SyncResult:
     behind, _ahead = git.ahead_behind(ws.path, base)
     if behind == 0:
         return SyncResult("up_to_date")
+    before = git.out(["rev-parse", "HEAD"], ws.path)
     new_sha, conflicts = git.merge_local_base(ws.path, base)
     if conflicts:
         return SyncResult("conflict", conflicts=conflicts)
+    if new_sha == before:
+        return SyncResult("up_to_date")
     return SyncResult("synced", new_sha=new_sha)
 
 

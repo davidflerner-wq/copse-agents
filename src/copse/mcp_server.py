@@ -47,6 +47,17 @@ def _ws(db: DB, ref: str) -> Workspace:
     return workspaces.resolve(db, ref, cwd=here.path)
 
 
+def _busy_worker(db: DB, ws: Workspace, exclude_id: str | None) -> Agent | None:
+    """A worker (not a reviewer) still running in ``ws``, other than the
+    caller itself. Used to avoid racing a worker mid-commit."""
+    for a in db.list_agents(ws.id):
+        if a.id == exclude_id:
+            continue
+        if a.mode in ("handoff", "assign") and a.status in ("processing", "waiting"):
+            return a
+    return None
+
+
 def _summary(db: DB, ws: Workspace) -> str:
     base = ws.base_branch
     if not base:
@@ -258,11 +269,15 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
 
     Before the gates run, if the branch is behind its (local) base and the
     worktree is clean, copse merges the base into the branch first, so a
-    passing check reflects the code as it will actually be merged. If that
+    passing check reflects the code as it will actually be merged: this can
+    add a commit to the branch even when nothing ends up merged into the
+    base, which is only ever touched once the merge itself succeeds. If that
     sync conflicts, it's aborted, the worktree is left clean, and the reply
     lists the conflicting files. If it succeeds and adds a commit, that
     commit hasn't been reviewed yet (when this repo requires review), so
     nothing is merged; the reply asks for a fresh request_review instead.
+    This sync is skipped while a worker is still active in the workspace, to
+    avoid racing its commits.
 
     Then copse checks the merge gates in the workspace: everything committed,
     a reviewer's approval of this commit (in autopilot sessions, or when the
@@ -277,7 +292,14 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
         pilot = autopilot.for_agent(db, caller.id) if caller else None
         review = cfg.review if cfg.review is not None else bool(pilot and pilot.enabled)
 
-        sync_result = workspaces.sync_with_base(ws)
+        busy = _busy_worker(db, ws, caller.id if caller else None)
+        if busy:
+            return f"Not merged: {busy.id} is still working on {ws.branch}."
+
+        try:
+            sync_result = workspaces.sync_with_base(ws)
+        except git.GitError as e:
+            return f"Not merged: {e}"
         if sync_result.status == "conflict":
             files = ", ".join(sync_result.conflicts) or "?"
             return (f"Not merged: {ws.branch} conflicts with {ws.base_branch} in: {files}. "
