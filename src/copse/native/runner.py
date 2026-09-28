@@ -101,7 +101,51 @@ def probe(endpoint: Endpoint, timeout: float = 3.0) -> tuple[bool, str]:
     return True, f"reachable, but {endpoint.model} isn't listed (it has: {shown})"
 
 
-def copse_tools(db: DB, agent_id: str, ws: Workspace, mode: str) -> list[Tool]:
+def is_ollama(endpoint: Endpoint, timeout: float = 3.0) -> bool:
+    """Whether the endpoint is an Ollama server: its host answers
+    ``GET /api/version``, or the URL uses Ollama's default port."""
+    import json
+    import urllib.request
+
+    host = _host(endpoint)
+    if host.endswith(":11434"):
+        return True
+    try:
+        with urllib.request.urlopen(host + "/api/version", timeout=timeout) as resp:
+            return "version" in json.loads(resp.read().decode("utf-8", "replace"))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _host(endpoint: Endpoint) -> str:
+    base = endpoint.base_url.rstrip("/")
+    return base[:-3] if base.endswith("/v1") else base
+
+
+def server_context(endpoint: Endpoint, timeout: float = 3.0) -> int | None:
+    """The context length an Ollama server runs the model with: the
+    ``num_ctx`` parameter of ``POST /api/show``. None for other endpoints, on
+    any error, and when the model sets no ``num_ctx`` (Ollama then uses
+    OLLAMA_CONTEXT_LENGTH or its default, which the API doesn't report)."""
+    import json
+    import re
+    import urllib.request
+
+    if not is_ollama(endpoint, timeout):
+        return None
+    req = urllib.request.Request(_host(endpoint) + "/api/show",
+                                 data=json.dumps({"model": endpoint.model}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            params = json.loads(resp.read().decode("utf-8", "replace")).get("parameters")
+    except (OSError, ValueError, AttributeError):
+        return None
+    m = re.search(r"^\s*num_ctx\s+(\d+)", params, re.M) if isinstance(params, str) else None
+    return int(m.group(1)) if m else None
+
+
+def copse_tools(db: DB,agent_id: str, ws: Workspace, mode: str) -> list[Tool]:
     """copse's own tools, called in-process. Named as the MCP server names
     them, so the worker footers' instructions hold."""
     obj = {"type": "object"}
