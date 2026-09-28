@@ -351,3 +351,17 @@ def test_briefly_waiting_worker_is_not_reported(db, root, screens):
     worker_on(db, ws, "waiting", time.time() - 5)
     assert cull.note_stuck(db, time.time(), {}) == []
     assert db.pending_count("boss") == 0
+
+
+def test_trust_writes_through_a_symlinked_config(tmp_path, claude_config):
+    real = tmp_path / "dotfiles" / "claude.json"
+    real.parent.mkdir()
+    link = claude_config / ".claude.json"
+    real.write_text(link.read_text())
+    link.unlink()
+    link.symlink_to(real)
+    folder = tmp_path / "wt"
+    folder.mkdir()
+    assert trust_folder(str(folder)) is True
+    assert link.is_symlink()
+    assert json.loads(real.read_text())["projects"][os.path.realpath(folder)]["hasTrustDialogAccepted"] is True

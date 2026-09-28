@@ -129,7 +129,9 @@ def trust_folder(path: str) -> bool:
 
     from copse.config import copse_home
 
-    config = claude_global_config()
+    # Through any symlink (dotfile managers link this file): replacing the
+    # link itself would orphan the file it points to.
+    config = os.path.realpath(claude_global_config())
     key = os.path.realpath(path)  # how Claude Code keys it (its cwd, symlinks resolved)
     try:
         if _trusted(_read_json(config), key):
