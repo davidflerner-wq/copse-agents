@@ -236,6 +236,38 @@ def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int) -> tuple[bo
     return proc.returncode == 0, "\n".join(p for p in (f"$ {cmd}", output, status) if p)
 
 
+def checking(ap: Autopilot, timeout: float = 900.0) -> bool:
+    """Whether a background milestone check is still running."""
+    return bool(ap.checking_since) and time.time() - ap.checking_since < timeout
+
+
+def _detach(args: list[str]) -> None:
+    """Start a copse helper that outlives this process."""
+    subprocess.Popen(args, start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def check_in_background(db: DB, root_id: str, ws: Workspace, position: int | None) -> str:
+    """Start the milestone checks detached and return at once. The result is
+    delivered to the session root's inbox (see cli._check_milestones). A full
+    suite can outrun an MCP call's time limit, and nothing should wait on it."""
+    from copse.providers import copse_invocation
+
+    ap = db.get_autopilot(root_id)
+    if ap and checking(ap):
+        return ("A milestone check is already running; its result arrives as a message. "
+                "Carry on with other work meanwhile.")
+    db.update_autopilot(root_id, checking_since=time.time())
+    args = [*copse_invocation(), "_check-milestones", root_id, ws.id]
+    if position is not None:
+        args += ["--position", str(position)]
+    _detach(args)
+    which = f"milestone {position}" if position else "every milestone"
+    return (f"Checking {which} in the background (the checks run in your checkout; results "
+            "already recorded for this commit are reused). The result arrives as a message; "
+            "carry on with other work meanwhile, and don't claim a milestone done until it does.")
+
+
 def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None = None,
                      cfg: RepoConfig | None = None) -> str:
     """Run milestone checks in the supervisor's checkout (where merges land)
@@ -265,10 +297,14 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
 
     def run(batch: list[Milestone]) -> None:
         nonlocal newly_passed
+        from copse import gates
+
         for m in batch:
             if not m.check_cmd:
                 continue
-            ok, out = run_check(m.check_cmd, ws.path, env, cfg.check_timeout)
+            # Cached by commit when the checkout is clean, so a check that
+            # already passed at this HEAD (as a merge gate, say) isn't re-run.
+            ok, out = gates.run_checked(db, ws, m.check_cmd, env, cfg.check_timeout)
             # Not if it already passed at this very commit: a flaky check
             # flipping back isn't progress.
             newly_passed |= ok and m.status != "passed" and (head is None or m.passed_sha != head)
@@ -482,6 +518,8 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
         return None
     from copse import agents
 
+    if checking(ap):
+        return None  # the check's result arrives as a message and wakes it up
     working, stalled = split_workers(db, agent.id, screen=True)
     if any(agents.runs_process(a) for a in working):
         return None  # their results arrive as messages and wake it up

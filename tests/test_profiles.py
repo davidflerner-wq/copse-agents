@@ -45,4 +45,4 @@ def test_builtin_profiles_keep_their_defaults():
         if p.provider == "claude" and p.name != "reviewer":
             assert not p.strict_mcp and not p.headless
             assert p.setting_sources is None and p.effort is None
-    assert load_profile("developer").permission_mode == "acceptEdits"
+    assert load_profile("developer").permission_mode == "auto"

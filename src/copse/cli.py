@@ -471,6 +471,25 @@ def autopilot_cmd(
         typer.echo(pilot.usage_note(u))
 
 
+@app.command()
+def doctor() -> None:
+    """Check that copse has what it needs, and say what to do about anything missing.
+
+    tmux, the agent CLIs, a writable home, leftover processes; in a repo, its
+    config, checks and code map."""
+    from copse import doctor as doctor_mod
+
+    root = None
+    try:
+        root = git.main_repo_root(os.getcwd())
+    except git.GitError:
+        pass
+    results = doctor_mod.checks(root)
+    typer.echo(doctor_mod.render(results))
+    if any(c.level == doctor_mod.FAIL for c in results):
+        raise typer.Exit(1)
+
+
 @app.command("ls")
 def list_cmd(
     all_repos: bool = typer.Option(False, "--all", help="Every repo, not just this one."),
@@ -935,6 +954,51 @@ def deliver_checks_cmd(reviewer_id: str, workspace_id: str) -> None:
     if ws is None:
         return
     agents.deliver_check_summary(db, reviewer_id, ws, load_repo_config(ws.repo_root))
+
+
+@app.command("_check-milestones", hidden=True)
+def check_milestones_cmd(root_id: str, workspace_id: str,
+                         position: Optional[int] = typer.Option(None, "--position")) -> None:
+    """Run a session's milestone checks and deliver the result to its
+    supervisor's inbox. Started detached from check_milestone."""
+    from copse import autopilot
+    from copse.mcp_server import record_milestone_changes
+
+    db = _helper_db()
+    ws = db.get_workspace(workspace_id)
+    root = db.get_agent(root_id)
+    if ws is None or root is None:
+        return
+    before = {m.id: m.status for m in db.milestones(root_id)}
+    try:
+        text = autopilot.check_milestones(db, root_id, ws, position)
+        record_milestone_changes(db, root_id, ws, before, root, position, text)
+    except Exception as e:  # noqa: BLE001 - the supervisor must hear about it either way
+        text = f"The milestone check failed to run: {e}"
+    finally:
+        db.update_autopilot(root_id, checking_since=None)
+    if db.get_agent(root_id) is None:
+        return
+    db.enqueue(root_id, f"[copse] Milestone check finished.\n\n{text}", None)
+    try:
+        agents.flush(db, root_id)
+    except tmux.TmuxError:
+        pass  # it stays queued; the next Stop hook hands it over
+
+
+@app.command("_warm-checks", hidden=True)
+def warm_checks_cmd(workspace_id: str) -> None:
+    """Run and cache a branch's checks right after its worker reports, so the
+    review and the merge gate find the result ready instead of each running
+    the suite. Started detached from report_result."""
+    from copse import gates
+    from copse.config import load_repo_config
+
+    db = _helper_db()
+    ws = db.get_workspace(workspace_id)
+    if ws is None:
+        return
+    gates.check_summary(db, ws, load_repo_config(ws.repo_root))
 
 
 @app.command("_pool-fill", hidden=True)

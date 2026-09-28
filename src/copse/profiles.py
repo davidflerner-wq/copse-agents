@@ -35,6 +35,7 @@ class Profile:
     setting_sources: list[str] | None = None  # --setting-sources, e.g. project,local
     effort: str | None = None                # --effort low|medium|high|xhigh|max
     headless: bool = False                   # run with `claude -p`, turn by turn
+    tool_search: bool | None = None          # Claude Code's deferred tool loading (None: off for workers)
 
 
 _COMMENT = re.compile(r"(?:^|\s)#.*$")
@@ -65,6 +66,10 @@ def _list(value: str | None) -> list[str] | None:
     return items or None
 
 
+def _bool(value: str) -> bool:
+    return value.strip().lower() in ('true', 'yes', 'on', '1')
+
+
 def _parse(text: str, fallback_name: str) -> Profile:
     meta: dict[str, str] = {}
     body = text
@@ -87,6 +92,7 @@ def _parse(text: str, fallback_name: str) -> Profile:
         strict_mcp=_flag(meta.get("strict_mcp")),
         setting_sources=_list(meta.get("setting_sources")),
         effort=meta.get("effort") or None,
+        tool_search=_bool(meta.get('tool_search')) if meta.get('tool_search') else None,
         headless=_flag(meta.get("headless")),
     )
 

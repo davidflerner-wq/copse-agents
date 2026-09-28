@@ -15,6 +15,10 @@ merging with ``copse merge`` aren't gated: that's their own call.
 
 from __future__ import annotations
 
+import fcntl
+import hashlib
+from contextlib import contextmanager
+
 import shutil
 from dataclasses import dataclass, field
 
@@ -53,14 +57,34 @@ def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
     leave files behind."""
     sha = head(ws)
     dirty = bool(git.dirty_files(ws.path))
-    if not dirty:
+    if dirty:
+        return autopilot.run_check(cmd, ws.path, env, timeout)
+    # One run at a time per (workspace, commit, command): a check warmed when
+    # the worker reported, a reviewer's summary and the merge gate can all
+    # want the same result at once; the later ones wait, then reuse it.
+    with _check_lock(ws.id, sha, cmd):
         cached = db.get_check(ws.id, sha, cmd)
         if cached is not None and cached.ok:
             return True, cached.output or ""
-    ok, out = autopilot.run_check(cmd, ws.path, env, timeout)
-    if ok and not dirty and head(ws) == sha and not git.dirty_files(ws.path):
-        db.set_check(ws.id, sha, cmd, ok, out)
-    return ok, out
+        ok, out = autopilot.run_check(cmd, ws.path, env, timeout)
+        if ok and head(ws) == sha and not git.dirty_files(ws.path):
+            db.set_check(ws.id, sha, cmd, ok, out)
+        return ok, out
+
+
+@contextmanager
+def _check_lock(ws_id: str, sha: str, cmd: str):
+    from copse.config import copse_home
+
+    key = hashlib.sha1(f"{ws_id}\0{sha}\0{cmd}".encode()).hexdigest()[:16]
+    lock_dir = copse_home() / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with open(lock_dir / f"check-{key}.lock", "w") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 MAX_FAILURE_CHARS = 4_000

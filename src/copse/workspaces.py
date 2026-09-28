@@ -440,6 +440,7 @@ class SyncResult:
     status: str  # "skipped", "up_to_date", "synced" or "conflict"
     new_sha: str | None = None
     conflicts: list[str] | None = None
+    old_sha: str | None = None   # HEAD before a "synced" merge
 
 
 def sync_with_base(ws: Workspace) -> SyncResult:
@@ -460,7 +461,7 @@ def sync_with_base(ws: Workspace) -> SyncResult:
         return SyncResult("conflict", conflicts=conflicts)
     if new_sha == before:
         return SyncResult("up_to_date")
-    return SyncResult("synced", new_sha=new_sha)
+    return SyncResult("synced", new_sha=new_sha, old_sha=before)
 
 
 def pull_request(ws: Workspace, title: str | None = None, draft: bool = False) -> str:

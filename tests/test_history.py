@@ -3,7 +3,7 @@ import time
 
 from typer.testing import CliRunner
 
-from copse import agents, autopilot, history, mcp_server, sessions, workspaces
+from copse import cli, agents, autopilot, history, mcp_server, sessions, workspaces
 from copse.cli import app
 from copse.db import Agent
 from copse.usage import Usage
@@ -79,7 +79,14 @@ def test_check_milestone_writes_check_and_milestone_rows(db, repo, monkeypatch):
     monkeypatch.setenv("COPSE_AGENT_ID", "boss")
     (repo / "done.txt").write_text("x")
 
-    asyncio.run(mcp_server.check_milestone())
+    # The tool starts the check in the background; the helper it starts
+    # runs it and delivers the result to the supervisor's inbox.
+    started = []
+    monkeypatch.setattr(autopilot, "_detach", started.append)
+    out = asyncio.run(mcp_server.check_milestone())
+    assert "background" in out and started and "_check-milestones" in started[0]
+    cli.check_milestones_cmd("boss", root_ws.id, position=None)
+    assert db.pending_count("boss") == 1 and db.get_autopilot("boss").checking_since is None
 
     rows = db.list_history(root_ws.repo_root)
     kinds = {r.kind for r in rows}
@@ -89,7 +96,7 @@ def test_check_milestone_writes_check_and_milestone_rows(db, repo, monkeypatch):
     assert "passed" in milestone_row.result
 
     # Re-running with nothing changed shouldn't add another milestone row.
-    asyncio.run(mcp_server.check_milestone())
+    cli.check_milestones_cmd("boss", root_ws.id, position=None)
     rows = db.list_history(root_ws.repo_root)
     assert sum(r.kind == "milestone" for r in rows) == 1
     assert sum(r.kind == "check" for r in rows) == 2
@@ -258,7 +265,7 @@ def test_check_and_milestone_rows_carry_no_tokens(db, repo, tmp_path, monkeypatc
     monkeypatch.setenv("COPSE_AGENT_ID", "boss")
     (repo / "done.txt").write_text("x")
 
-    asyncio.run(mcp_server.check_milestone())
+    cli.check_milestones_cmd("boss", root_ws.id, position=None)
 
     rows = db.list_history(root_ws.repo_root)
     assert {r.kind for r in rows} == {"check", "milestone"}

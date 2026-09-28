@@ -103,7 +103,7 @@ def test_fresh_worker_spawn_gets_its_permission_mode(db, root, launches, detache
     boss, ws = root
     worker, _ = agents.delegate(db, boss, ws, "developer", "add a flag", "assign")
     argv = launches[-1]
-    assert flag(argv, "--permission-mode") == "acceptEdits"
+    assert flag(argv, "--permission-mode") == "auto"
     assert "Bash(git commit:*)" in flag(argv, "--allowedTools")
     assert worker.profile == "developer"
 
@@ -125,7 +125,7 @@ def test_resume_keeps_permission_mode_with_and_without_a_saved_conversation(
     agents.resume(db, boss.id, watch_pane=False)
 
     by_resume = {flag(argv, "--resume"): argv for argv in launches}
-    assert flag(by_resume["sess-1"], "--permission-mode") == "acceptEdits"
+    assert flag(by_resume["sess-1"], "--permission-mode") == "auto"
     assert "Bash(git commit:*)" in flag(by_resume["sess-1"], "--allowedTools")
     assert len(launches) == 2
 

@@ -98,8 +98,18 @@ def test_guidance(checks: list[str]) -> str:
     return f"{targeted} Run the full suite once, just before you commit."
 
 
+PERMISSION_GUIDANCE = (
+    "Permissions: commands are pre-approved by their first words, so run them plainly and "
+    "one at a time from your own worktree (no `cd`, no `&&`, no pipes, no `VAR=x` prefixes). "
+    "Never `cd` into or read from the main checkout ({root}): it isn't yours, and it "
+    "pauses you for approval. Write files with your Edit and Write tools, never with "
+    "shell heredocs or scripts, and don't write to /tmp."
+)
+
+
 def worker_guidance(ws: Workspace) -> str:
-    """How a worker should find code (the code map, if any) and test it."""
+    """How a worker should find code (the code map, if any), test it, and
+    stay within its pre-approved commands."""
     from copse import codemap
     from copse.config import load_repo_config
 
@@ -107,11 +117,36 @@ def worker_guidance(ws: Workspace) -> str:
         checks = load_repo_config(ws.repo_root).checks
     except ValueError:
         checks = []
-    return "\n".join(p for p in (codemap.guidance(ws.repo_root), test_guidance(checks)) if p)
+    parts = (codemap.guidance(ws.repo_root), test_guidance(checks),
+             PERMISSION_GUIDANCE.format(root=ws.repo_root))
+    return "\n".join(p for p in parts if p)
 
 
-def agent_env(ws: Workspace, agent_id: str) -> dict[str, str]:
-    return {**workspaces.workspace_env(ws), "COPSE_AGENT_ID": agent_id}
+def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None) -> dict[str, str]:
+    env = {**workspaces.workspace_env(ws), "COPSE_AGENT_ID": agent_id}
+    if agent is not None and preload_tools(agent, ws):
+        # Claude Code defers MCP tools and loads them on demand, which costs a
+        # worker an extra round trip at the moment it's told to report (and
+        # some never get there). Workers and reviewers only have copse's own
+        # tools, so loading them all up front is cheap.
+        env["ENABLE_TOOL_SEARCH"] = "false"
+    return env
+
+
+def preload_tools(agent: Agent, ws: Workspace) -> bool:
+    """Whether to turn Claude Code's tool search off for this agent: the
+    profile's ``tool_search`` setting, else yes for every non-interactive
+    Claude agent (a chat may carry the person's own MCP servers, whose tools
+    are better left deferred)."""
+    if agent.provider != "claude":
+        return False
+    try:
+        setting = load_profile(agent.profile, ws.repo_root).tool_search
+    except KeyError:
+        setting = None
+    if setting is not None:
+        return not setting
+    return agent.mode != "interactive"
 
 
 def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: str | None,
@@ -243,7 +278,7 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     if agent.mode == "interactive":
         argv = _pause_when_done(agent.id, argv)
     tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
-    target = tmux.new_window(ws.tmux_session, name, ws.path, argv, agent_env(ws, agent.id))
+    target = tmux.new_window(ws.tmux_session, name, ws.path, argv, agent_env(ws, agent.id, agent))
     db.update_agent(agent.id, tmux_window=target)
     agent.tmux_window = target
     if watch_pane:
@@ -855,6 +890,8 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None) ->
         tmux.paste(agent.tmux_window, text, lead=message_lead(db, agent, sender_id))
         return "delivered"
     message_id = db.enqueue(agent.id, text, sender_id)
+    if _deliver_to_inbox(db, agent, message_id, text, sender_id):
+        return "delivered"
     reconcile(db, agent)
     if db.message_delivered(message_id):
         return "delivered"  # the idle correction above already flushed it
@@ -921,12 +958,42 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
     return new
 
 
+def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
+                      sender_id: str | None) -> bool:
+    """Send a queued message through Claude Code's own inbox (see
+    copse.inbox), where it doesn't wait for the agent to go idle. Returns
+    whether it went; if not, it stays queued for the pane."""
+    from copse import inbox
+
+    if not inbox.usable(agent):
+        return False
+    sender = db.get_agent(sender_id) if sender_id else None
+    who = f"copse {sender.profile} {sender.id}" if sender else "copse"
+    if not inbox.send(agent, text, sender=who):
+        return False
+    db.mark_delivered(message_id)
+    return True
+
+
 def flush(db: DB, agent_id: str) -> bool:
-    """If the agent is idle, type its oldest pending message. Returns True if
+    """Deliver the agent's oldest pending message: through its inbox if it
+    has one, else typed into its pane once it's idle. Returns True if
     something was delivered."""
+    from copse import inbox
+
     agent = db.get_agent(agent_id)
     if agent is None or agent.headless:
         return False  # its runner takes messages from the inbox itself
+    if inbox.usable(agent):
+        delivered = False
+        while (msg := db.pop_pending(agent_id)) is not None:
+            if inbox.send(agent, msg.body, sender="copse"):
+                delivered = True
+            else:
+                db.enqueue(agent_id, msg.body, msg.sender_id)  # back in the queue, for the pane
+                break
+        if delivered:
+            return True
     if db.pending_count(agent_id) == 0 or not db.claim_idle(agent_id):
         return False
     if _paste_blocked(agent):
@@ -1036,6 +1103,8 @@ def report_result(db: DB, agent_id: str, result: str) -> str:
             agent=agent, usage=u, branch=ws.branch, task=agent.task, result=result,
         )
     forwarded = f"{result}\n\n{usage_mod.summary_line(u)}" if u and u.total else result
+    if ws and agent.mode in ("handoff", "handoff_detached", "assign"):
+        warm_checks(ws)
     if agent.mode in FORWARDING_MODES and agent.parent_id and db.get_agent(agent.parent_id):
         where = f" on branch `{ws.branch}` (workspace {ws.id})" if ws else ""
         send_message(
@@ -1045,6 +1114,28 @@ def report_result(db: DB, agent_id: str, result: str) -> str:
         )
         return "result recorded and sent to your supervisor"
     return "result recorded"
+
+
+def warm_checks(ws: Workspace) -> None:
+    """A worker just reported on ``ws``: run the repo's checks on its branch
+    now, detached, so the cached result is ready for the review and the merge
+    gate. Only for a clean worktree (a dirty one can't be cached) in a repo
+    with checks."""
+    from copse.config import load_repo_config
+    from copse.providers import copse_invocation
+
+    try:
+        if not load_repo_config(ws.repo_root).checks or git.dirty_files(ws.path):
+            return
+    except (ValueError, git.GitError):
+        return
+    _detach([*copse_invocation(), "_warm-checks", ws.id])
+
+
+def _detach(args: list[str]) -> None:
+    """Start a copse helper that outlives this process."""
+    subprocess.Popen(args, start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def wait_for_result(db: DB, agent_id: str, timeout: float, poll: float = 2.0) -> str:
@@ -1339,6 +1430,9 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         db.update_agent(agent_id, transcript_path=str(transcript))
 
     if event == "session-start":
+        from copse import inbox
+
+        inbox.record_from_environment(db, agent_id)
         db.set_status(agent_id, "idle", only_if="starting")
         # 'waiting' before the session even started was its trust dialog
         # (see screen_status), which has now been answered.

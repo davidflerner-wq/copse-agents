@@ -577,7 +577,8 @@ class Antigravity(Provider):
         argv = [antigravity.binary()]
         if ctx.profile.model:
             argv += ["--model", ctx.profile.model]
-        if ctx.profile.permission_mode in ("acceptEdits", "accept-edits"):
+        if ctx.profile.permission_mode in ("acceptEdits", "accept-edits", "auto"):
+            # agy has no classifier mode; accepting edits is the closest.
             argv += ["--mode", "accept-edits"]
         elif ctx.profile.permission_mode == "plan":
             argv += ["--mode", "plan"]

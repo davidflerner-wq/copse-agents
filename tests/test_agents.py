@@ -71,7 +71,7 @@ def test_claude_command_wires_hooks_mcp_and_profile():
     settings = argv[argv.index("--settings") + 1]
     assert "_hook" in settings and "Stop" in settings
     assert '"COPSE_AGENT_ID": "abc"' in argv[argv.index("--mcp-config") + 1]
-    assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+    assert argv[argv.index("--permission-mode") + 1] == "auto"
     # Agent view (background sessions) is where a pasted message can land in
     # the wrong conversation or start a brand-new one; disable it outright.
     assert '"disableAgentView": true' in settings

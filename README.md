@@ -35,6 +35,10 @@ uv tool install --editable ~/Projects/copse   # from a local checkout
 
 ## Quick start
 
+`copse doctor` checks that everything copse needs is there (tmux, the agent CLIs,
+a writable home) and, in a repo, what's set up for it, and says what to do about
+anything missing.
+
 ```sh
 cd ~/code/myapp
 copse
@@ -216,6 +220,7 @@ your own status line prints, so what you see doesn't change.
 | `copse commit / push / pr [WS]` | commit everything (`-m MSG`), push with upstream, open a PR |
 | `copse merge [--squash] [WS]` | merge into the base locally |
 | `copse rm WS [-f] [-D]` | remove the worktree; `-D` deletes the branch too, only if merged unless `-f` |
+| `copse doctor` | check that copse has what it needs (tmux, the agent CLIs, a writable home) and, in a repo, its config, checks and code map |
 | `copse close AGENT` / `copse close --exited` | hide an agent (or every stopped one) from the dashboard, stopping it if it's running; its worktree and branch stay |
 | `copse send AGENT MSG` | message an agent; waits in its inbox until it's idle |
 | `copse agent spawn/kill/peek/profiles` | manage agents |
@@ -314,7 +319,18 @@ removes stale locks and empty worktree folders.
 
 **Spending fewer tokens.** Workers run only the tests that cover their change while
 they work. The full suite runs once: as the repo's `checks` before a branch merges,
-or, with no `checks`, by the worker just before it commits. If the repo has a graphify
+or, with no `checks`, by the worker just before it commits. copse runs the checks
+the moment a worker reports and caches the result by commit, so the review and the
+merge gate reuse it instead of each running the suite; `check_milestone` runs in
+the background and delivers its result as a message, so nothing waits on a long
+suite. An approved review carries over when copse merges the base branch into a
+branch cleanly before merging it (the checks still run on the merged result), so a
+branch that only fell behind isn't reviewed twice. Workers and reviewers get
+copse's tools loaded up front (`tool_search: false` on their profiles; a chat keeps
+Claude Code's on-demand loading, since it may carry your own MCP servers), so they
+don't spend a round trip finding `report_result` at the end. And the supervisor is
+told to size work first: a change it can make in a few minutes it makes itself,
+since a worker plus its review costs about ten times as much. If the repo has a graphify
 knowledge graph (`graphify-out/graph.json`, built with `/graphify`) and `graphify` is
 installed, copse tells the supervisor and every worker to find code with
 `graphify query` before grepping or reading whole files. Those commands are
@@ -363,7 +379,12 @@ permission_mode: acceptEdits   # optional, Claude Code only
 You are a frontend engineer...
 ```
 
-**Permissions.** Workers run with Claude Code's normal permission prompts. When a
+**Permissions.** The built-in `developer` profile runs in Claude Code's auto mode
+(`permission_mode: auto`): a classifier approves ordinary actions and prompts only
+for risky ones, while the profile's `allowed_tools` still apply. Every worker is
+also told to run commands plainly from its own worktree, never to `cd` into or read
+the main checkout, and to write files with its tools rather than shell heredocs;
+those were the commands that stalled on prompts most. Workers run with Claude Code's normal permission prompts. When a
 worker is waiting on one, `copse ls` shows it as `waiting`, and you attach to
 approve it; if it's still waiting after 90 seconds, its supervisor gets a message
 saying so (once). copse marks each worktree it starts Claude Code in as trusted,
@@ -482,6 +503,14 @@ add rules to `~/.gemini/antigravity-cli/settings.json`, for example:
   and every agent's MCP server share it. Worktrees live in
   `~/.copse/worktrees/<repo>/<branch>`, and the base branch is recorded in git
   config as `branch.<b>.copse-base`.
+- **Messages arrive through Claude Code's own inbox.** Every Claude Code session
+  listens on a socket for messages from other sessions, and tells its hooks where
+  it is; copse's SessionStart hook records it, and from then on messages go there
+  instead of being typed into the pane. An idle agent starts a new turn with the
+  message; a busy one gets it between tool calls. Typing into the pane is the
+  fallback when there's no socket (Codex, Antigravity, older Claude Code). A
+  `crossSessionInbound` of `hold` or `refuse` in your Claude settings would hold or
+  drop them.
 - **Agent status comes from hooks, not screen-scraping.** Guessing an agent's
   state by pattern-matching terminal output breaks whenever a CLI redesigns its
   interface. copse launches Claude Code with `--settings` hooks

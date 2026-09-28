@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS agents (
     transcript_path TEXT,          -- Claude Code's own JSONL transcript for session_ref (copse.usage)
     done_when TEXT,                -- the finish line it was given, if any (for review context)
     dismissed_at REAL,             -- closed from the sidebar (`copse close`): hidden there for good
+    inbox_socket TEXT,             -- Claude Code's inbox for this session (copse.inbox)
+    inbox_token TEXT,
     stuck_noted REAL               -- status_since of the 'waiting' spell its supervisor was told about (copse.cull)
 );
 CREATE TABLE IF NOT EXISTS inbox (
@@ -79,6 +81,7 @@ CREATE TABLE IF NOT EXISTS autopilot (
     progress INTEGER NOT NULL DEFAULT 0,    -- bumped whenever real progress happens
     nudges INTEGER NOT NULL DEFAULT 0,      -- "keep going" nudges since the last progress
     nudged_at INTEGER,             -- the progress count at the last nudge
+    checking_since REAL,           -- a milestone check is running in the background
     created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS milestones (
@@ -277,6 +280,8 @@ class Agent:
     transcript_path: str | None = None
     done_when: str | None = None
     dismissed_at: float | None = None
+    inbox_socket: str | None = None
+    inbox_token: str | None = None
     stuck_noted: float | None = None
 
 
@@ -292,6 +297,7 @@ class Autopilot:
     nudges: int
     nudged_at: int | None
     created_at: float
+    checking_since: float | None = None
 
 
 @dataclass
@@ -424,9 +430,13 @@ class DB:
         for col, kind in (("status_since", "REAL"), ("task", "TEXT"), ("session_ref", "TEXT"),
                           ("stop_blocked", "INTEGER"), ("headless", "INTEGER"),
                           ("transcript_path", "TEXT"), ("done_when", "TEXT"),
-                          ("dismissed_at", "REAL"), ("stuck_noted", "REAL")):
+                          ("dismissed_at", "REAL"), ("stuck_noted", "REAL"),
+                          ("inbox_socket", "TEXT"), ("inbox_token", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(autopilot)")}
+        if "checking_since" not in cols:
+            self.conn.execute("ALTER TABLE autopilot ADD COLUMN checking_since REAL")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(milestones)")}
         for col in ("checked_sha", "passed_sha"):
             if col not in cols:
@@ -594,11 +604,12 @@ class DB:
             c.execute(
                 "INSERT INTO agents (id, workspace_id, profile, provider, parent_id, mode, "
                 "status, tmux_window, result, created_at, status_since, task, session_ref, "
-                "headless, transcript_path, done_when) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "headless, transcript_path, done_when, inbox_socket, inbox_token) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (a.id, a.workspace_id, a.profile, a.provider, a.parent_id, a.mode,
                  a.status, a.tmux_window, a.result, a.created_at,
                  a.status_since or a.created_at, a.task, a.session_ref, a.headless,
-                 a.transcript_path, a.done_when),
+                 a.transcript_path, a.done_when, a.inbox_socket, a.inbox_token),
             )
 
     def get_agent(self, agent_id: str) -> Agent | None:
@@ -667,6 +678,10 @@ class DB:
                 (agent_id, sender_id, body, time.time()),
             )
             return int(cur.lastrowid)
+
+    def mark_delivered(self, message_id: int) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (time.time(), message_id))
 
     def pop_pending(self, agent_id: str) -> Message | None:
         """Atomically claim the oldest undelivered message, if any."""

@@ -378,8 +378,18 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
             return (f"Not merged: {ws.branch} conflicts with {ws.base_branch} in: {files}. "
                     f"Ask the worker to merge {ws.base_branch} and resolve.")
         if sync_result.status == "synced" and review:
-            return (f"Not merged: synced {ws.branch} with {ws.base_branch} "
-                    f"(new commit {sync_result.new_sha[:8]}); request_review again, then merge.")
+            # The branch's own commits are unchanged: an approval of them
+            # carries over the merge commit, and the checks below still run
+            # on the merged result. Only an unreviewed branch needs a review.
+            prior = db.latest_review(ws.id, sync_result.old_sha) if sync_result.old_sha else None
+            if prior and prior.approved:
+                db.add_review(ws.id, sync_result.new_sha, prior.reviewer_id, True,
+                              f"Carried over from the approved review of {sync_result.old_sha[:8]}: "
+                              f"{ws.base_branch} merged in cleanly (commit {sync_result.new_sha[:8]}), "
+                              "and the checks run on the merged result below.")
+            else:
+                return (f"Not merged: synced {ws.branch} with {ws.base_branch} "
+                        f"(new commit {sync_result.new_sha[:8]}); request_review again, then merge.")
 
         report = gates.run(db, ws, cfg, review_required=review)
         if not report.ok:
@@ -556,27 +566,28 @@ async def check_milestone(milestone: int | None = None) -> str:
         if isinstance(found, str):
             return found
         root_id, ws = found
-        caller, _ = _caller(db)
-        before = {m.id: m.status for m in db.milestones(root_id)}
-        try:
-            text = autopilot.check_milestones(db, root_id, ws, milestone)
-        except autopilot.AutopilotError as e:
-            return str(e)
-        # No tokens on these rows: the supervisor's usage belongs to its own
-        # report/merge rows, and a check would just re-count it.
-        for m in [m for m in db.milestones(root_id) if before.get(m.id) != m.status]:
-            history.record_safely(
-                db, ws.repo_root, "milestone", agent=caller, branch=ws.branch,
-                task=m.title, result=f"{m.status}\n\n{m.output or ''}",
-            )
-        history.record_safely(
-            db, ws.repo_root, "check", agent=caller, branch=ws.branch,
-            task=f"check_milestone({milestone if milestone is not None else 'all'})",
-            result=text,
-        )
-        return text
+        if not db.milestones(root_id):
+            return "no milestones yet: record the goal with set_goal first"
+        return autopilot.check_in_background(db, root_id, ws, milestone)
 
     return await asyncio.to_thread(run)
+
+
+def record_milestone_changes(db: DB, root_id: str, ws: Workspace, before: dict,
+                             caller, position: int | None, text: str) -> None:
+    """History rows for a milestone check: one per milestone whose status it
+    changed, and one for the check itself. No tokens on these rows: the
+    supervisor's usage belongs to its own report/merge rows."""
+    for m in [m for m in db.milestones(root_id) if before.get(m.id) != m.status]:
+        history.record_safely(
+            db, ws.repo_root, "milestone", agent=caller, branch=ws.branch,
+            task=m.title, result=f"{m.status}\n\n{m.output or ''}",
+        )
+    history.record_safely(
+        db, ws.repo_root, "check", agent=caller, branch=ws.branch,
+        task=f"check_milestone({position if position is not None else 'all'})",
+        result=text,
+    )
 
 
 @mcp.tool()
