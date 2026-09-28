@@ -132,6 +132,44 @@ def test_sidebar_follow_moves_the_pane_to_the_new_active_window(db, tmp_path, se
     assert active == win_b
 
 
+def test_sidebar_follow_stays_with_the_person_when_an_unwatched_session_changes_window(
+        db, tmp_path, session, monkeypatch):
+    """A worker's session changes its own active window at launch (its
+    placeholder shell window closes once the agent's window is up) and the
+    follow hook fires with nobody attached to it. The sidebar must stay in
+    the session the person is actually looking at."""
+    worker_session = "copse_followtest_worker"
+    tmux.ensure_session(worker_session, str(tmp_path), {})
+    try:
+        root_win = make_window(session, "root")
+        worker_win = make_window(worker_session, "worker")
+        root_ws = make_workspace(db, tmp_path, "rootws", session)
+        worker_ws = make_workspace(db, tmp_path, "workerws", worker_session)
+        fake_agent(db, root_ws, root_win, "root1")
+        fake_agent(db, worker_ws, worker_win, "w1", parent="root1", mode="assign")
+        agents._ensure_sidebar(db, "root1", root_ws, root_win)
+        sidebar = db.get_sidebar_pane("root1")
+
+        attached = {session: True, worker_session: False}
+        monkeypatch.setattr(tmux, "session_attached", lambda name: attached.get(name, False))
+        tmux._tmux("select-window", "-t", f"{worker_session}:worker")
+        agents.sidebar_follow(db, worker_session)
+        assert tmux.pane_window(sidebar) == tmux.pane_window(root_win)
+
+        # Once the person switches into the worker's session, it follows.
+        attached[worker_session] = True
+        agents.sidebar_follow(db, worker_session)
+        assert tmux.pane_window(sidebar) == tmux.pane_window(worker_win)
+
+        # With no client anywhere (tests, headless runs) it follows the windows as before.
+        attached[session] = attached[worker_session] = False
+        tmux._tmux("select-window", "-t", f"{session}:root")
+        agents.sidebar_follow(db, session)
+        assert tmux.pane_window(sidebar) == tmux.pane_window(root_win)
+    finally:
+        tmux.kill_session(worker_session)
+
+
 def test_sidebar_follow_is_a_noop_in_the_window_it_already_holds(db, tmp_path, session):
     win_a = make_window(session, "winA")
     ws = make_workspace(db, tmp_path, "winA", session)
