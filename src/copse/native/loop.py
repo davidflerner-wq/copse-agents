@@ -9,9 +9,10 @@ knows the worker's state without hooks or a screen to read.
 Context is kept under ``LoopConfig.context_tokens`` (estimated at four
 characters a token) in two steps: old tool results are trimmed first, and
 if that isn't enough the middle of the conversation is folded into a
-written summary of what was done, keeping the task and the latest turns
-verbatim. Deterministic, so it never costs a model call or fails on a model
-that summarizes badly.
+summary of what was done, keeping the task and the latest turns verbatim.
+The summary is written by the model (one extra call, without tools); if
+that call fails, comes back empty or asks for tools, a deterministic
+summary built by copse stands in.
 """
 
 from __future__ import annotations
@@ -22,12 +23,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from copse.native.client import Client, Reply, ToolCall, Usage
+from copse.native.client import Client, ClientError, Reply, ToolCall, Usage
 from copse.native.permissions import Permissions
 from copse.native.tools import Toolbox, ToolResult
 
 DELIVERY_PREFIX = "copse delivered this message"
 MAX_SUMMARY_LINES = 150
+SUMMARY_SYSTEM = ("You are summarizing your own work so far so you can continue it later with less context. "
+                  "Write terse notes for yourself: files changed, commands run and their results, and "
+                  "what remains to be done. Do not call tools.")
 
 
 @dataclass
@@ -223,7 +227,11 @@ class NativeAgent:
         if not folded:
             return
         self.folded += len(folded)
-        self._summary_lines += self._summarize(folded)
+        lines = self._model_summary(self.messages[:start], folded)
+        by = "the model"
+        if lines is None:
+            lines, by = self._summarize(folded), "copse"
+        self._summary_lines += lines
         self._summary_lines = self._summary_lines[-MAX_SUMMARY_LINES:]
         summary = "\n".join([
             "[Earlier work in this session, summarized by copse to save context]",
@@ -238,7 +246,33 @@ class NativeAgent:
         # folded away: drop leading orphans.
         while len(self.messages) > 3 and self.messages[3]["role"] == "tool":
             del self.messages[3]
-        self._record({"type": "note", "text": f"context folded: {len(folded)} messages summarized"})
+        self._record({"type": "note", "text": f"context folded: {len(folded)} messages summarized by {by}"})
+
+    def _model_summary(self, head: list[dict], folded: list[dict]) -> list[str] | None:
+        """Ask the model to summarize ``folded``; None if it can't (endpoint
+        error, empty reply, tool calls), so the caller falls back."""
+        # ``head`` (the task, and an earlier summary) gives the model its
+        # bearings. A trailing assistant turn loses its tool calls, whose
+        # results are in the kept messages, and leading results lose their calls.
+        body = list(folded)
+        while body and body[0]["role"] == "tool":
+            body.pop(0)
+        if body and body[-1]["role"] == "assistant" and body[-1].get("tool_calls"):
+            body[-1] = {**body[-1], "tool_calls": []}
+        if body and body[-1]["role"] == "tool":
+            body.append({"role": "assistant", "content": "(continuing)", "tool_calls": []})
+        ask = {"role": "user", "content": "Summarize the work done in the messages above, as a short list "
+                                          "of lines: files changed, commands run and their results, what "
+                                          "remains. Reply with the summary only."}
+        try:
+            reply = self.client.complete(SUMMARY_SYSTEM, head + body + [ask], [])
+        except (ClientError, OSError):
+            return None
+        self.usage = self.usage + reply.usage
+        if reply.tool_calls:
+            return None
+        lines = [ln.rstrip() for ln in (reply.text or "").splitlines() if ln.strip()]
+        return lines or None
 
     @staticmethod
     def _summarize(messages: list[dict]) -> list[str]:
