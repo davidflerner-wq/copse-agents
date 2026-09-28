@@ -461,8 +461,9 @@ def list_cmd(
         except git.GitError:
             pass
     rows = db.find_workspaces(repo_root)
+    panes = tmux.list_panes()
     if as_json:
-        typer.echo(json.dumps([view.workspace_entry(db, ws) for ws in rows], indent=2))
+        typer.echo(json.dumps([view.workspace_entry(db, ws, panes=panes) for ws in rows], indent=2))
         return
     if not rows:
         typer.echo("no workspaces")
@@ -471,7 +472,7 @@ def list_cmd(
         if not os.path.isdir(ws.path):
             typer.secho(f"{ws.id}  (missing: {ws.path})", fg="red")
             continue
-        e = view.workspace_entry(db, ws)
+        e = view.workspace_entry(db, ws, panes=panes)
         info = ""
         if e["ahead"] is not None:
             dirty = f" *{e['dirty']}" if e["dirty"] else ""
