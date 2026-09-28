@@ -79,6 +79,11 @@ def remote_branch_exists(root: str | Path, branch: str, remote: str = "origin") 
     return ok(["show-ref", "--verify", "--quiet", f"refs/remotes/{remote}/{branch}"], root)
 
 
+def list_branches(root: str | Path, pattern: str = "*") -> list[str]:
+    proc = out(["for-each-ref", "--format=%(refname:short)", f"refs/heads/{pattern}"], root)
+    return [b for b in proc.splitlines() if b]
+
+
 def has_remote(root: str | Path, remote: str = "origin") -> bool:
     return remote in out(["remote"], root).split()
 

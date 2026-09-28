@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from copse import agents, git, scratch, tmux, workspaces
+from copse import agents, git, pool, scratch, tmux, workspaces
 from copse.db import DB, Agent, Workspace
 
 # Free-tier retention. Read from the environment so a paid add-on (or a person
@@ -94,6 +94,13 @@ def enforce(db: DB, repo_root: str, now: float | None = None) -> int:
         # _forget deletes agent rows; a dropped agent's usage mark (if its
         # history rows are gone too, e.g. never reported) is now dead weight.
         db.prune_usage_marks()
+    try:
+        # Sweeping and trimming happen in the detached fill process, so a
+        # large trim's rmtree never blocks whoever's calling enforce (e.g.
+        # `copse start`).
+        pool.fill_in_background(repo_root)
+    except (git.GitError, ValueError, OSError):
+        pass
     return dropped
 
 

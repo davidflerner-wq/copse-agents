@@ -821,3 +821,12 @@ def deliver_checks_cmd(reviewer_id: str, workspace_id: str) -> None:
     if ws is None:
         return
     agents.deliver_check_summary(db, reviewer_id, ws, load_repo_config(ws.repo_root))
+
+
+@app.command("_pool-fill", hidden=True)
+def pool_fill_cmd(repo_root: str) -> None:
+    """Top the worktree pool back up to `pool_size`. Started detached, after a
+    claim and at supervisor start (see `workspaces.create`, `start`)."""
+    from copse import pool
+
+    pool.fill_locked(DB(), repo_root)
