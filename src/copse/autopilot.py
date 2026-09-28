@@ -185,7 +185,8 @@ def set_goal(db: DB, root_id: str, goal: str,
     for m in db.milestones(root_id):
         prev = old.get((m.title, m.check_cmd))
         if prev and prev.status != "pending":
-            db.record_check(m.id, prev.status == "passed", prev.output or "")
+            db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
+                            passed_sha=prev.passed_sha)
     db.bump_progress(root_id)
 
 
@@ -228,9 +229,13 @@ def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int) -> tuple[bo
 def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None = None,
                      cfg: RepoConfig | None = None) -> str:
     """Run milestone checks in the supervisor's checkout (where merges land)
-    and record the results. With ``position``, just that one milestone; if
-    that makes every milestone pass, all are re-run together to confirm."""
-    from copse import workspaces
+    and record the results. With ``position``, just that one milestone, then
+    the other milestones currently marked passed are re-run too, to catch a
+    merge that broke one of them while another is still in progress; those
+    that passed at the checkout's current HEAD are skipped. Only a milestone
+    newly passing, and not already passed at this commit, counts as progress,
+    so a flaky check can't keep resetting the nudge limit."""
+    from copse import git, workspaces
 
     cfg = cfg or load_repo_config(ws.repo_root)
     ms = db.milestones(root_id)
@@ -240,31 +245,51 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
     if not chosen:
         raise AutopilotError(f"no milestone {position}; they're numbered 1-{len(ms)}")
     env = workspaces.workspace_env(ws)
-    changed = False
+    # The commit the checks ran against. Uncommitted changes could break a
+    # check without moving HEAD, so a dirty checkout records no sha.
+    try:
+        head: str | None = None if git.dirty_files(ws.path) else git.out(["rev-parse", "HEAD"], ws.path)
+    except git.GitError:
+        head = None
+    newly_passed = False
 
     def run(batch: list[Milestone]) -> None:
-        nonlocal changed
+        nonlocal newly_passed
         for m in batch:
             if not m.check_cmd:
                 continue
             ok, out = run_check(m.check_cmd, ws.path, env, cfg.check_timeout)
-            changed |= (m.status == "passed") != ok
-            db.record_check(m.id, ok, out)
+            # Not if it already passed at this very commit: a flaky check
+            # flipping back isn't progress.
+            newly_passed |= ok and m.status != "passed" and (head is None or m.passed_sha != head)
+            db.record_check(m.id, ok, out, head)
 
     run(chosen)
     ms = db.milestones(root_id)
-    if position is not None and all(m.status == "passed" for m in ms) and len(ms) > 1:
-        run(ms)  # confirm nothing earlier regressed
-        ms = db.milestones(root_id)
-    if changed:
+    regressed: list[Milestone] = []
+    if position is not None and len(ms) > 1:
+        recheck = [m for m in ms if m.position != position and m.status == "passed"
+                   and (head is None or m.checked_sha != head)]
+        if recheck:
+            was_passed = {m.id for m in recheck}
+            run(recheck)
+            ms = db.milestones(root_id)
+            regressed = [m for m in ms if m.id in was_passed and m.status != "passed"]
+    if newly_passed:
         db.bump_progress(root_id)
     done = all(m.status == "passed" for m in ms)
     if done:
         db.update_autopilot(root_id, state="done", note=None)
     elif (ap := db.get_autopilot(root_id)) and ap.state == "done":
         db.update_autopilot(root_id, state="running")
-    shown = [m for m in ms if position is None or m.position == position or done]
-    lines = [progress(db, root_id)]
+    regressed_ids = {m.id for m in regressed}
+    shown = [m for m in ms if position is None or m.position == position or done or m.id in regressed_ids]
+    lines = []
+    if regressed:
+        positions = ", ".join(str(m.position) for m in regressed)
+        verb = "was passing but now fails" if len(regressed) == 1 else "were passing but now fail"
+        lines.append(f"REGRESSED: milestone {positions} {verb}.")
+    lines.append(progress(db, root_id))
     for m in shown:
         if m.output and m.status == "failed":
             lines.append(f"\nMilestone {m.position} check output:\n{m.output}")
@@ -305,17 +330,61 @@ def progress(db: DB, root_id: str) -> str:
 
 
 BUSY = ("starting", "processing", "waiting")
+IDLE_GRACE_SECONDS = 60  # how long a worker may sit idle and unreported before it's called out
 
 
 def active_workers(db: DB, root_id: str, *, reviewers: bool = True) -> list[Agent]:
     """Agents in the session still working: not yet reported, or back at work
-    after reporting (e.g. on review feedback)."""
+    after reporting (e.g. on review feedback). Includes workers stalled idle
+    and unreported past the grace period; see ``stalled_workers`` and
+    ``working_workers`` to tell those apart."""
     from copse import agents
 
     return [a for a in agents.tree(db, root_id)[1:]
             if a.mode in agents.REPORTING_MODES and (reviewers or a.mode != "review")
             and (a.result is None or a.status in BUSY)
             and a.status not in ("paused", "done") and agents.is_alive(a)]
+
+
+def split_workers(db: DB, root_id: str, *, screen: bool = False) -> tuple[list[Agent], list[Agent]]:
+    """``active_workers`` split into (working, stalled). Stalled: idle without
+    reporting a result for more than ``IDLE_GRACE_SECONDS``. Claude Code
+    already reminded them once to call report_result (see agents.handle_hook's
+    "stop" case); past the grace period they won't be reminded again on their
+    own, so the supervisor has to check on them itself. Working: the rest,
+    still expected to report on their own.
+
+    Only workers whose provider reports idle through hooks can stall this way
+    (Codex and shell workers never leave 'unknown'). A stale 'idle' can also
+    outlive the turn after it, so with ``screen`` a worker with a screen to
+    read is only stalled when the screen shows it idle too (its status is
+    reconciled otherwise). That sleeps between samples, so only the Stop hook
+    asks for it, and only for idle, unreported workers past the grace period.
+    Without it (the dashboard), the status is taken as it stands."""
+    from copse import agents
+    from copse.providers import get_provider
+
+    now = time.time()
+    working, stalled = [], []
+    for a in active_workers(db, root_id):
+        maybe = (a.result is None and a.status == "idle"
+                 and get_provider(a.provider).uses_hooks
+                 and now - (a.status_since or a.created_at) >= IDLE_GRACE_SECONDS)
+        if maybe and (not screen or a.headless or agents.screen_status(db, a, samples=2) == "idle"):
+            stalled.append(a)
+        else:
+            working.append(a)
+    return working, stalled
+
+
+def stalled_workers(db: DB, root_id: str) -> list[Agent]:
+    """Active workers the supervisor has to check on; see ``split_workers``."""
+    return split_workers(db, root_id)[1]
+
+
+def working_workers(db: DB, root_id: str) -> list[Agent]:
+    """Active workers still expected to report on their own; see ``split_workers``."""
+    return split_workers(db, root_id)[0]
 
 
 def check_capacity(db: DB, caller_id: str | None, cfg: RepoConfig) -> None:
@@ -403,7 +472,8 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
         return None
     from copse import agents
 
-    if any(agents.runs_process(a) for a in active_workers(db, agent.id)):
+    working, stalled = split_workers(db, agent.id, screen=True)
+    if any(agents.runs_process(a) for a in working):
         return None  # their results arrive as messages and wake it up
     ws = db.get_workspace(agent.workspace_id)
     cfg = load_repo_config(ws.repo_root) if ws else RepoConfig()
@@ -417,21 +487,31 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
                             note=f"no progress after {MAX_NUDGES} reminders to keep going")
         return None
     db.update_autopilot(agent.id, nudges=nudges + 1, nudged_at=ap.progress)
-    return {"decision": "block", "reason": nudge(db, ap, cfg)}
+    return {"decision": "block", "reason": nudge(db, ap, cfg, working, stalled)}
 
 
-def nudge(db: DB, ap: Autopilot, cfg: RepoConfig) -> str:
+def nudge(db: DB, ap: Autopilot, cfg: RepoConfig,
+          working: list[Agent], stalled: list[Agent]) -> str:
     from copse import agents
 
     # Subagent workers send no message when done; the supervisor records them.
-    open_subagents = [a.id for a in active_workers(db, ap.root_id) if not agents.runs_process(a)]
+    open_subagents = [a.id for a in working if not agents.runs_process(a)]
     pending = ""
     if open_subagents:
         pending = ("Subagent work not yet recorded: when each of your subagents finishes, call "
                    f"complete_subagent for {', '.join(open_subagents)}.\n\n")
+    stuck = ""
+    if stalled:
+        names = ", ".join(a.id for a in stalled)
+        stuck = (
+            f"{names} went idle without ever calling report_result and won't be reminded "
+            "again on their own. Check on them: workspace_diff to see what they did, "
+            "send_message asking them to report or finish, or remove_workspace if the work "
+            "is abandoned.\n\n"
+        )
     return (
         "[copse autopilot] The goal isn't reached yet, and no workers are running.\n"
-        f"{progress(db, ap.root_id)}\n\n{pending}"
+        f"{progress(db, ap.root_id)}\n\n{pending}{stuck}"
         "Keep going without waiting for the user: plan the next tasks for the first "
         f"unverified milestone and assign workers (at most {cfg.max_agents or 'any number'} "
         "at once), get finished branches reviewed and merged, and call check_milestone. "

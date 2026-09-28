@@ -464,7 +464,10 @@ def get_progress() -> str:
 async def check_milestone(milestone: int | None = None) -> str:
     """Autopilot: run milestone checks in your checkout (where merges land) and
     record the results. milestone: its number; omit to check all of them.
-    This is the only way a milestone becomes done."""
+    This is the only way a milestone becomes done. Checking one milestone also
+    re-runs the others currently marked passed, so a merge that broke one of
+    them shows up as "REGRESSED" in the result even while another milestone
+    is still in progress."""
     def run() -> str:
         db = DB()
         found = _session(db)

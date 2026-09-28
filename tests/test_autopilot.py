@@ -98,7 +98,9 @@ def test_running_workers_let_the_supervisor_idle(db, root, monkeypatch):
     agent, _ = root
     with_goal(db)
     monkeypatch.setattr(autopilot, "active_workers",
-                        lambda db, rid: [SimpleNamespace(id="w", provider="claude")])
+                        lambda db, rid: [SimpleNamespace(id="w", provider="claude",
+                                                         result=None, status="processing",
+                                                         status_since=time.time())])
     assert autopilot.on_stop(db, agent, {}) is None
 
 
@@ -107,7 +109,9 @@ def test_open_subagent_workers_dont_let_the_supervisor_idle(db, root, monkeypatc
     agent, _ = root
     with_goal(db)
     monkeypatch.setattr(autopilot, "active_workers",
-                        lambda db, rid: [SimpleNamespace(id="sub1", provider="subagent")])
+                        lambda db, rid: [SimpleNamespace(id="sub1", provider="subagent",
+                                                         result=None, status="processing",
+                                                         status_since=time.time())])
     out = autopilot.on_stop(db, agent, {})
     assert out and out["decision"] == "block"
     assert "complete_subagent for sub1" in out["reason"]

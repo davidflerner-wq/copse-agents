@@ -97,13 +97,87 @@ def test_developer_may_run_tests_and_builds_but_not_everything():
 
 
 CLAUDE_IDLE = "⏺ Done.\n\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
-CLAUDE_BUSY = "✶ Thinking… (12s)\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt\n"
+# Real Claude Code 2.1.283 layouts: a blank line sits between the box's top
+# border and the status line above it (and another below the bottom
+# border). The status line shows a spinner while a turn runs, in shapes
+# ranging from a bare verb to one with token/timing detail, and a "done
+# HH:MM" marker once it ends. Older versions instead said "esc to interrupt"
+# in the footer below the box.
+BOX = "\n────\n❯ \n────\n\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+CLAUDE_BUSY = "✻ Tomfoolering… (7m 22s · ↓ 35.0k tokens · thinking)" + BOX
+CLAUDE_BUSY_SHORT = "✻ Tomfoolering… (3s)" + BOX
+CLAUDE_BUSY_ESC = "✻ Tomfoolering… (3s · esc to interrupt)" + BOX
+CLAUDE_BUSY_BARE = "✻ Tomfoolering…" + BOX
+CLAUDE_BUSY_BACKGROUND = ("· Gallivanting… (7m 22s · ↓ 31.7k tokens · thinking)\n"
+                          "  (ctrl+b ctrl+b (twice) to run in background)" + BOX)
+# The todo list sits below the spinner, closer to the box, indented under it.
+CLAUDE_BUSY_TODO = ("✻ Tomfoolering… (7m 22s · ↓ 35.0k tokens · thinking)\n"
+                    "  ⎿  ☐ Write the fix\n"
+                    "     ☐ Add tests" + BOX)
+CLAUDE_DONE = "✻ Sautéed for 7m 49s · done 7:57 PM" + BOX
+# An exact capture of a real busy pane (2.1.283), truncated transcript line
+# and all: it must not be mistaken for the spinner above the box. Shared
+# with test_reliability.py.
+CLAUDE_BUSY_REAL_CAPTURE = (
+    '     os.environ.setdefault("GIT_COMMITTER_EMAIL", "t@example.c…\n'
+    "\n"
+    "✽ Hashing… (2m 53s · ↓ 7.6k tokens · thinking)\n"
+    "\n"
+    "────────────────────────────────────────\n"
+    "❯ \n"
+    "────────────────────────────────────────\n"
+    "\n"
+    "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n"
+)
+# The quote sits with no blank-line padding at all right above the box;
+# only the anchored regex (not distance from the box) keeps this idle.
+CLAUDE_QUOTED_BUSY_NO_PADDING = (
+    "⏺ It shows \"Tomfoolering… (7m 22s · ↓ 35.0k tokens)\" while busy.\n"
+    "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ? for shortcuts\n"
+)
+# "esc to interrupt" only counts in the footer below the box, never quoted in
+# prose above it.
+CLAUDE_IDLE_ESC_MENTION = "⏺ Older builds printed esc to interrupt under the box." + BOX
+# Neither of these is the busy block busy_in_footer requires (its first line
+# must itself be the spinner): here it's prose describing the spinner, with
+# the real-looking spinner line only as a second, indented line — which is
+# neither the required first line nor a todo line, so the block is invalid
+# either way. screen_state's broader tail search still calls both of these
+# busy, unrelated to busy_in_footer's stricter shape check.
+CLAUDE_IDLE_SPINNER_DESCRIBED = ("⏺ The spinner looks like:\n"
+                                 "  ✻ Tomfoolering… (3s)" + BOX)
+# A plain "-" bullet isn't a spinner glyph, even though the rest of the line
+# is shaped like one.
+CLAUDE_IDLE_PROSE_ELLIPSIS = "  - Loading…" + BOX
 CLAUDE_PROMPT = " Bash command\n   pytest\n This command requires approval\n\n Do you want to proceed?\n ❯ 1. Yes\n   4. No\n\n Esc to cancel\n"
 
 
-@pytest.mark.parametrize("screen,want", [(CLAUDE_IDLE, "idle"), (CLAUDE_BUSY, "busy"), (CLAUDE_PROMPT, "waiting"), ("", None)])
+@pytest.mark.parametrize("screen,want", [
+    (CLAUDE_IDLE, "idle"), (CLAUDE_DONE, "idle"), (CLAUDE_IDLE_ESC_MENTION, "idle"),
+    (CLAUDE_BUSY, "busy"), (CLAUDE_BUSY_SHORT, "busy"), (CLAUDE_BUSY_ESC, "busy"),
+    (CLAUDE_BUSY_BARE, "busy"), (CLAUDE_BUSY_BACKGROUND, "busy"), (CLAUDE_BUSY_TODO, "busy"),
+    (CLAUDE_BUSY_REAL_CAPTURE, "busy"), (CLAUDE_QUOTED_BUSY_NO_PADDING, "idle"),
+    (CLAUDE_PROMPT, "waiting"), ("", None),
+])
 def test_claude_screen_state(screen, want):
     assert ClaudeCode().screen_state(screen) == want
+
+
+@pytest.mark.parametrize("screen,want", [
+    (CLAUDE_BUSY, True), (CLAUDE_BUSY_SHORT, True), (CLAUDE_BUSY_ESC, True),
+    (CLAUDE_BUSY_BARE, True), (CLAUDE_BUSY_TODO, True),
+    (CLAUDE_BUSY_REAL_CAPTURE, True),
+    # The background-run note doesn't fit the spinner-then-todos shape, so
+    # busy_in_footer misses it (screen_state's broad tail search still
+    # catches it above); a conservative false negative, never a false
+    # positive.
+    (CLAUDE_BUSY_BACKGROUND, False),
+    (CLAUDE_IDLE_ESC_MENTION, False),
+    (CLAUDE_IDLE_SPINNER_DESCRIBED, False), (CLAUDE_IDLE_PROSE_ELLIPSIS, False),
+    (CLAUDE_IDLE, False), (CLAUDE_DONE, False), (CLAUDE_QUOTED_BUSY_NO_PADDING, False),
+])
+def test_claude_busy_in_footer(screen, want):
+    assert ClaudeCode().busy_in_footer(screen) is want
 
 
 def test_reconcile_recovers_from_interrupted_turn(db, ws, monkeypatch):
