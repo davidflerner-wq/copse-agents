@@ -64,6 +64,43 @@ def endpoint_for(profile: Profile) -> Endpoint:
     return Endpoint(profile.base_url, profile.model, api=api, api_key=key)
 
 
+def probe(endpoint: Endpoint, timeout: float = 3.0) -> tuple[bool, str]:
+    """Whether the endpoint answers, and a line about it: the models it
+    lists (and whether ``endpoint.model`` is among them) when it lists any.
+    Ollama, LM Studio, llama.cpp, vLLM and OpenRouter all answer
+    ``GET <base>/models`` (or ``/v1/models``); an endpoint that answers with
+    any HTTP status is at least reachable."""
+    import json
+    import urllib.error
+    import urllib.request
+
+    base = endpoint.base_url.rstrip("/")
+    url = base + ("/models" if base.endswith("/v1") else "/v1/models")
+    headers = {"Accept": "application/json"}
+    if endpoint.api_key:
+        headers["Authorization"] = f"Bearer {endpoint.api_key}"
+        headers["x-api-key"] = endpoint.api_key
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return True, f"reachable (HTTP {e.code} from {url}; couldn't list models)"
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return False, f"not reachable: {getattr(e, 'reason', e)}"
+    try:
+        data = json.loads(body)
+        items = data.get("data") if isinstance(data, dict) else data
+        names = [str(m.get("id") or m.get("name") or "") for m in items if isinstance(m, dict)]
+    except (ValueError, AttributeError, TypeError):
+        return True, "reachable (couldn't read its model list)"
+    if not names:
+        return True, "reachable, but lists no models"
+    if endpoint.model in names or any(n.split(":")[0] == endpoint.model for n in names):
+        return True, f"reachable; {endpoint.model} is available"
+    shown = ", ".join(names[:6]) + (", ..." if len(names) > 6 else "")
+    return True, f"reachable, but {endpoint.model} isn't listed (it has: {shown})"
+
+
 def copse_tools(db: DB, agent_id: str, ws: Workspace, mode: str) -> list[Tool]:
     """copse's own tools, called in-process. Named as the MCP server names
     them, so the worker footers' instructions hold."""

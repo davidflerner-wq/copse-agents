@@ -124,6 +124,14 @@ def worker_guidance(ws: Workspace) -> str:
 
 def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None) -> dict[str, str]:
     env = {**workspaces.workspace_env(ws), "COPSE_AGENT_ID": agent_id}
+    if agent is not None:
+        # The profile's ``env.NAME: value`` lines: how a Claude Code profile
+        # points at another backend (ANTHROPIC_BASE_URL, ...), or any CLI at
+        # a key it needs. Set before copse's own variables, which win.
+        try:
+            env = {**load_profile(agent.profile, ws.repo_root).env, **env}
+        except KeyError:
+            pass
     if agent is not None and preload_tools(agent, ws):
         # Claude Code defers MCP tools and loads them on demand, which costs a
         # worker an extra round trip at the moment it's told to report (and

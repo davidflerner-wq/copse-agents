@@ -26,6 +26,7 @@ class FakeEndpoint:
 
     def __init__(self):
         self.replies: list = []
+        self.models: list[str] = ["tiny", "qwen3-coder:30b"]
         self.requests: list[dict] = []
         self.paths: list[str] = []
         outer = self
@@ -46,6 +47,15 @@ class FakeEndpoint:
                     self.wfile.write(json.dumps({"error": {"message": f"scripted {reply}"}}).encode())
                     return
                 body = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                outer.paths.append(self.path)
+                body = json.dumps({"data": [{"id": m} for m in outer.models]}).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))

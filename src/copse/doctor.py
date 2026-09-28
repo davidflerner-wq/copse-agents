@@ -61,6 +61,8 @@ def checks(repo_root: str | None) -> list[Check]:
     out.append(_tool("pre-commit", False, "only needed if the repo uses pre-commit hooks"))
     out.append(_tool("graphify", False, "only needed for the code map agents can query"))
 
+    out.extend(native_checks(repo_root))
+
     home = config.copse_home()
     try:
         home.mkdir(parents=True, exist_ok=True)
@@ -127,6 +129,38 @@ def checks(repo_root: str | None) -> list[Check]:
                              "uncommitted changes: workers branch from committed work only"))
         else:
             out.append(Check(OK, "working tree", "clean"))
+    return out
+
+
+def native_checks(repo_root: str | None) -> list[Check]:
+    """One check per endpoint the native profiles use: reachable, and does
+    it have the model. A missing endpoint is a warning (those profiles are
+    optional); a profile with no endpoint at all is a failure, since it can
+    never run."""
+    from copse.native import runner
+    from copse.profiles import list_profiles
+
+    out: list[Check] = []
+    seen: dict[tuple[str, str], list[str]] = {}
+    for p in list_profiles(repo_root):
+        if p.provider != "native":
+            continue
+        try:
+            ep = runner.endpoint_for(p)
+        except ValueError as e:
+            out.append(Check(FAIL, f"profile {p.name}", str(e)))
+            continue
+        seen.setdefault((ep.base_url, ep.model), []).append(p.name)
+    for (base_url, model), names in seen.items():
+        ep = runner.Endpoint(base_url, model)
+        ok, detail = runner.probe(ep)
+        who = ", ".join(names)
+        if ok:
+            out.append(Check(OK if "is available" in detail else WARN, f"model {model}", f"{base_url}: {detail} (for {who})"))
+        else:
+            out.append(Check(WARN, f"model {model}",
+                             f"{base_url} {detail}: only needed for {who}. For Ollama: "
+                             f"`ollama serve`, then `ollama pull {model}`"))
     return out
 
 

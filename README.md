@@ -3,8 +3,8 @@
 *[pawdelta.com/copse](https://pawdelta.com/copse/) · Published on PyPI as `copse-agents`; the command is `copse`. This project is
 unrelated to the Copse desktop app at copse.dev.*
 
-A supervisor for your coding agents. copse runs Claude Code and Codex
-side by side in tmux, gives each agent its own git worktree and branch, and
+A supervisor for your coding agents. copse runs Claude Code, Codex, and
+its own loop over any open-weight model side by side in tmux, gives each agent its own git worktree and branch, and
 lets a supervisor agent split up work, hand it out, review each branch, and
 merge the results. Nobody edits the same files, and nothing lands without
 review.
@@ -220,7 +220,7 @@ your own status line prints, so what you see doesn't change.
 | `copse commit / push / pr [WS]` | commit everything (`-m MSG`), push with upstream, open a PR |
 | `copse merge [--squash] [WS]` | merge into the base locally |
 | `copse rm WS [-f] [-D]` | remove the worktree; `-D` deletes the branch too, only if merged unless `-f` |
-| `copse doctor` | check that copse has what it needs (tmux, the agent CLIs, a writable home) and, in a repo, its config, checks and code map |
+| `copse doctor` | check that copse has what it needs (tmux, the agent CLIs, native profiles' model endpoints, a writable home) and, in a repo, its config, checks and code map |
 | `copse close AGENT` / `copse close --exited` | hide an agent (or every stopped one) from the dashboard, stopping it if it's running; its worktree and branch stay |
 | `copse send AGENT MSG` | message an agent; waits in its inbox until it's idle |
 | `copse agent spawn/kill/peek/profiles` | manage agents |
@@ -381,13 +381,13 @@ servers don't collide. Agents also get `COPSE_AGENT_ID`.
 
 Markdown files with frontmatter. copse looks in `.copse/agents/`, then
 `~/.copse/agents/`, then its built-ins (`supervisor`, `developer`, `reviewer`,
-`reviewer-codex`, `subagent`):
+`reviewer-codex`, `developer-local`, `reviewer-local`, `subagent`):
 
 ```markdown
 ---
 name: frontend
 description: React/TypeScript specialist
-provider: claude          # claude | codex | antigravity | shell | subagent
+provider: claude          # claude | codex | antigravity | native | shell | subagent
 model: sonnet             # optional
 permission_mode: acceptEdits   # optional, Claude Code only
 ---
@@ -459,6 +459,8 @@ reports the error. Differences from an interactive worker:
 - A `done_when` finish line is added to the task, without `/goal` (an interactive command).
 
 Blank values and anything after ` #` are ignored, so frontmatter can carry comments.
+`env.NAME: value` lines set environment variables for the agent's process (see
+"Open-weight models" for what that's for).
 
 ### Subagent workers
 
@@ -476,6 +478,98 @@ and done after. `workspace_diff`, `request_review`, `merge_workspace` and
 supervisor's own directory. Unless the supervisor runs with permission to edit
 there (`--add-dir ~/.copse/worktrees`, or `additionalDirectories` in Claude
 Code settings), the subagent's edits ask for approval.
+
+## Open-weight models
+
+copse can run workers and reviewers on free, open-weight models (Qwen3-Coder,
+GLM, DeepSeek, Kimi, gpt-oss, ...) served locally by Ollama, LM Studio or
+llama.cpp, or by a hosted API. There are two ways in.
+
+### The native provider
+
+`provider: native` runs copse's own agent loop instead of a third-party CLI:
+copse talks to the model's chat endpoint directly, runs its tool calls (Read,
+Write, Edit, Glob, Grep, Bash, plus copse's `report_result`, `send_message`,
+`submit_review` and `workspace_diff`), and reports the worker's status itself.
+No hooks, no screen scraping, and messages sent to the worker arrive between
+its model calls. It works with any OpenAI-compatible chat-completions endpoint
+or Anthropic Messages endpoint.
+
+```markdown
+---
+name: developer-local
+provider: native
+api: openai                        # openai (chat completions) | anthropic (messages)
+base_url: http://localhost:11434/v1
+model: qwen3-coder:30b
+context_tokens: 32k                # the model's window, less room for its reply
+api_key_env: OPENROUTER_API_KEY    # optional: the variable holding the key
+permission_mode: acceptEdits
+allowed_tools: Bash(git add:*), Bash(git commit:*), Bash(uv run:*), Bash(pytest:*)
+---
+You are a developer agent running under copse...
+```
+
+The built-in `developer-local` and `reviewer-local` profiles are set up for
+Ollama with `qwen3-coder:30b` (19 GB; runs on a 32 GB machine). To use them:
+
+```
+brew install ollama            # or https://ollama.com/download
+OLLAMA_CONTEXT_LENGTH=40960 ollama serve
+ollama pull qwen3-coder:30b
+copse doctor                   # "model qwen3-coder:30b ... is available"
+```
+
+Then a supervisor can `assign` a task to `developer-local`, or the repo config
+can make the free model the reviewer: `"review_profile": "reviewer-local"`.
+Other endpoints, same fields:
+
+| Backend | `api` | `base_url` | Notes |
+|---|---|---|---|
+| Ollama (local) | openai | `http://localhost:11434/v1` | free; `ollama pull <model>` first |
+| LM Studio | openai | `http://localhost:1234/v1` | free; load the model in the app |
+| llama.cpp `llama-server` | openai | `http://127.0.0.1:8080/v1` | free; start with `--jinja` for tool calls |
+| OpenRouter | openai | `https://openrouter.ai/api/v1` | `:free` models; `api_key_env: OPENROUTER_API_KEY` |
+| Z.ai GLM | anthropic | `https://api.z.ai/api/anthropic` | GLM-4.7-Flash is free; `api_key_env: ZAI_API_KEY` |
+| DeepSeek | anthropic | `https://api.deepseek.com/anthropic` | paid; `api_key_env: DEEPSEEK_API_KEY` |
+| Anthropic | anthropic | `https://api.anthropic.com` | `api_key_env: ANTHROPIC_API_KEY` |
+
+What to expect: a 30B-class local model does well on small, well-specified
+tasks (the kind copse hands out: one change, the test named up front) and on
+reviews of modest diffs, and less well on long multi-step work. The native
+loop keeps it on rails: exact-match edits that fail loudly, one command at a
+time, a reminder to report when a turn ends without one, and old context
+folded into a summary when the window fills. Tool-calling quality varies by
+model; if a model keeps mis-forming tool calls, try another (`qwen3-coder`,
+`gpt-oss:20b` and `glm-4.7-flash` all support tools in Ollama). Set
+`OLLAMA_CONTEXT_LENGTH` to at least `context_tokens` plus reply room, or Ollama
+silently truncates the conversation. Native workers are always headless (no
+TUI to attach to): `copse agent peek` shows each turn's prompt, tool calls and
+answer, and `copse send` talks to them.
+
+### Claude Code on another backend
+
+Claude Code itself can be pointed at any Anthropic-compatible endpoint. A
+profile's `env.NAME: value` lines set that up, and everything else about the
+worker (hooks, permissions, the MCP tools) stays the same:
+
+```markdown
+---
+name: developer-glm
+provider: claude
+model: glm-4.7-flash
+env.ANTHROPIC_BASE_URL: https://api.z.ai/api/anthropic
+env.ANTHROPIC_AUTH_TOKEN: ${ZAI_API_KEY}     # copse doesn't expand this: put the key itself here, or in ~/.copse/agents
+env.ANTHROPIC_API_KEY:
+---
+```
+
+Ollama (0.14+) serves the Anthropic API too: `env.ANTHROPIC_BASE_URL:
+http://localhost:11434` with `env.ANTHROPIC_AUTH_TOKEN: ollama`. Anthropic
+documents this route as unsupported for non-Claude models, and each vendor
+documents its own quirks (no prompt caching on most, smaller context windows),
+so prefer the native provider for open-weight models and keep this route for
+Claude itself behind a gateway.
 
 ## Google Antigravity
 
