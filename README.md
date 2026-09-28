@@ -133,6 +133,7 @@ your own status line prints, so what you see doesn't change.
 | `copse autopilot [on\|off\|check]` | the goal's progress; turn autopilot on or off; run the checks now |
 | `copse transfer [REPO] [--from SESSION] [-b BRANCH]` | move a scratch session's work into a real repo |
 | `copse ls [--all]` | workspaces and agents |
+| `copse history [--limit N] [--kind K] [--all]` | durable log of worker results, reviews, merges and milestone checks |
 | `copse watch [--all] [--once]` | the dashboard on its own (the same view as the sidebar): enter attaches, `p` peeks |
 | `copse attach / cd / open [WS]` | tmux session / path / editor |
 | `copse status / diff [--stat] [WS]` | compared with the base branch (committed + uncommitted) |
@@ -144,6 +145,23 @@ your own status line prints, so what you see doesn't change.
 | `copse agent spawn/kill/peek/profiles` | manage agents |
 
 With no `WS` argument, commands act on the workspace you're in.
+
+## Token usage and history
+
+Every Claude Code agent's token usage (input, cached, output, model) is read
+straight from its own transcript JSONL under `~/.claude/projects/`, summed
+incrementally so it's cheap to check often. It shows up:
+
+- in the sidebar and `copse ls`, next to each agent (e.g. `191k tok`)
+- appended to the result a worker or reviewer forwards to its supervisor
+  (e.g. `tokens: 182k in (160k cached) · 9k out · sonnet`)
+- in `copse history`, per row, with a total across the rows shown
+
+`copse history` is an append-only log of what happened: a worker's report, a
+reviewer's verdict, a successful merge, and a milestone check, each with its
+tokens. Unlike `copse ls`, it survives session pruning (`copse prune`), so
+it's the place to look for what an agent did after its session is gone. It's
+capped at 5000 rows per repo, oldest dropped first.
 
 ## Repo config: `.copse/config.json`
 

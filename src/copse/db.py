@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS agents (
     task TEXT,                     -- the prompt it was started with (for resuming)
     session_ref TEXT,              -- the CLI's own session id (claude --resume)
     stop_blocked INTEGER,          -- copse's Stop hook just kept it going (for CLIs that don't say)
-    headless INTEGER               -- runs `claude -p` turn by turn (agents.run_headless)
+    headless INTEGER,              -- runs `claude -p` turn by turn (agents.run_headless)
+    transcript_path TEXT           -- Claude Code's own JSONL transcript for session_ref (copse.usage)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,6 +111,37 @@ CREATE TABLE IF NOT EXISTS native_subagents (
     started_at REAL,
     ended_at REAL
 );
+-- Incremental token-usage cache for one transcript JSONL file (a session's own,
+-- or one of its subagents'), keyed by path so repeated reads only parse new
+-- bytes. See copse.usage.
+CREATE TABLE IF NOT EXISTS usage_cache (
+    path TEXT PRIMARY KEY,
+    size INTEGER NOT NULL,          -- bytes already parsed
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    model TEXT,
+    last_message_id TEXT,           -- dedupes a message streamed across several lines
+    updated_at REAL NOT NULL
+);
+-- Durable, append-only record of what agents did. Deliberately has no foreign
+-- keys: session pruning (sessions.py) deletes agents (and cascades reviews and
+-- milestones with them), but history must survive that. Capped per repo_root
+-- instead (see copse.history).
+CREATE TABLE IF NOT EXISTS history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_root TEXT NOT NULL,
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,             -- worker_result | review | merge | check | milestone
+    agent_id TEXT,
+    branch TEXT,
+    profile TEXT,
+    task TEXT,                      -- first ~300 chars of the task/summary
+    result TEXT,                    -- trimmed result/verdict text
+    tokens TEXT                     -- JSON usage summary, or NULL
+);
+CREATE INDEX IF NOT EXISTS history_repo_root_id ON history(repo_root, id);
 """
 
 
@@ -144,6 +176,7 @@ class Agent:
     session_ref: str | None = None
     stop_blocked: int | None = None
     headless: int | None = None
+    transcript_path: str | None = None
 
 
 @dataclass
@@ -182,6 +215,20 @@ class Review:
     approved: int
     summary: str | None
     created_at: float
+
+
+@dataclass
+class HistoryEntry:
+    id: int
+    repo_root: str
+    ts: float
+    kind: str
+    agent_id: str | None
+    branch: str | None
+    profile: str | None
+    task: str | None
+    result: str | None
+    tokens: str | None
 
 
 @dataclass
@@ -229,7 +276,8 @@ class DB:
         """Bring databases created by older versions up to the current schema."""
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(agents)")}
         for col, kind in (("status_since", "REAL"), ("task", "TEXT"), ("session_ref", "TEXT"),
-                          ("stop_blocked", "INTEGER"), ("headless", "INTEGER")):
+                          ("stop_blocked", "INTEGER"), ("headless", "INTEGER"),
+                          ("transcript_path", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
 
@@ -285,10 +333,11 @@ class DB:
             c.execute(
                 "INSERT INTO agents (id, workspace_id, profile, provider, parent_id, mode, "
                 "status, tmux_window, result, created_at, status_since, task, session_ref, "
-                "headless) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "headless, transcript_path) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (a.id, a.workspace_id, a.profile, a.provider, a.parent_id, a.mode,
                  a.status, a.tmux_window, a.result, a.created_at,
-                 a.status_since or a.created_at, a.task, a.session_ref, a.headless),
+                 a.status_since or a.created_at, a.task, a.session_ref, a.headless,
+                 a.transcript_path),
             )
 
     def get_agent(self, agent_id: str) -> Agent | None:
@@ -521,3 +570,64 @@ class DB:
             sub = _load(NativeSubagent, r)
             out.setdefault(sub.parent_id, []).append(sub)
         return out
+
+    # -- usage cache (copse.usage) --------------------------------------------
+
+    def get_usage_cache(self, path: str) -> sqlite3.Row | None:
+        return self.conn.execute("SELECT * FROM usage_cache WHERE path=?", (path,)).fetchone()
+
+    def set_usage_cache(self, path: str, size: int, input_tokens: int, output_tokens: int,
+                        cache_read_tokens: int, cache_creation_tokens: int,
+                        model: str | None, last_message_id: str | None) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO usage_cache (path, size, input_tokens, output_tokens, "
+                "cache_read_tokens, cache_creation_tokens, model, last_message_id, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(path) DO UPDATE SET size=excluded.size, "
+                "input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, "
+                "cache_read_tokens=excluded.cache_read_tokens, "
+                "cache_creation_tokens=excluded.cache_creation_tokens, model=excluded.model, "
+                "last_message_id=excluded.last_message_id, updated_at=excluded.updated_at",
+                (path, size, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                 model, last_message_id, time.time()),
+            )
+
+    # -- history (copse.history) ----------------------------------------------
+
+    def add_history(self, repo_root: str, kind: str, *, agent_id: str | None = None,
+                    branch: str | None = None, profile: str | None = None,
+                    task: str | None = None, result: str | None = None,
+                    tokens: str | None = None) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO history (repo_root, ts, kind, agent_id, branch, profile, task, "
+                "result, tokens) VALUES (?,?,?,?,?,?,?,?,?)",
+                (repo_root, time.time(), kind, agent_id, branch, profile, task, result, tokens),
+            )
+
+    def list_history(self, repo_root: str | None = None, kind: str | None = None,
+                     limit: int = 50) -> list[HistoryEntry]:
+        clauses, args = [], []
+        if repo_root:
+            clauses.append("repo_root=?")
+            args.append(repo_root)
+        if kind:
+            clauses.append("kind=?")
+            args.append(kind)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.conn.execute(
+            f"SELECT * FROM history {where} ORDER BY id DESC LIMIT ?", (*args, limit)
+        )
+        return [_load(HistoryEntry, r) for r in rows]
+
+    def prune_history(self, repo_root: str, cap: int) -> int:
+        """Keep only the ``cap`` newest rows for ``repo_root``. Returns how many
+        were dropped."""
+        with self.tx() as c:
+            cur = c.execute(
+                "DELETE FROM history WHERE repo_root=? AND id NOT IN "
+                "(SELECT id FROM history WHERE repo_root=? ORDER BY id DESC LIMIT ?)",
+                (repo_root, repo_root, cap),
+            )
+            return cur.rowcount

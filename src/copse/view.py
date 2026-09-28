@@ -7,6 +7,7 @@ import os
 import time
 
 from copse import agents, git
+from copse import usage as usage_mod
 from copse.db import DB, NATIVE_SUBAGENT_STALE, Agent, NativeSubagent, Workspace
 
 # How long a *finished* native subagent still shows "done" in the sidebar
@@ -65,6 +66,7 @@ def _visible_native_subagents(subs: list[NativeSubagent], now: float) -> list[di
 def agent_entry(db: DB, a: Agent, *, detail: bool = False,
                 native_subagents: list[NativeSubagent] | None = None,
                 now: float | None = None) -> dict:
+    u = usage_mod.agent_usage(db, a)
     if not agents.runs_process(a):
         status = a.status  # a supervisor's own subagent: no terminal to check
     elif agents.is_alive(a):
@@ -74,6 +76,8 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
         status = "exited"
     entry = {"id": a.id, "profile": a.profile, "provider": a.provider,
              "status": status, "mode": a.mode}
+    if u:
+        entry["tokens"] = usage_mod.short_summary(u)
     if detail:
         subs = db.native_subagents(a.id) if native_subagents is None else native_subagents
         visible = _visible_native_subagents(subs, now if now is not None else time.time())
