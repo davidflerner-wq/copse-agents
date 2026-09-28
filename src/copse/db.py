@@ -129,8 +129,10 @@ CREATE TABLE IF NOT EXISTS native_subagents (
 );
 -- Pre-built worktrees (see pool.py): checked out on a placeholder branch at
 -- the base branch's tip, with `copy` files and `setup` already applied, so
--- `create` can claim one instead of doing that work live. Never exposed as a
--- workspace: find_workspaces/view.snapshot don't touch this table.
+-- `create` can claim one instead of doing that work live. A claim keeps the
+-- entry's path and port_base forever (never moved); it just renames the
+-- branch. Never exposed as a workspace: find_workspaces/view.snapshot don't
+-- touch this table.
 CREATE TABLE IF NOT EXISTS pool_entries (
     path TEXT PRIMARY KEY,
     repo_root TEXT NOT NULL,
@@ -138,7 +140,18 @@ CREATE TABLE IF NOT EXISTS pool_entries (
     base_sha TEXT NOT NULL,
     branch TEXT NOT NULL,           -- the placeholder branch, e.g. copse-pool/<token>
     fingerprint TEXT NOT NULL,      -- setup commands + lockfile contents at base_sha
+    port_base INTEGER,              -- reserved for this entry so setup's env matches claim
+    ready INTEGER NOT NULL DEFAULT 0,  -- 0 while fill_one is still building it
     created_at REAL NOT NULL
+);
+-- A pool fill's most recent setup failure for a (repo, base), so fill()
+-- backs off instead of retrying (and failing) every time something triggers
+-- a refill. See pool.FAILURE_BACKOFF.
+CREATE TABLE IF NOT EXISTS pool_failures (
+    repo_root TEXT NOT NULL,
+    base_branch TEXT NOT NULL,
+    failed_at REAL NOT NULL,
+    PRIMARY KEY (repo_root, base_branch)
 );
 """
 
@@ -242,6 +255,8 @@ class PoolEntry:
     base_sha: str
     branch: str
     fingerprint: str
+    port_base: int | None
+    ready: int
     created_at: float
 
 
@@ -285,6 +300,10 @@ class DB:
                           ("done_when", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
+        pool_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(pool_entries)")}
+        for col, kind in (("port_base", "INTEGER"), ("ready", "INTEGER NOT NULL DEFAULT 1")):
+            if col not in pool_cols:
+                self.conn.execute(f"ALTER TABLE pool_entries ADD COLUMN {col} {kind}")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -328,7 +347,10 @@ class DB:
             c.execute("DELETE FROM workspaces WHERE id=?", (ws_id,))
 
     def used_port_bases(self) -> set[int]:
-        rows = self.conn.execute("SELECT port_base FROM workspaces WHERE port_base IS NOT NULL")
+        rows = self.conn.execute(
+            "SELECT port_base FROM workspaces WHERE port_base IS NOT NULL "
+            "UNION SELECT port_base FROM pool_entries WHERE port_base IS NOT NULL"
+        )
         return {r[0] for r in rows}
 
     # -- worktree pool -------------------------------------------------------
@@ -336,37 +358,44 @@ class DB:
     def add_pool_entry(self, e: PoolEntry) -> None:
         with self.tx() as c:
             c.execute(
-                "INSERT INTO pool_entries VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO pool_entries (path, repo_root, base_branch, base_sha, branch, "
+                "fingerprint, port_base, ready, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
                 (e.path, e.repo_root, e.base_branch, e.base_sha, e.branch,
-                 e.fingerprint, e.created_at),
+                 e.fingerprint, e.port_base, e.ready, e.created_at),
             )
 
-    def pool_entries(self, repo_root: str, base_branch: str | None = None) -> list[PoolEntry]:
+    def mark_pool_ready(self, path: str) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE pool_entries SET ready=1 WHERE path=?", (path,))
+
+    def pool_entries(
+        self, repo_root: str, base_branch: str | None = None, ready_only: bool = True
+    ) -> list[PoolEntry]:
+        clauses, params = ["repo_root=?"], [repo_root]
         if base_branch:
-            rows = self.conn.execute(
-                "SELECT * FROM pool_entries WHERE repo_root=? AND base_branch=? "
-                "ORDER BY created_at",
-                (repo_root, base_branch),
-            )
-        else:
-            rows = self.conn.execute(
-                "SELECT * FROM pool_entries WHERE repo_root=? ORDER BY created_at", (repo_root,)
-            )
+            clauses.append("base_branch=?")
+            params.append(base_branch)
+        if ready_only:
+            clauses.append("ready=1")
+        rows = self.conn.execute(
+            f"SELECT * FROM pool_entries WHERE {' AND '.join(clauses)} ORDER BY created_at",
+            params,
+        )
         return [_load(PoolEntry, r) for r in rows]
 
     def count_pool_entries(self, repo_root: str, base_branch: str) -> int:
         row = self.conn.execute(
-            "SELECT COUNT(*) FROM pool_entries WHERE repo_root=? AND base_branch=?",
+            "SELECT COUNT(*) FROM pool_entries WHERE repo_root=? AND base_branch=? AND ready=1",
             (repo_root, base_branch),
         ).fetchone()
         return int(row[0])
 
     def take_pool_entry(self, repo_root: str, base_branch: str) -> PoolEntry | None:
-        """Atomically claim (remove and return) the oldest matching entry, if
-        any, so two concurrent creates never claim the same one."""
+        """Atomically claim (remove and return) the oldest matching ready
+        entry, if any, so two concurrent creates never claim the same one."""
         with self.tx() as c:
             row = c.execute(
-                "SELECT * FROM pool_entries WHERE repo_root=? AND base_branch=? "
+                "SELECT * FROM pool_entries WHERE repo_root=? AND base_branch=? AND ready=1 "
                 "ORDER BY created_at LIMIT 1",
                 (repo_root, base_branch),
             ).fetchone()
@@ -378,6 +407,28 @@ class DB:
     def delete_pool_entry(self, path: str) -> None:
         with self.tx() as c:
             c.execute("DELETE FROM pool_entries WHERE path=?", (path,))
+
+    def record_pool_failure(self, repo_root: str, base_branch: str) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO pool_failures (repo_root, base_branch, failed_at) VALUES (?,?,?) "
+                "ON CONFLICT(repo_root, base_branch) DO UPDATE SET failed_at=excluded.failed_at",
+                (repo_root, base_branch, time.time()),
+            )
+
+    def last_pool_failure(self, repo_root: str, base_branch: str) -> float | None:
+        row = self.conn.execute(
+            "SELECT failed_at FROM pool_failures WHERE repo_root=? AND base_branch=?",
+            (repo_root, base_branch),
+        ).fetchone()
+        return float(row[0]) if row else None
+
+    def clear_pool_failure(self, repo_root: str, base_branch: str) -> None:
+        with self.tx() as c:
+            c.execute(
+                "DELETE FROM pool_failures WHERE repo_root=? AND base_branch=?",
+                (repo_root, base_branch),
+            )
 
     # -- agents ------------------------------------------------------------
 

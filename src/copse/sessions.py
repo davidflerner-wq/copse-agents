@@ -91,8 +91,11 @@ def enforce(db: DB, repo_root: str, now: float | None = None) -> int:
             _forget(db, s)
             dropped += 1
     try:
-        pool.trim(db, repo_root)
-    except git.GitError:
+        # Sweeping and trimming happen in the detached fill process, so a
+        # large trim's rmtree never blocks whoever's calling enforce (e.g.
+        # `copse start`).
+        pool.fill_in_background(repo_root)
+    except (git.GitError, ValueError, OSError):
         pass
     return dropped
 

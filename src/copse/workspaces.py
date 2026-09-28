@@ -12,6 +12,7 @@ Lifecycle:
 
 from __future__ import annotations
 
+import filecmp
 import glob
 import json
 import os
@@ -126,9 +127,14 @@ def _next_port_base(db: DB) -> int:
     return port
 
 
-def _copy_local_files(repo_root: str, dest: str, patterns: list[str]) -> list[str]:
+def _copy_local_files(
+    repo_root: str, dest: str, patterns: list[str], overwrite_changed: bool = False
+) -> list[str]:
     """Copy gitignored/untracked files (``.env`` etc.) that a fresh checkout
-    lacks. Never overwrites a file that already exists in the worktree."""
+    lacks. Never overwrites a directory, or a file whose content already
+    matches. With ``overwrite_changed`` (a pool claim, where the file was
+    copied whenever the entry was built and the root's copy may have moved on
+    since), a file that already exists but differs is overwritten too."""
     copied = []
     for pattern in patterns:
         for src in glob.glob(os.path.join(repo_root, pattern), recursive=True):
@@ -137,6 +143,14 @@ def _copy_local_files(repo_root: str, dest: str, patterns: list[str]) -> list[st
                 continue
             target = os.path.join(dest, rel)
             if os.path.exists(target):
+                if (
+                    overwrite_changed
+                    and os.path.isfile(src)
+                    and os.path.isfile(target)
+                    and not filecmp.cmp(src, target, shallow=False)
+                ):
+                    shutil.copy2(src, target)
+                    copied.append(rel)
                 continue
             os.makedirs(os.path.dirname(target), exist_ok=True)
             if os.path.isdir(src):
@@ -168,7 +182,7 @@ def run_commands(commands: list[str], cwd: str, env: dict[str, str]) -> SetupRes
 @dataclass
 class Created:
     workspace: Workspace
-    how: str               # "new", "existing" or "remote" branch
+    how: str               # "new", "existing", "remote" branch, or "pool"
     start_point: str
     copied: list[str]
     setup: SetupResult | None
@@ -194,36 +208,53 @@ def create(
         raise WorkspaceError(f"branch {branch!r} is the base branch; pick a new branch name")
 
     name = _unique_name(db, repo_root, branch)
-    path = str(worktrees_dir() / _repo_slug(repo_root) / branch)
-    if os.path.exists(path):
-        raise WorkspaceError(f"{path} already exists; remove it or choose another branch")
 
     start_point = start or git.resolve_start_point(
         repo_root, base, cfg.fetch if fetch is None else fetch
     )
     start_sha = git.out(["rev-parse", start_point], repo_root)
 
-    # A pool entry is only a safe substitute for `git worktree add` when the
-    # new branch would start exactly at the base branch's current tip -- the
-    # same thing a pool fill builds from. That's the common case (a worker's
-    # base is the caller's own branch), but not e.g. create_from_pr, where
+    # A pool entry is only a safe substitute for `git worktree add` when
+    # `branch` doesn't already exist locally or on origin -- claiming would
+    # otherwise reset an existing branch's history onto the pool's base sha --
+    # and when the new branch is meant to start at the base branch's current
+    # tip, the same thing a pool fill builds from: either the caller didn't
+    # ask for a specific `start` at all (the common case -- a worker's base
+    # is the caller's own branch), or an explicit `start` happens to resolve
+    # to the local base branch's own tip. Not, e.g., create_from_pr, where
     # `start` is a fetched PR head unrelated to `base`.
     claimed = None
-    if run_setup:
+    if (
+        run_setup
+        and not git.branch_exists(repo_root, branch)
+        and not git.remote_branch_exists(repo_root, branch)
+        and (
+            start is None
+            or (
+                git.branch_exists(repo_root, base)
+                and start_sha == git.out(["rev-parse", base], repo_root)
+            )
+        )
+    ):
         from copse import pool
 
-        base_now = git.resolve_start_point(repo_root, base, False)
-        if start_sha == git.out(["rev-parse", base_now], repo_root):
-            candidate = pool.claim(db, repo_root, base)
-            if candidate is not None:
-                try:
-                    pool.move_into_place(repo_root, candidate, path, branch, start_sha)
-                    claimed = candidate
-                except (git.GitError, OSError):
-                    pool.discard(repo_root, candidate, dest=path)
-                    claimed = None
+        candidate = pool.claim(db, repo_root, base)
+        if candidate is not None:
+            try:
+                pool.rebind(repo_root, candidate, branch, start_sha)
+                claimed = candidate
+            except (git.GitError, OSError):
+                pool.discard(repo_root, candidate)
+                claimed = None
 
-    how = "pool" if claimed is not None else git.add_worktree(repo_root, path, branch, start_point)
+    if claimed is not None:
+        path = claimed.path
+        how = "pool"
+    else:
+        path = str(worktrees_dir() / _repo_slug(repo_root) / branch)
+        if os.path.exists(path):
+            raise WorkspaceError(f"{path} already exists; remove it or choose another branch")
+        how = git.add_worktree(repo_root, path, branch, start_point)
     git.set_base(repo_root, branch, base)
 
     ws = Workspace(
@@ -234,23 +265,26 @@ def create(
         branch=branch,
         base_branch=base,
         path=path,
-        port_base=_next_port_base(db),
+        port_base=(
+            claimed.port_base if claimed is not None and claimed.port_base is not None
+            else _next_port_base(db)
+        ),
         tmux_session=_session_name(repo_root, name),
         created_at=time.time(),
     )
     db.add_workspace(ws)
 
-    copied = _copy_local_files(repo_root, path, cfg.copy)
-
     if claimed is not None:
         from copse import pool
 
+        copied = _copy_local_files(repo_root, path, cfg.copy, overwrite_changed=True)
         if cfg.setup and pool.fingerprint(repo_root, start_sha, cfg) != claimed.fingerprint:
             setup = run_commands(cfg.setup, path, workspace_env(ws))
         else:
             setup = None
         pool.fill_in_background(repo_root)
     else:
+        copied = _copy_local_files(repo_root, path, cfg.copy)
         setup = run_commands(cfg.setup, path, workspace_env(ws)) if run_setup and cfg.setup else None
     return Created(ws, how, start_point, copied, setup)
 
