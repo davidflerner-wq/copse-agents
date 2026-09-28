@@ -124,6 +124,10 @@ class ClaudeCode(Provider):
                 # A turn that ends on an API error (e.g. the usage limit) runs
                 # this instead of Stop.
                 "StopFailure": self._hook("stop-failure"),
+                # The agent's own built-in subagents (its Agent tool), so the
+                # sidebar can nest them under it.
+                "SubagentStart": self._hook("subagent-start"),
+                "SubagentStop": self._hook("subagent-stop"),
             },
             # Claude Code only tells status lines how much of the plan's usage
             # is spent. copse's records that, then runs the person's own

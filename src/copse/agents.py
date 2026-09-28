@@ -406,6 +406,8 @@ def pause(db: DB, root_id: str) -> list[Agent]:
             sessions.add(ws.tmux_session)
         if a.tmux_window:
             windows.append(a.tmux_window)
+        # Its own SubagentStop hooks will never fire once its process stops.
+        db.end_native_subagents(a.id)
         if a.mode != "interactive" and a.result is not None:
             db.set_status(a.id, "done")
         else:
@@ -708,6 +710,7 @@ def kill(db: DB, agent_id: str) -> None:
     agent = get(db, agent_id)
     if agent.tmux_window:
         tmux.kill_window(agent.tmux_window)
+    db.end_native_subagents(agent.id)
     db.delete_agent(agent.id)
 
 
@@ -932,6 +935,16 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             from copse import autopilot as pilot
 
             pilot.limit_reached(db, agent)
+    elif event == "subagent-start":
+        # A crash can skip SubagentStop, so this doesn't touch agent.status:
+        # the sidebar hides a subagent that's been "running" too long instead.
+        sub_id = payload.get("agent_id")
+        if sub_id:
+            db.start_native_subagent(str(sub_id), agent_id, payload.get("agent_type"))
+    elif event == "subagent-stop":
+        sub_id = payload.get("agent_id")
+        if sub_id:
+            db.stop_native_subagent(str(sub_id))
     return None
 
 
