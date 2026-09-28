@@ -406,22 +406,10 @@ def submit_review(approved: bool, summary: str) -> str:
     """Reviewers: call this once with your verdict. approved=true only if the
     branch can merge as is. summary: your findings, most severe first."""
     db = DB()
-    caller, ws = _caller(db)
-    if not caller or caller.mode != "review":
+    caller, _ = _caller(db)
+    if not caller:
         return "Only a reviewer started with request_review can submit a review."
-    sha = gates.head(ws)
-    db.add_review(ws.id, sha, caller.id, approved, summary)
-    if approved:
-        root = autopilot.root_of(db, caller.id)
-        db.bump_progress(root)
-    verdict = "APPROVED" if approved else "CHANGES REQUESTED"
-    text = f"Review of {ws.branch} (workspace {ws.id}) at {sha[:8]}: {verdict}\n\n{summary}"
-    handled = pipeline.on_review(db, caller, ws, approved, summary)
-    agents.report_result(db, caller.id, text, forward=not handled)
-    agents.close_later(caller.id)
-    if handled:
-        return f"Review recorded ({verdict}); copse takes it from here. You're done."
-    return f"Review recorded ({verdict}) and sent to your supervisor. You're done."
+    return agents.submit_review(db, caller.id, approved, summary)
 
 
 @mcp.tool()

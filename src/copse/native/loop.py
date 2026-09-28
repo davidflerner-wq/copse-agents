@@ -134,11 +134,13 @@ class NativeAgent:
 
     def _assistant(self, reply: Reply) -> None:
         self.messages.append({"role": "assistant", "content": reply.text, "tool_calls": reply.tool_calls})
+        # ``message`` has the shape copse.usage reads from Claude Code's own
+        # transcripts, so a native worker's usage shows up like any other.
         self._record({"type": "assistant", "content": reply.text, "stop_reason": reply.stop_reason,
                       "tool_calls": [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in reply.tool_calls],
-                      "model": reply.model,
-                      "usage": {"input_tokens": reply.usage.input_tokens, "output_tokens": reply.usage.output_tokens,
-                                "cache_read_tokens": reply.usage.cache_read_tokens}})
+                      "message": {"id": f"native-{self.steps}", "model": reply.model, "usage": {
+                          "input_tokens": reply.usage.input_tokens, "output_tokens": reply.usage.output_tokens,
+                          "cache_read_input_tokens": reply.usage.cache_read_tokens}}})
 
     def _tool(self, call: ToolCall, result: ToolResult) -> None:
         self.messages.append({"role": "tool", "tool_call_id": call.id, "name": call.name,
@@ -157,6 +159,38 @@ class NativeAgent:
         self.transcript.parent.mkdir(parents=True, exist_ok=True)
         with self.transcript.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
+
+    # -- saving the conversation (so a paused worker resumes where it was) ---
+
+    def save(self, path: Path | str) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "messages": [_to_json(m) for m in self.messages],
+            "summary_lines": self._summary_lines, "folded": self.folded, "steps": self.steps,
+            "usage": [self.usage.input_tokens, self.usage.output_tokens, self.usage.cache_read_tokens],
+            "model": self.model,
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(path)
+
+    def load(self, path: Path | str) -> bool:
+        """Restore a saved conversation; False (and nothing changed) if
+        ``path`` is missing or unreadable."""
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            messages = [_from_json(m) for m in data["messages"]]
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+        self.messages = messages
+        self._summary_lines = list(data.get("summary_lines") or [])
+        self.folded = int(data.get("folded") or 0)
+        self.steps = int(data.get("steps") or 0)
+        u = data.get("usage") or [0, 0, 0]
+        self.usage = Usage(*[int(x) for x in u])
+        self.model = data.get("model")
+        return True
 
     # -- context -------------------------------------------------------------
 
@@ -214,6 +248,20 @@ class NativeAgent:
             elif m["role"] == "user":
                 lines.append(f"- message: {_short(m['content'], 300)}")
         return lines
+
+def _to_json(m: dict) -> dict:
+    out = dict(m)
+    if "tool_calls" in out:
+        out["tool_calls"] = [{"id": c.id, "name": c.name, "arguments": c.arguments} for c in out["tool_calls"]]
+    return out
+
+
+def _from_json(m: dict) -> dict:
+    out = dict(m)
+    if "tool_calls" in out:
+        out["tool_calls"] = [ToolCall(c["id"], c["name"], c.get("arguments") or {}) for c in out["tool_calls"]]
+    return out
+
 
 def _size(m: dict) -> int:
     n = len(m.get("content") or "")

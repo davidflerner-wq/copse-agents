@@ -193,7 +193,8 @@ def spawn(
     provider = get_provider(provider_name or profile.provider)
     agent_id = new_id()
     # Headless is a Claude Code mode; other CLIs ignore the profile field.
-    headless = bool(profile.headless and provider.name == "claude")
+    # copse's own loop (native) has no TUI at all, so it always runs that way.
+    headless = bool(profile.headless and provider.name == "claude") or provider.name == "native"
 
     # Stored as the agent's task: the raw text for a handoff/assign worker (so
     # a reviewer reading it later isn't given WORKER_FOOTER or the /goal
@@ -586,7 +587,8 @@ def _launch_headless(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     status = "processing" if db.pending_count(agent.id) else "idle"
     db.set_status(agent.id, status)
     agent.status = status
-    argv = [*copse_invocation(), "_headless", agent.id, *(["--resume", resume] if resume else [])]
+    runner = get_provider(agent.provider).runner
+    argv = [*copse_invocation(), runner, agent.id, *(["--resume", resume] if resume else [])]
     _open_window(db, agent, ws, f"{agent.profile}-{agent.id[:4]}", argv, watch_pane)
 
 
@@ -755,7 +757,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True) -> list[Agent]:
         if ws is None or not os.path.isdir(ws.path):
             continue
         provider = get_provider(a.provider)
-        ref = a.session_ref if provider.name in ("claude", "antigravity") and a.session_ref else None
+        ref = a.session_ref if provider.name in ("claude", "antigravity", "native") and a.session_ref else None
         if ref and not provider.can_resume(ref):
             ref = None  # nothing was ever said in it: start that agent fresh
         if ref:
@@ -1202,6 +1204,30 @@ def collect(db: DB, parent_id: str | None, worker_id: str) -> None:
     copy that forwarding may have queued in the parent's inbox."""
     if parent_id:
         db.drop_pending(parent_id, worker_id)
+
+
+def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
+    """A reviewer's verdict: recorded for the merge gate, handed to the
+    pipeline if the branch is piped, else sent to the supervisor. The
+    reviewer is closed shortly after."""
+    from copse import autopilot, gates, pipeline
+
+    caller = db.get_agent(caller_id)
+    ws = db.get_workspace(caller.workspace_id) if caller else None
+    if not caller or caller.mode != "review" or ws is None:
+        return "Only a reviewer started with request_review can submit a review."
+    sha = gates.head(ws)
+    db.add_review(ws.id, sha, caller.id, approved, summary)
+    if approved:
+        db.bump_progress(autopilot.root_of(db, caller.id))
+    verdict = "APPROVED" if approved else "CHANGES REQUESTED"
+    text = f"Review of {ws.branch} (workspace {ws.id}) at {sha[:8]}: {verdict}\n\n{summary}"
+    handled = pipeline.on_review(db, caller, ws, approved, summary)
+    report_result(db, caller.id, text, forward=not handled)
+    close_later(caller.id)
+    if handled:
+        return f"Review recorded ({verdict}); copse takes it from here. You're done."
+    return f"Review recorded ({verdict}) and sent to your supervisor. You're done."
 
 
 def close_later(agent_id: str, delay: float = 5.0) -> None:

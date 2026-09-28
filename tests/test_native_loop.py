@@ -21,7 +21,8 @@ from copse.native.tools import ToolResult, clip
 
 class FakeEndpoint:
     """Serves scripted replies in order, recording every request body. A
-    reply is a dict (sent as JSON with 200), or an int status (an error)."""
+    reply is a dict (sent as JSON with 200), an int status (an error), or a
+    callable given the request that returns one of those."""
 
     def __init__(self):
         self.replies: list = []
@@ -36,6 +37,8 @@ class FakeEndpoint:
                 outer.paths.append(self.path)
                 outer.headers = {k.lower(): v for k, v in self.headers.items()}
                 reply = outer.replies.pop(0) if outer.replies else 500
+                if callable(reply):
+                    reply = reply(outer.requests[-1])
                 if isinstance(reply, int):
                     self.send_response(reply)
                     self.send_header("Content-Type", "application/json")
@@ -281,7 +284,7 @@ def test_transcript_records_every_event(fake, tmp_path):
     a.run("go")
     entries = [json.loads(l) for l in log.read_text().splitlines()]
     assert [e["type"] for e in entries] == ["user", "assistant", "tool", "assistant"]
-    assert entries[1]["tool_calls"][0]["name"] == "Bash" and entries[1]["usage"]["input_tokens"] == 10
+    assert entries[1]["tool_calls"][0]["name"] == "Bash" and entries[1]["message"]["usage"]["input_tokens"] == 10
     assert entries[2]["content"] == "hi" and all("ts" in e for e in entries)
 
 

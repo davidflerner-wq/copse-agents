@@ -874,6 +874,14 @@ def headless_cmd(agent_id: str, resume: Optional[str] = typer.Option(None)) -> N
     raise typer.Exit(agents.run_headless(DB(), agent_id, resume))
 
 
+@app.command("_native", hidden=True)
+def _native(agent_id: str, resume: Optional[str] = typer.Option(None, "--resume")):
+    """A native worker's pane: copse's own agent loop (copse.native.runner)."""
+    from copse.native import runner
+
+    raise typer.Exit(runner.run_native(DB(), agent_id, resume))
+
+
 @app.command("_ended", hidden=True)
 def ended_cmd(agent_id: str) -> None:
     import signal

@@ -14,7 +14,7 @@ built-in profiles shipped with copse.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
 
@@ -36,6 +36,13 @@ class Profile:
     effort: str | None = None                # --effort low|medium|high|xhigh|max
     headless: bool = False                   # run with `claude -p`, turn by turn
     tool_search: bool | None = None          # Claude Code's deferred tool loading (None: off for workers)
+    # The native provider (copse's own loop; see copse.native): where the model is.
+    api: str | None = None                   # openai (chat completions) | anthropic (messages)
+    base_url: str | None = None              # e.g. http://localhost:11434/v1
+    api_key_env: str | None = None           # name of the variable holding the key, if one is needed
+    context_tokens: int | None = None        # the model's window, less room for its reply
+    # Extra environment for the agent's process, from ``env.NAME: value`` lines.
+    env: dict[str, str] = field(default_factory=dict)
 
 
 _COMMENT = re.compile(r"(?:^|\s)#.*$")
@@ -66,6 +73,13 @@ def _list(value: str | None) -> list[str] | None:
     return items or None
 
 
+def _int(value: str | None) -> int | None:
+    value = (value or "").strip().replace("_", "").replace(",", "")
+    if value.lower().endswith("k") and value[:-1].isdigit():
+        return int(value[:-1]) * 1000
+    return int(value) if value.isdigit() else None
+
+
 def _bool(value: str) -> bool:
     return value.strip().lower() in ('true', 'yes', 'on', '1')
 
@@ -94,6 +108,11 @@ def _parse(text: str, fallback_name: str) -> Profile:
         effort=meta.get("effort") or None,
         tool_search=_bool(meta.get('tool_search')) if meta.get('tool_search') else None,
         headless=_flag(meta.get("headless")),
+        api=meta.get("api") or None,
+        base_url=meta.get("base_url") or None,
+        api_key_env=meta.get("api_key_env") or None,
+        context_tokens=_int(meta.get("context_tokens")),
+        env={k[4:]: v for k, v in meta.items() if k.startswith("env.") and k[4:]},
     )
 
 

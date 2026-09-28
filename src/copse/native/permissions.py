@@ -20,6 +20,9 @@ import re
 import shlex
 
 READ_ONLY = {"Read", "Glob", "Grep"}
+# copse's own tools, as the native loop names them (the MCP server's names
+# are the same, prefixed mcp__copse__).
+COPSE_TOOLS = {"report_result", "submit_review", "send_message", "workspace_diff"}
 EDITS = {"Edit", "Write"}
 _RULE = re.compile(r"^(\w+)(?:\((.*)\))?$")
 _SEPARATORS = {"&&", "||", ";", "|", "&"}
@@ -36,7 +39,7 @@ class Permissions:
 
     def decide(self, tool: str, args: dict) -> str:
         """'allow', 'deny' or 'ask'."""
-        if tool.startswith("mcp__copse") or tool in READ_ONLY:
+        if tool.startswith("mcp__copse") or tool in COPSE_TOOLS or tool in READ_ONLY:
             return "allow"  # a Read(...) rule narrows nothing: reads are always fine
         if self.mode == "bypassPermissions" or self._allowed_by_rule(tool, args):
             return "allow"

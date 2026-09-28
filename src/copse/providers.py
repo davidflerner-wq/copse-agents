@@ -61,6 +61,10 @@ class Provider:
     # False for providers whose work happens outside copse (see Subagent):
     # no process, no tmux window; the caller records the result itself.
     launches_process = True
+    # The copse subcommand that drives this provider's agents from inside
+    # their pane, turn by turn, for providers with no TUI of their own
+    # (a headless Claude worker runs `copse _headless`; see agents).
+    runner = "_headless"
 
     def warmup(self, profile: Profile) -> str | None:
         """A message to send before the first prompt, for CLIs that need a
@@ -630,6 +634,27 @@ class Shell(Provider):
         return [os.environ.get("SHELL", "/bin/sh")]
 
 
+class Native(Provider):
+    """copse's own agent loop (copse.native): the model behind an OpenAI- or
+    Anthropic-compatible endpoint, with copse's tools called in-process.
+
+    Always headless: the pane runs ``copse _native <agent>``, which reports
+    status straight to the DB and takes queued messages between model calls,
+    so uses_hooks is true in the sense that matters (the status is the
+    agent's own word, never a guess from the screen)."""
+
+    name = "native"
+    uses_hooks = True
+    runner = "_native"
+
+    @staticmethod
+    def can_resume(session_id: str) -> bool:
+        return os.path.isfile(session_id)  # the saved conversation
+
+    def command(self, ctx: LaunchContext) -> list[str]:
+        raise RuntimeError("the native provider runs through `copse _native`, not a command line")
+
+
 class Subagent(Provider):
     """The supervisor's own Claude Code subagent (its Agent tool) does the work.
 
@@ -647,7 +672,7 @@ class Subagent(Provider):
 
 
 PROVIDERS: dict[str, Provider] = {
-    p.name: p for p in (ClaudeCode(), Codex(), Antigravity(), Shell(), Subagent())
+    p.name: p for p in (ClaudeCode(), Codex(), Antigravity(), Native(), Shell(), Subagent())
 }
 
 
