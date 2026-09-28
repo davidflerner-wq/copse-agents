@@ -13,12 +13,12 @@ from copse import agents, autopilot, tmux, workspaces
 from copse.db import Agent
 
 CLAUDE_IDLE = "⏺ Done.\n\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
-# Real Claude Code 2.1.283 layout: a spinner line above the input box while a
-# turn runs, e.g. "✻ Tomfoolering… (7m 22s · ↓ 35.0k tokens · thinking)".
-CLAUDE_BUSY = ("✻ Tomfoolering… (7m 22s · ↓ 35.0k tokens · thinking)\n\n"
-               "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n")
-CLAUDE_DONE = ("✻ Sautéed for 7m 49s · done 7:57 PM\n\n"
-              "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n")
+BOX = "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+# Real Claude Code 2.1.283 layout: a spinner line directly above the input
+# box (contiguous, no blank line) while a turn runs, e.g.
+# "✻ Tomfoolering… (7m 22s · ↓ 35.0k tokens · thinking)".
+CLAUDE_BUSY = "✻ Tomfoolering… (7m 22s · ↓ 35.0k tokens · thinking)\n" + BOX
+CLAUDE_DONE = "✻ Sautéed for 7m 49s · done 7:57 PM\n" + BOX
 LONG_AGO = time.time() - autopilot.IDLE_GRACE_SECONDS - 1
 
 

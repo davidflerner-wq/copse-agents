@@ -514,10 +514,9 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None) ->
     if not provider.uses_hooks:
         tmux.paste(agent.tmux_window, text)
         return "delivered"
-    db.enqueue(agent.id, text, sender_id)
-    pending = db.pending_count(agent.id)
+    message_id = db.enqueue(agent.id, text, sender_id)
     reconcile(db, agent)
-    if db.pending_count(agent.id) < pending:
+    if db.message_delivered(message_id):
         return "delivered"  # the idle correction above already flushed it
     return "delivered" if flush(db, agent.id) else "queued"
 

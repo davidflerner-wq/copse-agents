@@ -411,6 +411,14 @@ class DB:
         ).fetchone()
         return int(row[0])
 
+    def message_delivered(self, message_id: int) -> bool:
+        """Whether the specific message ``enqueue`` returned has since been
+        delivered (by ``pop_pending`` or a reconcile-triggered flush)."""
+        row = self.conn.execute(
+            "SELECT delivered_at FROM inbox WHERE id=?", (message_id,)
+        ).fetchone()
+        return bool(row and row[0] is not None)
+
     # -- autopilot -----------------------------------------------------------
 
     def get_autopilot(self, root_id: str) -> Autopilot | None:
