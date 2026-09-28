@@ -158,13 +158,14 @@ your own status line prints, so what you see doesn't change.
 | `copse transfer [REPO] [--from SESSION] [-b BRANCH]` | move a scratch session's work into a real repo |
 | `copse ls [--all]` | workspaces and agents |
 | `copse history [--limit N] [--kind K] [--all]` | durable log of worker results, reviews, merges and milestone checks |
-| `copse watch [--all] [--once]` | the dashboard on its own (the same view as the sidebar): enter attaches, `p` peeks |
+| `copse watch [--all] [--once]` | the dashboard on its own (the same view as the sidebar): enter attaches, `p` peeks, `x` closes |
 | `copse attach / cd / open [WS]` | tmux session / path / editor |
 | `copse status / diff [--stat] [WS]` | compared with the base branch (committed + uncommitted) |
 | `copse sync [--merge] [WS]` | rebase (or merge) the latest base into the branch |
 | `copse commit -m MSG / push / pr [WS]` | ship it |
 | `copse merge [--squash] [WS]` | merge into the base locally |
 | `copse rm WS [-f] [-D]` | remove the worktree; `-D` deletes the branch too, only if merged unless `-f` |
+| `copse close AGENT` / `copse close --exited` | hide an agent (or every stopped one) from the dashboard, stopping it if it's running; its worktree and branch stay |
 | `copse send AGENT MSG` | message an agent; waits in its inbox until it's idle |
 | `copse agent spawn/kill/peek/profiles` | manage agents |
 

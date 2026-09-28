@@ -538,6 +538,38 @@ def watch(
 
 
 @app.command()
+def close(
+    agent_id: Optional[str] = typer.Argument(None, help="Agent to close (an unambiguous prefix works)."),
+    exited: bool = typer.Option(False, "--exited", help="Close every agent that has stopped or finished."),
+    all_repos: bool = typer.Option(False, "--all", help="With --exited: every repo, not just this one."),
+) -> None:
+    """Hide agents from the dashboard for good, stopping any still running.
+
+    Their worktrees, branches and records stay; `copse ls` still lists them."""
+    db = DB()
+    if exited == bool(agent_id):
+        _fail("pass an agent id, or --exited")
+    panes = tmux.list_panes()
+    if agent_id:
+        was_running = agents.is_alive(_run(agents.get, db, agent_id), panes)
+        a = _run(agents.close, db, agent_id, panes)
+        typer.echo(f"✓ closed {a.id}" + (" (stopped it first)" if was_running else ""))
+        return
+    repo_root = None
+    if not all_repos:
+        try:
+            repo_root = git.main_repo_root(os.getcwd())
+        except git.GitError:
+            pass
+    alive = view.live_agents(db, panes)
+    closed = [a for ws in db.find_workspaces(repo_root) for a in db.list_agents(ws.id)
+              if a.dismissed_at is None and (a.id not in alive or a.status == "done")]
+    for a in closed:
+        agents.close(db, a.id, panes)
+    typer.echo(f"✓ closed {len(closed)} agent(s)" if closed else "nothing to close")
+
+
+@app.command()
 def attach(workspace: Optional[str] = typer.Argument(None)) -> None:
     """Attach to a workspace's tmux session."""
     _attach(_ws(DB(), workspace))

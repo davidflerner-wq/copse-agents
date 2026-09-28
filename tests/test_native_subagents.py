@@ -199,6 +199,7 @@ def test_snapshot_nests_running_and_recently_done_subagents_under_the_parent(db,
 
 
 def test_snapshot_hides_a_stale_running_subagent(db, ws, monkeypatch):
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)  # boss is actually running
     fake_agent(db, ws, agent_id="boss", mode="interactive", status="processing")
     agents.handle_hook(db, "boss", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
     later = time.time() + 3 * 3600
@@ -210,6 +211,7 @@ def test_snapshot_hides_a_stale_running_subagent(db, ws, monkeypatch):
 
 
 def test_snapshot_hides_a_subagent_that_finished_a_while_ago(db, ws, monkeypatch):
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)  # boss is actually running
     fake_agent(db, ws, agent_id="boss", mode="interactive", status="processing")
     agents.handle_hook(db, "boss", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
     agents.handle_hook(db, "boss", "subagent-stop", {"agent_id": "sub1", "agent_type": "Explore"})

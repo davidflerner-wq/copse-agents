@@ -15,7 +15,7 @@ import textwrap
 import time
 from dataclasses import dataclass
 
-from copse import tmux, view
+from copse import agents, tmux, view
 from copse.db import DB
 
 REFRESH_SECONDS = 2.0
@@ -206,8 +206,25 @@ def print_once(db: DB, repo_root: str | None, color: bool) -> str:
 
 # -- interactive ---------------------------------------------------------------
 
-HELP = ["↑↓ ⏎ open  p peek  q quit"]
+HELP = ["↑↓ ⏎ open  p peek  x close  q quit"]
 HELP_IN_TMUX = [*HELP, "prefix L: back from agent"]
+
+# Closing a running agent stops it, so it takes a second `x` on the same row
+# within this many seconds. A stopped one closes on the first press.
+CLOSE_CONFIRM_SECONDS = 4.0
+STOPPED = ("exited", "paused", "done")
+
+
+def close_request(agent: dict, armed: tuple[str, float] | None,
+                  now: float) -> tuple[bool, tuple[str, float] | None, str]:
+    """What an `x` press on ``agent``'s row does: (close it now, the new
+    armed state, a notice to show). ``armed`` is (agent id, when) from an
+    earlier press waiting for its confirmation."""
+    if agent["status"] in STOPPED:
+        return True, None, f"closed {agent['id'][:6]}"
+    if armed and armed[0] == agent["id"] and now - armed[1] <= CLOSE_CONFIRM_SECONDS:
+        return True, None, f"stopped and closed {agent['id'][:6]}"
+    return False, (agent["id"], now), "still running: x again to stop and close it"
 
 # Wheel-down: ncurses only defines this when built with mouse version > 1
 # (not always true, e.g. some macOS builds); the bit value itself is stable
@@ -379,6 +396,8 @@ def _loop(stdscr, repo_root: str | None) -> None:
     offset = 0
     lines: list[Line] = []
     stale = True
+    armed: tuple[str, float] | None = None
+    notice, notice_until = "", 0.0
     while True:
         h, w = stdscr.getmaxyx()
         if stale:
@@ -389,8 +408,10 @@ def _loop(stdscr, repo_root: str | None) -> None:
         rows = [i for i, ln in enumerate(lines) if ln.agent]
         selected = max(0, min(selected, len(rows) - 1))
 
-        help_ = [t for text in (HELP_IN_TMUX if os.environ.get("TMUX") else HELP)
-                 for t in _wrap(text, w - 1, "")]
+        texts = HELP_IN_TMUX if os.environ.get("TMUX") else HELP
+        if notice and time.time() < notice_until:
+            texts = [notice, *texts]
+        help_ = [t for text in texts for t in _wrap(text, w - 1, "")]
         top = (len(LOGO) + 1) if h >= 18 else 2
         raw_visible = max(0, h - top - 1 - len(help_))
         offset = clamp_scroll(offset, len(lines), raw_visible)
@@ -465,6 +486,17 @@ def _loop(stdscr, repo_root: str | None) -> None:
         elif rows and key == ord("p"):
             _peek(stdscr, lines[rows[selected]].agent, styles)
             stale = True
+        elif rows and key == ord("x"):
+            agent = lines[rows[selected]].agent
+            now = time.time()
+            close_now, armed, notice = close_request(agent, armed, now)
+            notice_until = now + CLOSE_CONFIRM_SECONDS
+            if close_now:
+                try:
+                    agents.close(db, agent["id"])
+                except agents.AgentError as e:
+                    notice = str(e)
+                stale = True
 
 
 def run(repo_root: str | None) -> None:

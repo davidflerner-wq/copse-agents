@@ -23,12 +23,22 @@ NATIVE_SUBAGENT_LINGER = 30
 # end_native_subagents (called from agents.pause/kill) may not have caught
 # up yet, so this is a display-side backstop.
 _PARENT_NOT_RUNNING = ("paused", "exited", "done")
+# How long a session root (a supervisor chat) whose terminal is gone still
+# shows as stopped before it leaves the sidebar, counted from its last status
+# change. It stays resumable (`copse continue`); it just stops cluttering the
+# sidebar once none of its workers is running either.
+STOPPED_ROOT_LINGER = NATIVE_SUBAGENT_LINGER
 
 
 def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False,
                     native_subagents: dict[str, list[NativeSubagent]] | None = None,
                     now: float | None = None,
-                    panes: dict[str, bool] | None = None) -> dict:
+                    panes: dict[str, bool] | None = None,
+                    agent_list: list[Agent] | None = None,
+                    alive: set[str] | None = None) -> dict:
+    """``agent_list`` limits the agents shown (default: all of ``ws``'s);
+    ``alive`` is the ids of the ones known to be running, when the caller
+    has already worked that out (see ``snapshot``)."""
     ahead = behind = dirty = None
     if ws.base_branch and os.path.isdir(ws.path):
         try:
@@ -48,8 +58,8 @@ def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False,
         "agents": [
             agent_entry(db, a, detail=detail,
                        native_subagents=None if native_subagents is None else native_subagents.get(a.id, []),
-                       now=now, panes=panes)
-            for a in db.list_agents(ws.id)
+                       now=now, panes=panes, alive=None if alive is None else a.id in alive)
+            for a in (db.list_agents(ws.id) if agent_list is None else agent_list)
         ],
     }
 
@@ -70,7 +80,8 @@ def _visible_native_subagents(subs: list[NativeSubagent], now: float) -> list[di
 def agent_entry(db: DB, a: Agent, *, detail: bool = False,
                 native_subagents: list[NativeSubagent] | None = None,
                 now: float | None = None,
-                panes: dict[str, bool] | None = None) -> dict:
+                panes: dict[str, bool] | None = None,
+                alive: bool | None = None) -> dict:
     # Usage is a display extra: a bad transcript must never break the sidebar.
     try:
         u = usage_mod.agent_usage(db, a)
@@ -79,7 +90,7 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
         u = None
     if not agents.runs_process(a):
         status = a.status  # a supervisor's own subagent: no terminal to check
-    elif agents.is_alive(a, panes):
+    elif agents.is_alive(a, panes) if alive is None else alive:
         a = agents.reconcile(db, a, samples=1)
         status = a.status
     else:
@@ -105,13 +116,61 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
     return entry
 
 
+def live_agents(db: DB, panes: dict[str, bool]) -> set[str]:
+    """Ids of every agent that is running. tmux reuses pane ids once its
+    server restarts (a reboot, `tmux kill-server`), so an old agent's stored
+    pane can now belong to a newer agent: only the newest agent recorded on a
+    pane can be the one running in it."""
+    everyone = db.list_agents()  # oldest first
+    owner = {a.tmux_window: a.id for a in everyone if a.tmux_window}
+    return {a.id for a in everyone
+            if agents.is_alive(a, panes) and (not a.tmux_window or owner[a.tmux_window] == a.id)}
+
+
+def _stopped_root(db: DB, a: Agent, alive: set[str], now: float) -> bool:
+    """A session root (a supervisor chat) whose terminal is gone, with none
+    of its workers still running, that has been stopped long enough to leave
+    the sidebar."""
+    if a.mode != "interactive" or a.parent_id or not agents.runs_process(a) or a.id in alive:
+        return False
+    members = agents.tree(db, a.id)
+    if any(m.id in alive for m in members[1:]):
+        return False  # its workers still show, so it does too
+    if now - max(a.status_since or 0, a.created_at) <= STOPPED_ROOT_LINGER:
+        return False
+    if a.status not in ("paused", "done"):
+        # It ended without pausing its session (agents.ended runs from inside
+        # the chat's own pane, so it never runs when tmux itself goes away).
+        # Record what agents.pause would have, so `copse continue` can bring
+        # it back and sessions.enforce's retention eventually drops it.
+        for m in members:
+            if m.status in ("paused", "done"):
+                continue
+            db.end_native_subagents(m.id)
+            db.set_status(m.id, "done" if m.mode != "interactive" and m.result is not None
+                          else "paused")
+    return True
+
+
 def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> list[dict]:
+    """What the sidebar shows: agents closed with `copse close`, and stopped
+    sessions with nothing left running, are left out, as is a worktree
+    whose agents are all left out that way."""
     now = time.time()
     by_parent = db.all_native_subagents()
     if panes is None:
         panes = tmux.list_panes()
-    return [workspace_entry(db, ws, detail=True, native_subagents=by_parent, now=now, panes=panes)
-            for ws in db.find_workspaces(repo_root)]
+    alive = live_agents(db, panes)
+    out = []
+    for ws in db.find_workspaces(repo_root):
+        everyone = db.list_agents(ws.id)
+        shown = [a for a in everyone
+                 if a.dismissed_at is None and not _stopped_root(db, a, alive, now)]
+        if everyone and not shown and ws.kind != "main":
+            continue
+        out.append(workspace_entry(db, ws, detail=True, native_subagents=by_parent, now=now,
+                                   panes=panes, agent_list=shown, alive=alive))
+    return out
 
 
 def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> dict | None:
