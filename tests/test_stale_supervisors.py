@@ -219,6 +219,7 @@ def test_an_untagged_pane_still_goes_by_the_db(db, repo, root):
 
 def test_spawn_tags_the_pane_with_its_agent(db, repo):
     ws = workspaces.create(db, str(repo), "feat-tag").workspace
-    a = agents.spawn(db, ws, "developer", prompt="hi", provider_name="shell", mode="handoff")
+    # No prompt: a shell worker's prompt is pasted into a real shell and run.
+    a = agents.spawn(db, ws, "developer", provider_name="shell", mode="handoff")
     assert tmux.get_pane_tag(a.tmux_window, agents.AGENT_TAG) == a.id
     assert agents.owns_pane(db, a)

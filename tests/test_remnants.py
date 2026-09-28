@@ -135,7 +135,9 @@ def test_real_spawn_sessions_end_with_the_test(db, repo):
     from copse import agents
 
     ws = workspaces.create(db, str(repo), "feat-leak").workspace
-    agents.spawn(db, ws, "developer", prompt="hi", provider_name="shell", mode="handoff")
+    # No prompt: a shell worker's prompt is pasted into a real shell and run
+    # (its worker footer's `copse` would start a supervisor in this session).
+    agents.spawn(db, ws, "developer", provider_name="shell", mode="handoff")
     assert tmux.has_session(ws.tmux_session)
     # conftest's pytest_runtest_teardown kills it after this test; the next test
     # checks nothing carried over.
