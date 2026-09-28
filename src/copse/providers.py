@@ -186,15 +186,26 @@ class ClaudeCode(Provider):
     # Anchored to the start of the line (glyph, verb, ellipsis) so a
     # transcript quoting the phrase mid-line never matches. Older Claude Code
     # versions instead said "esc to interrupt" in the footer below the box;
-    # that's kept as a second busy signal since some builds still show it.
+    # that's kept as a second busy signal since some builds still show it,
+    # but only checked in the footer itself (see screen_state), never in a
+    # transcript line further up.
     BUSY_SPINNER = re.compile(r"^\s*\S\s+[\w'-]+…(?:\s*\(|\s*$)", re.M)
     DONE_SPINNER = re.compile(r"^\s*\S\s+\w+ for \d", re.M)
+    # busy_in_footer's stricter version of the same shape: the parenthetical,
+    # if present, must start with a duration, and the glyph can't be an
+    # ordinary prose bullet ("-", "*", "•", "+") that a message might itself
+    # start a line with.
+    FOOTER_SPINNER = re.compile(r"^\s*(?![-*•+])\S\s+[\w'-]+…(?:\s*\(\d+[hms]|\s*$)")
+    TODO_LINE = re.compile(r"^\s*[⎿☐☒✔]")
 
     def screen_state(self, screen: str) -> str | None:
-        tail = "\n".join(screen.rstrip().splitlines()[-25:])
+        lines = screen.rstrip().splitlines()
+        tail = "\n".join(lines[-25:])
         if "Do you want to proceed?" in tail or "Enter to confirm" in tail:
             return "waiting"
-        if self.BUSY_SPINNER.search(tail) or "esc to interrupt" in tail:
+        box = [i for i, line in enumerate(lines) if line.lstrip().startswith("❯")]
+        footer = lines[box[-1] + 1:] if box else []
+        if self.BUSY_SPINNER.search(tail) or any("esc to interrupt" in line for line in footer):
             return "busy"
         if (self.DONE_SPINNER.search(tail) or "? for shortcuts" in tail
                 or "⏵⏵" in tail or "shift+tab to cycle" in tail):
@@ -202,15 +213,15 @@ class ClaudeCode(Provider):
         return None
 
     def busy_in_footer(self, screen: str) -> bool:
-        """Whether the busy spinner is in the status block above the input
-        box. Real screens put a blank line between the box's top border and
-        the spinner (and another below the bottom border), so this skips the
-        border and that blank padding, then takes the contiguous non-blank
-        block above it (the spinner itself, plus any todo list above it). A
-        transcript quoting the phrase further up the scrollback, past
-        another blank line, is out of that block; one quoting it right next
-        to the box, with no padding at all, is still excluded by the anchored
-        regex itself. Needed before an 'idle' status is overridden to busy."""
+        """Whether the block directly above the input box is really the busy
+        spinner. Real screens put a blank line between the box's top border
+        and that block (and another below the bottom border), so this skips
+        the border and blank padding, then takes the contiguous non-blank
+        block above it. That block must be shaped like the spinner really
+        is: its first line the spinner itself, and any lines below it (only
+        Claude's own todo list ever sits there) starting with ⎿/☐/☒/✔.
+        Anything else there — prose, a transcript quoting the phrase — isn't
+        it. Needed before an 'idle' status is overridden to busy."""
         lines = screen.rstrip().splitlines()
         box = [i for i, line in enumerate(lines) if line.lstrip().startswith("❯")]
         top = box[-1] if box else len(lines)
@@ -220,8 +231,11 @@ class ClaudeCode(Provider):
         start = i
         while start > 0 and lines[start - 1].strip():
             start -= 1  # the status block itself: spinner, plus any todo list
-        return any(self.BUSY_SPINNER.search(line) or "esc to interrupt" in line
-                   for line in lines[start:i])
+        block = lines[start:i]
+        if not block:
+            return False
+        spinner, *todos = block
+        return bool(self.FOOTER_SPINNER.match(spinner)) and all(self.TODO_LINE.match(t) for t in todos)
 
     def after_launch(self, target: str) -> None:
         # A fresh worktree is a folder Claude Code hasn't seen, so it asks

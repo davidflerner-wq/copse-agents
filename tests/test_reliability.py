@@ -11,6 +11,7 @@ import pytest
 
 from copse import agents, autopilot, tmux, workspaces
 from copse.db import Agent
+from test_agents import CLAUDE_BUSY_REAL_CAPTURE
 
 CLAUDE_IDLE = "⏺ Done.\n\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
 # Real Claude Code 2.1.283 layout: a blank line sits between the box's top
@@ -149,25 +150,15 @@ def test_stale_idle_status_of_a_busy_worker_is_corrected_not_flagged(db, root, m
 
 
 def test_stale_idle_status_is_corrected_against_a_real_captured_busy_screen(db, root, monkeypatch):
-    # An exact capture of a real Claude Code 2.1.283 pane: a blank line above
-    # and below the box, a truncated transcript line further up, and a
-    # spinner directly above the top blank line.
-    real_capture = (
-        '     os.environ.setdefault("GIT_COMMITTER_EMAIL", "t@example.c…\n'
-        "\n"
-        "✽ Hashing… (2m 53s · ↓ 7.6k tokens · thinking)\n"
-        "\n"
-        "────────────────────────────────────────\n"
-        "❯ \n"
-        "────────────────────────────────────────\n"
-        "\n"
-        "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents\n"
-    )
+    # An exact capture of a real Claude Code 2.1.283 pane (shared with
+    # test_agents.py): a blank line above and below the box, a truncated
+    # transcript line further up, and a spinner directly above the top
+    # blank line.
     agent, ws = root
     with_goal(db)
     add_agent(db, ws, "w1", status="idle", status_since=LONG_AGO)
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    monkeypatch.setattr(tmux, "capture", lambda *a, **k: real_capture)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_BUSY_REAL_CAPTURE)
     monkeypatch.setattr(time, "sleep", lambda s: None)
     assert autopilot.split_workers(db, "boss", screen=True)[1] == []
     assert db.get_agent("w1").status == "processing"
@@ -416,6 +407,25 @@ def test_send_message_delivered_when_reconcile_already_flushed_it(db, root, monk
     assert result == "delivered"
     assert len(pasted) == 1
     assert db.pending_count("w1") == 0
+
+
+def test_send_message_reports_queued_when_an_older_message_is_flushed_instead(db, root, monkeypatch):
+    # An older message was already queued. reconcile's idle correction flushes
+    # that one (the oldest), not the one send_message just enqueued, so this
+    # must report "queued" for it rather than mistaking the older delivery
+    # for its own.
+    _, ws = root
+    add_agent(db, ws, "w1", status="processing")
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    db.enqueue("w1", "older", "boss")
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, text: pasted.append(text))
+    result = agents.send_message(db, "w1", "newer", sender_id="boss")
+    assert pasted == ["older"]
+    assert result == "queued"
+    assert db.pending_count("w1") == 1
 
 
 def test_worker_stopping_unreported_tells_a_hookless_parent(db, root, monkeypatch):
