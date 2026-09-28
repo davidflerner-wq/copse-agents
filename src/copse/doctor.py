@@ -142,6 +142,7 @@ def native_checks(repo_root: str | None) -> list[Check]:
 
     out: list[Check] = []
     seen: dict[tuple[str, str], list[str]] = {}
+    profiles: list = []
     for p in list_profiles(repo_root):
         if p.provider != "native":
             continue
@@ -151,16 +152,35 @@ def native_checks(repo_root: str | None) -> list[Check]:
             out.append(Check(FAIL, f"profile {p.name}", str(e)))
             continue
         seen.setdefault((ep.base_url, ep.model), []).append(p.name)
+        profiles.append((p, ep))
+    reachable: set[tuple[str, str]] = set()
     for (base_url, model), names in seen.items():
         ep = runner.Endpoint(base_url, model)
         ok, detail = runner.probe(ep)
         who = ", ".join(names)
         if ok:
+            reachable.add((base_url, model))
             out.append(Check(OK if "is available" in detail else WARN, f"model {model}", f"{base_url}: {detail} (for {who})"))
         else:
             out.append(Check(WARN, f"model {model}",
                              f"{base_url} {detail}: only needed for {who}. For Ollama: "
                              f"`ollama serve`, then `ollama pull {model}`"))
+    # Ollama silently drops the start of a conversation that outgrows its context.
+    for p, ep in profiles:
+        if (ep.base_url, ep.model) not in reachable or not p.context_tokens or not runner.is_ollama(ep):
+            continue
+        fix = f"OLLAMA_CONTEXT_LENGTH={p.context_tokens + 8192} ollama serve"
+        ctx = runner.server_context(ep)
+        if ctx is None:
+            out.append(Check(WARN, f"context {p.name}",
+                             f"{ep.base_url} doesn't report its context length; Ollama truncates "
+                             f"silently past it, so it must be at least {p.context_tokens} "
+                             f"(context_tokens): {fix}"))
+        elif ctx < p.context_tokens:
+            out.append(Check(WARN, f"context {p.name}",
+                             f"{ep.base_url} runs {ep.model} with a {ctx}-token context, less than "
+                             f"the profile's context_tokens ({p.context_tokens}); Ollama truncates "
+                             f"silently. Restart with: {fix}"))
     return out
 
 
