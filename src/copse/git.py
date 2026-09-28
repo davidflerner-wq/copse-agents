@@ -226,24 +226,29 @@ def base_ref(path: str | Path, base: str) -> str:
     return f"origin/{base}" if local_behind else base
 
 
-def dirty_files(path: str | Path) -> list[str]:
+def dirty_files(path: str | Path, tracked_only: bool = False) -> list[str]:
     # Deliberately not out(): it strips, and porcelain's status field is two
     # columns whose first is blank when a change is not staged. " M app.py"
     # arrives as "M app.py", and the three-character slice then eats the first
     # letter of the path. Untracked files are "?? path" and were unaffected,
     # which is why this survived.
-    proc = run(["status", "--porcelain", "--untracked-files=all"], path)
+    untracked = "no" if tracked_only else "all"
+    proc = run(["status", "--porcelain", f"--untracked-files={untracked}"], path)
     return [line[3:] for line in proc.stdout.splitlines() if line]
+
+
+def ahead_behind(path: str | Path, ref: str) -> tuple[int, int]:
+    """(behind, ahead) commit counts between ``ref`` and HEAD."""
+    proc = run(["rev-list", "--left-right", "--count", f"{ref}...HEAD"], path)
+    behind, ahead = (int(x) for x in proc.stdout.split())
+    return behind, ahead
 
 
 def status(path: str | Path, base: str | None) -> Status:
     branch = current_branch(path)
     ahead = behind = 0
     if base:
-        ref = base_ref(path, base)
-        counts = run(["rev-list", "--left-right", "--count", f"{ref}...HEAD"], path, check=False)
-        if counts.returncode == 0:
-            behind, ahead = (int(x) for x in counts.stdout.split())
+        behind, ahead = ahead_behind(path, base_ref(path, base))
     unpushed: int | None = None
     up = run(["rev-list", "--count", "@{upstream}..HEAD"], path, check=False)
     if up.returncode == 0:
@@ -277,6 +282,10 @@ def commit_all(path: str | Path, message: str) -> str | None:
     return out(["rev-parse", "--short", "HEAD"], path)
 
 
+def conflicting_files(path: str | Path) -> list[str]:
+    return out(["diff", "--name-only", "--diff-filter=U"], path).splitlines()
+
+
 def sync(path: str | Path, base: str, strategy: str = "rebase") -> str:
     """Bring ``base``'s latest commits into this branch. Raises on conflict,
     leaving the rebase/merge in progress so an agent or human can resolve it."""
@@ -290,7 +299,7 @@ def sync(path: str | Path, base: str, strategy: str = "rebase") -> str:
     else:
         raise ValueError(f"unknown strategy {strategy!r}")
     if proc.returncode != 0:
-        conflicts = out(["diff", "--name-only", "--diff-filter=U"], path).splitlines()
+        conflicts = conflicting_files(path)
         raise GitError(
             f"{strategy} onto {ref} stopped with conflicts in: {', '.join(conflicts) or '?'}\n"
             f"Resolve them in {path} and run `git {strategy} --continue`, "
@@ -299,9 +308,35 @@ def sync(path: str | Path, base: str, strategy: str = "rebase") -> str:
     return ref
 
 
+def merge_local_base(path: str | Path, base: str) -> tuple[str, list[str]]:
+    """Merge the local ``base`` branch into HEAD, ignoring origin entirely:
+    ``base`` here is the local branch a workspace merges back into, not its
+    remote-tracking counterpart, so this never fetches. On a content conflict,
+    aborts and leaves the worktree clean, returning the pre-merge HEAD sha and
+    the conflicting files instead of raising. Returns (new_sha, []) on
+    success. A merge failure that isn't a content conflict (``merge.ff=only``,
+    a failing hook, a missing git identity, ...) is aborted the same way but
+    raised as a GitError, since there's nothing sensible to report as a sync
+    or a conflict."""
+    before = out(["rev-parse", "HEAD"], path)
+    proc = run(["merge", "--no-edit", base], path, check=False)
+    if proc.returncode != 0:
+        conflicts = conflicting_files(path)
+        run(["merge", "--abort"], path, check=False)
+        if not conflicts:
+            raise GitError(f"merging {base} failed: {proc.stderr.strip() or proc.stdout.strip()}")
+        return before, conflicts
+    return out(["rev-parse", "HEAD"], path), []
+
+
 def merge_into(root: str | Path, target_path: str | Path, branch: str, squash: bool) -> None:
-    """Merge ``branch`` into whatever is checked out at ``target_path``."""
-    if dirty_files(target_path):
+    """Merge ``branch`` into whatever is checked out at ``target_path``.
+
+    Only tracked changes block this: stray untracked files (build output,
+    ``.DS_Store``, ...) sitting in the target checkout shouldn't stop a
+    merge. If the merge would actually overwrite one, git itself refuses and
+    that failure surfaces below as a GitError."""
+    if dirty_files(target_path, tracked_only=True):
         raise GitError(f"{target_path} has uncommitted changes; commit or stash them first")
     if squash:
         proc = run(["merge", "--squash", branch], target_path, check=False)

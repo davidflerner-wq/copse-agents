@@ -47,6 +47,23 @@ def _ws(db: DB, ref: str) -> Workspace:
     return workspaces.resolve(db, ref, cwd=here.path)
 
 
+def _busy_worker(db: DB, ws: Workspace, exclude_id: str | None) -> Agent | None:
+    """A live worker (not a reviewer) still at work in ``ws``, other than the
+    caller itself. Used to avoid racing a worker mid-commit. A worker whose
+    result is already recorded is finished even if its Stop hook hasn't
+    fired yet."""
+    modes = tuple(m for m in agents.REPORTING_MODES if m != "review")
+    for a in db.list_agents(ws.id):
+        if a.id == exclude_id or a.mode not in modes or a.result is not None:
+            continue
+        if not agents.is_alive(a):
+            continue
+        a = agents.reconcile(db, a, samples=1)
+        if a.status in ("processing", "waiting"):
+            return a
+    return None
+
+
 def _summary(db: DB, ws: Workspace) -> str:
     base = ws.base_branch
     if not base:
@@ -256,7 +273,21 @@ def workspace_diff(workspace: str, stat_only: bool = False) -> str:
 async def merge_workspace(workspace: str, squash: bool = False) -> str:
     """Merge a workspace's branch into its base branch (for workers: your branch).
 
-    First copse checks the merge gates in the workspace: everything committed,
+    Before the gates run, if the branch is behind its (local) base and the
+    worktree is clean, copse merges the base into the branch first, so a
+    passing check reflects the code as it will actually be merged: this can
+    add a commit to the branch even when nothing ends up merged into the
+    base, which is only ever touched once the merge itself succeeds. If that
+    sync conflicts, it's aborted, the worktree is left clean, and the reply
+    lists the conflicting files. If it succeeds and adds a commit, that
+    commit hasn't been reviewed yet (when this repo requires review), so
+    nothing is merged; the reply asks for a fresh request_review instead.
+    If the branch needs that sync while another worker is still at work in
+    the workspace (alive and not yet reported), nothing is done, to avoid
+    racing its commits: the reply says to retry once it reports. A worker
+    merging its own branch is never blocked by itself.
+
+    Then copse checks the merge gates in the workspace: everything committed,
     a reviewer's approval of this commit (in autopilot sessions, or when the
     repo requires review), pre-commit hooks, and the repo's `checks` commands.
     If a gate fails nothing is merged, and the reply says what to fix.
@@ -268,13 +299,35 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
         cfg = load_repo_config(ws.repo_root)
         pilot = autopilot.for_agent(db, caller.id) if caller else None
         review = cfg.review if cfg.review is not None else bool(pilot and pilot.enabled)
+
+        try:
+            behind, _ahead = git.ahead_behind(ws.path, workspaces.require_base(ws))
+            if behind:
+                busy = _busy_worker(db, ws, caller.id if caller else None)
+                if busy:
+                    return (f"Not merged: {busy.id} is still working on {ws.branch}; "
+                            "retry once it reports.")
+            sync_result = workspaces.sync_with_base(ws)
+        except git.GitError as e:
+            return f"Not merged: {e}"
+        if sync_result.status == "conflict":
+            files = ", ".join(sync_result.conflicts) or "?"
+            return (f"Not merged: {ws.branch} conflicts with {ws.base_branch} in: {files}. "
+                    f"Ask the worker to merge {ws.base_branch} and resolve.")
+        if sync_result.status == "synced" and review:
+            return (f"Not merged: synced {ws.branch} with {ws.base_branch} "
+                    f"(new commit {sync_result.new_sha[:8]}); request_review again, then merge.")
+
         report = gates.run(db, ws, cfg, review_required=review)
         if not report.ok:
             return f"Not merged. {report.problem}"
         if gates.head(ws) != report.sha:
             return (f"Not merged: {ws.branch} got new commits while the gates ran. "
                     "Call merge_workspace again to check the new commits.")
-        target = workspaces.merge_back(db, ws, squash=squash)
+        try:
+            target = workspaces.merge_back(db, ws, squash=squash)
+        except git.GitError as e:
+            return f"Not merged: {e}"
         text = f"Merged {ws.branch} into {ws.base_branch} at {target} ({report.summary()})."
         if pilot:
             db.bump_progress(pilot.root_id)

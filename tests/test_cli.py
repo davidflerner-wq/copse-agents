@@ -41,3 +41,15 @@ def test_ls_json_respects_all(db, repo, tmp_path, monkeypatch):
     assert json.loads(CliRunner().invoke(app, ["ls", "--json"]).stdout) == []
     assert len(json.loads(CliRunner().invoke(app, ["ls", "--json", "--all"]).stdout)) == 1
 
+
+
+def test_rm_survives_a_missing_base_branch(db, repo, monkeypatch):
+    sh("git branch tmp-base", repo)
+    ws = workspaces.create(db, str(repo), "feat/x", "tmp-base", fetch=False).workspace
+    sh("git branch -D tmp-base", repo)  # the base is gone, so git.status raises
+
+    monkeypatch.chdir(repo)
+    res = CliRunner().invoke(app, ["rm", ws.id])
+    assert res.exit_code == 0, res.output
+    assert "removed" in res.output
+    assert db.get_workspace(ws.id) is None
