@@ -349,13 +349,17 @@ KEYS = [
     ("?", "this help"),
     ("q", "quit"),
 ]
+# In the sidebar, q quits copse itself: the session pauses, as when the chat
+# ends, and the person gets their prompt back.
+SIDEBAR_QUIT = ("q", "quit copse (2×)")
 KEY_COLUMN = 9
 
 
-def help_lines(width: int, in_tmux: bool = False) -> list[Line]:
+def help_lines(width: int, in_tmux: bool = False, sidebar: bool = False) -> list[Line]:
     """The `?` overlay, drawn in place of the list."""
+    keys = [SIDEBAR_QUIT if sidebar and k == "q" else (k, what) for k, what in KEYS]
     lines = [Line("Keys", "bold")]
-    lines += [Line(fit(f"{k:<{KEY_COLUMN}}{what}", width)) for k, what in KEYS]
+    lines += [Line(fit(f"{k:<{KEY_COLUMN}}{what}", width)) for k, what in keys]
     lines += [Line(""), Line(fit("◆ needs you", width), "alert"),
               Line(fit("◇ autopilot will review", width), "dim")]
     if in_tmux:
@@ -390,6 +394,16 @@ def close_request(agent: dict, armed: tuple[str, float] | None,
     if armed and armed[0] == agent["id"] and now - armed[1] <= CLOSE_CONFIRM_SECONDS:
         return True, None, f"stopped and closed {agent['id'][:6]}"
     return False, (agent["id"], now), "still running: x again to stop and close it"
+
+
+def quit_request(armed: tuple[str, float] | None, now: float,
+                 key: str = "q") -> tuple[bool, tuple[str, float] | None, str]:
+    """What quitting copse from the sidebar does: the first press arms it,
+    a second within CLOSE_CONFIRM_SECONDS goes. ``armed`` is shared with
+    close_request, under the id "quit"."""
+    if armed and armed[0] == "quit" and now - armed[1] <= CLOSE_CONFIRM_SECONDS:
+        return True, None, "quitting copse: this session is paused"
+    return False, ("quit", now), f"{key} again to quit copse (copse continue resumes)"
 
 # Wheel-down: ncurses only defines this when built with mouse version > 1
 # (not always true, e.g. some macOS builds); the bit value itself is stable
@@ -696,6 +710,8 @@ def quit_keys(sidebar: bool) -> tuple[int, ...]:
 
 
 def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
+    # The session this sidebar belongs to: quitting the sidebar quits it.
+    own_root = agents.sidebar_root(os.environ.get("TMUX_PANE")) if sidebar else None
     curses.curs_set(0)
     styles = _styles()
     stdscr.timeout(int(REFRESH_SECONDS * 1000))
@@ -724,7 +740,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
             stale = False
         # Re-rendered every pass: folding, filtering and `?` change it between refreshes.
         if state.help:
-            lines = help_lines(width, bool(os.environ.get("TMUX")))
+            lines = help_lines(width, bool(os.environ.get("TMUX")), sidebar)
             selected = None
         else:
             lines = render(snap, time.time(), width, pilot, state)
@@ -790,7 +806,14 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
         if action == "refresh":
             stale = True
         elif action == "quit":
-            return
+            if not own_root:
+                return
+            now = time.time()
+            go, armed, notice = quit_request(armed, now)
+            notice_until = now + CLOSE_CONFIRM_SECONDS
+            if go:
+                agents.quit_later(own_root)
+                return
         elif action == "attach" and selected is not None:
             _attach(lines[selected].agent, lines[selected].workspace, db)
             stdscr.clear()
@@ -801,6 +824,14 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
         elif action == "close" and selected is not None:
             agent = lines[selected].agent
             now = time.time()
+            if own_root and agent["id"] == own_root:
+                # This sidebar's own session: closing its chat is quitting copse.
+                go, armed, notice = quit_request(armed, now, key="x")
+                notice_until = now + CLOSE_CONFIRM_SECONDS
+                if go:
+                    agents.quit_later(own_root)
+                    return
+                continue
             close_now, armed, notice = close_request(agent, armed, now)
             notice_until = now + CLOSE_CONFIRM_SECONDS
             if close_now:

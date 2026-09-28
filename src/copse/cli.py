@@ -560,7 +560,8 @@ def watch(
         return
     watch_mod.run(repo_root, sidebar=sidebar)
     if sidebar:
-        # Quit on purpose (a crash raises instead): keep it gone.
+        # Quit on purpose (a crash raises instead): keep it gone, so switching
+        # windows doesn't bring it back. `copse continue` starts a fresh one.
         agents.dismiss_sidebar(DB(), os.environ.get("TMUX_PANE"))
 
 
@@ -858,6 +859,18 @@ def ended_cmd(agent_id: str) -> None:
     # Runs inside the window it's about to close; don't die with it.
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     agents.ended(DB(), agent_id)
+
+
+@app.command("_quit", hidden=True)
+def quit_cmd(root_id: str) -> None:
+    import signal
+
+    # Runs detached from the sidebar it's about to close; don't die with it.
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    db = DB()
+    root = db.get_agent(root_id)
+    if root is not None and root.status not in ("paused", "done"):
+        agents.pause(db, root_id)
 
 
 @app.command("_close", hidden=True)

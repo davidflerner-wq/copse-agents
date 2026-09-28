@@ -370,6 +370,21 @@ def _create_sidebar(db: DB, root_id: str, ws: Workspace, target_pane: str) -> st
     return pane
 
 
+def sidebar_root(pane: str | None) -> str | None:
+    """The session root whose sidebar is ``pane``, if it's a copse sidebar."""
+    return tmux.get_pane_tag(pane, SIDEBAR_TAG) if pane else None
+
+
+def quit_later(root_id: str) -> None:
+    """Quit a copse session from its own sidebar: pause it, as ending the
+    chat does, which closes its tmux session and hands the person their
+    prompt back. Runs detached, since pausing closes the sidebar asking."""
+    from copse.providers import copse_invocation
+
+    subprocess.Popen([*copse_invocation(), "_quit", root_id], start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
 def dismiss_sidebar(db: DB, pane: str | None) -> None:
     """The person quit the sidebar in ``pane`` (`copse watch --sidebar`
     returned normally): remember that, so sidebar_follow doesn't bring it

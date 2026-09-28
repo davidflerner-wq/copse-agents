@@ -78,8 +78,9 @@ When an agent uses Claude Code's own Agent tool, its built-in subagents (Explore
 Plan, ...) show up nested underneath it in the sidebar too, e.g. `↳ Explore ·
 running 1m`, so you can see what it's fanned out to without leaving copse.
 
-**Closing and coming back.** When you quit the supervisor's chat, the copse window
-closes cleanly and you're back at your prompt. The whole session is paused: its
+**Closing and coming back.** When you quit the supervisor's chat, or press `q` twice
+in the sidebar (or `x` twice on your own supervisor), the copse window closes cleanly
+and you're back at your prompt. The whole session is paused: its
 workers stop too, and everything is kept (branches, worktrees,
 queued messages, and each agent's Claude conversation). `copse continue` (or
 `copse -c`) picks up the most recent paused session and lists the others by id

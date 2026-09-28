@@ -258,3 +258,37 @@ def test_culling_a_stale_worker_leaves_the_newer_agents_pane(db, worker_ws):
     assert db.get_agent("stale").dismissed_at is not None
     assert db.get_agent("current").dismissed_at is None
     assert tmux.window_alive(pane)
+
+
+def test_quitting_copse_from_the_sidebar_takes_two_presses():
+    go, armed, notice = watch.quit_request(None, 100.0)
+    assert not go and armed == ("quit", 100.0) and "q again to quit copse" in notice
+    go, armed, notice = watch.quit_request(armed, 102.0)
+    assert go and armed is None and "paused" in notice
+    # Too slow: it arms again instead.
+    go, armed, _ = watch.quit_request(("quit", 100.0), 110.0)
+    assert not go and armed == ("quit", 110.0)
+    # An armed close of some agent doesn't count as a first q.
+    go, _, _ = watch.quit_request(("a1b2c3d4", 100.0), 101.0)
+    assert not go
+
+
+def test_sidebar_help_says_q_quits_copse():
+    text = "\n".join(ln.text for ln in watch.help_lines(30, in_tmux=True, sidebar=True))
+    assert "quit copse" in text
+    assert "quit copse" not in "\n".join(ln.text for ln in watch.help_lines(30))
+
+
+def test_quit_pauses_the_session(db, repo, monkeypatch):
+    from typer.testing import CliRunner
+
+    from copse import cli
+    from copse.db import Agent
+
+    ws = workspaces.adopt_root(db, str(repo))
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "@0",
+                       None, time.time()))
+    paused = []
+    monkeypatch.setattr(cli.agents, "pause", lambda db, root_id: paused.append(root_id))
+    assert CliRunner().invoke(cli.app, ["_quit", "boss"]).exit_code == 0
+    assert paused == ["boss"]
