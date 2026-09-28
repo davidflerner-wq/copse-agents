@@ -626,8 +626,11 @@ def rm(
     db = DB()
     ws = _ws(db, workspace)
     if ws.base_branch and os.path.isdir(ws.path) and not delete_branch:
-        st = git.status(ws.path, ws.base_branch)
-        if st.ahead and st.unpushed != 0:
+        try:
+            st = git.status(ws.path, ws.base_branch)
+        except git.GitError:
+            st = None  # e.g. the base branch is gone; the note is only a courtesy
+        if st and st.ahead and st.unpushed != 0:
             typer.secho(
                 f"note: {ws.branch} has {st.ahead} commit(s) not in {ws.base_branch} "
                 "and not pushed; the branch is kept.", fg="yellow",
@@ -777,3 +780,17 @@ def sidebar_follow_cmd(session: str) -> None:
 def flush_cmd(agent_id: str, delay: float = typer.Option(0.0)) -> None:
     time.sleep(delay)
     agents.flush(DB(), agent_id)
+
+
+@app.command("_deliver-checks", hidden=True)
+def deliver_checks_cmd(reviewer_id: str, workspace_id: str) -> None:
+    """Run a repo's checks for a reviewer and deliver the summary to its
+    inbox. Started detached from request_review, so the checks still finish
+    and get delivered even if the MCP server that started it has exited."""
+    from copse.config import load_repo_config
+
+    db = DB()
+    ws = db.get_workspace(workspace_id)
+    if ws is None:
+        return
+    agents.deliver_check_summary(db, reviewer_id, ws, load_repo_config(ws.repo_root))

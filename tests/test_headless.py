@@ -142,10 +142,15 @@ def test_resumed_headless_worker_gets_a_turn_to_continue(db, ws, monkeypatch):
 
 
 def test_headless_worker_with_finish_line_skips_goal_command(db, ws, cheap_profile, monkeypatch):
-    monkeypatch.setattr(agents, "_launch", lambda *a, **k: None)
+    launched = {}
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws_, **kw: launched.update(kw))
     a = agents.spawn(db, ws, cheap_profile, prompt="fix it", mode="assign", done_when="tests pass")
     assert a.headless == 1 and db.get_agent(a.id).headless == 1
-    assert not a.task.startswith("/goal") and "Finish line: tests pass" in a.task
+    # a.task stays the raw prompt (see agents.decorate_worker_prompt); the
+    # finish line and footer are added to what's actually launched.
+    assert a.task == "fix it" and a.done_when == "tests pass"
+    prompt = launched["prompt"]
+    assert not prompt.startswith("/goal") and "Finish line: tests pass" in prompt
 
 
 def test_headless_only_applies_to_claude(db, ws, cheap_profile, monkeypatch):
