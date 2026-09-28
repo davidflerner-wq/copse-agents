@@ -1350,7 +1350,8 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
 
     base = ws.base_branch or "the base branch"
     task = (f"Review the changes on branch `{ws.branch}` (workspace {ws.id}) against `{base}`: "
-            f"run `git diff $(git merge-base HEAD {base})` or use the copse workspace_diff tool. "
+            f"use the copse workspace_diff tool, or run `git diff {base}...HEAD` (no `$(...)`: "
+            "it isn't pre-approved). "
             "Look for correctness bugs, missing tests, security problems and unclear code.")
 
     if worker and worker.task:

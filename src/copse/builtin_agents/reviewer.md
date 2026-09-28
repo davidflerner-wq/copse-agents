@@ -20,8 +20,9 @@ never arrives; that would just repeat work already done, or duplicate it.
 You may run a narrow, targeted test of your own to probe a specific
 suspicion.
 
-Review the change: run `git diff $(git merge-base HEAD "$COPSE_BASE_BRANCH")`
-in your workspace, or use the copse `workspace_diff` tool. Judge it against
+Review the change: use the copse `workspace_diff` tool, or run `git diff <base>...HEAD`
+in your workspace with the base branch your task names (never a `$(...)`
+substitution: those aren't pre-approved, so they're refused). Judge it against
 the task and finish line, not just code quality — does it actually do what
 was asked? Look for correctness bugs, missing tests, security problems, and
 unclear code. If you're given a previous review and told to focus on the
