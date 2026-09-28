@@ -467,6 +467,10 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     db.set_status(agent.id, status)
     agent.status = status
 
+    if provider.name == "claude":
+        from copse.providers import trust_folder
+
+        trust_folder(ws.path)  # no trust dialog for nobody to answer
     argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
                                           mode=agent.mode))
     target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane)
@@ -613,12 +617,15 @@ def tree(db: DB, root_id: str) -> list[Agent]:
     return out
 
 
-def pause(db: DB, root_id: str) -> list[Agent]:
+def pause(db: DB, root_id: str, *, stop_procs: bool = True) -> list[Agent]:
     """Stop a supervisor and everything it started, keeping their work.
 
     Worktrees, branches, queued messages and each CLI's own session stay; the
     processes stop, so nothing keeps acting while nobody's watching. Agents
     that already reported are left marked done. Returns the agents paused.
+    Without ``stop_procs``, processes Claude Code's daemon hosts are left for
+    a detached cull (see copse.cull), which stops those of paused agents,
+    rather than waiting here for them to exit.
 
     Records every status first and closes windows last: this can run inside
     one of the windows it closes (see _pause_when_done)."""
@@ -658,9 +665,10 @@ def pause(db: DB, root_id: str) -> list[Agent]:
             db.clear_sidebar_pane(root_id)
     # Closing the windows doesn't stop sessions Claude Code's daemon hosts.
     # Skipped for this process and its ancestors: this can run in the chat's pane.
-    from copse import procs
+    if stop_procs:
+        from copse import procs
 
-    procs.stop([a.id for a in tree(db, root_id)], grace=2.0)
+        procs.stop([a.id for a in tree(db, root_id)], grace=2.0)
     root = db.get_agent(root_id)
     root_ws = db.get_workspace(root.workspace_id) if root else None
     for session in sessions:
@@ -843,7 +851,8 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
     ``samples`` >= 2: a single-sample read must never pop a message into a
     terminal as a side effect of just rendering the dashboard."""
     provider = get_provider(agent.provider)
-    if agent.headless or not provider.uses_hooks or agent.status not in ("idle", "processing", "waiting"):
+    if (agent.headless or not provider.uses_hooks
+            or agent.status not in ("starting", "idle", "processing", "waiting")):
         return None  # a headless pane shows output, not a TUI to read
     if agent.status == "idle" and samples < 2:
         return None
@@ -863,6 +872,10 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
         return None
     state = seen.pop()
     new = {"idle": "idle", "busy": "processing", "waiting": "waiting"}.get(state or "")
+    if agent.status == "starting" and new != "waiting":
+        # Its hooks say when it's ready; the screen only adds that it's
+        # stuck on a dialog before they could (e.g. folder trust).
+        return None
     if new and new != agent.status:
         db.set_status(agent.id, new, only_if=agent.status)
         agent.status = new
@@ -1131,9 +1144,12 @@ def delegate(
         ws = created.workspace
     else:
         ws = caller_ws
+    # Startup dialogs are handled by the detached _after-launch helper, so
+    # handoff/assign return as soon as the window exists instead of polling
+    # the new pane for up to 30 seconds.
     agent = spawn(
         db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
-        done_when=done_when,
+        done_when=done_when, background_setup=True,
     )
     return agent, ws
 
@@ -1238,7 +1254,7 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
     if focus:
         task += f"\n\nFocus: {focus}"
     return spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
-                 mode="review")
+                 mode="review", background_setup=True)
 
 
 def deliver_check_summary(db: DB, reviewer_id: str, ws: Workspace, cfg: RepoConfig) -> None:
@@ -1288,6 +1304,9 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
 
     if event == "session-start":
         db.set_status(agent_id, "idle", only_if="starting")
+        # 'waiting' before the session even started was its trust dialog
+        # (see screen_status), which has now been answered.
+        db.set_status(agent_id, "idle", only_if="waiting")
         if db.pending_count(agent_id) and not agent.headless:
             # Claude Code hasn't drawn its input box yet; deliver shortly after,
             # from a detached process so this hook returns immediately.

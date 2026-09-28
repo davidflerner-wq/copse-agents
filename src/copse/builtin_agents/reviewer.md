@@ -6,6 +6,7 @@ model: sonnet
 effort: medium
 strict_mcp: true
 setting_sources: project,local
+permission_mode: dontAsk  # nobody watches a reviewer: refuse what allowed_tools doesn't cover, never prompt
 allowed_tools: Bash(git status:*), Bash(git diff:*), Bash(git log:*), Bash(git show:*), Bash(git merge-base:*), Bash(pytest:*), Bash(python -m pytest:*), Bash(uv run:*), Bash(npm test:*), Bash(npm run:*), Bash(pnpm test:*), Bash(pnpm run:*), Bash(yarn test:*), Bash(yarn run:*), Bash(cargo test:*), Bash(cargo check:*), Bash(cargo clippy:*), Bash(go test:*), Bash(go vet:*), Bash(make:*), Bash(swift test:*), Bash(ls:*), Bash(pwd), Bash(cat:*), Bash(tail:*), Bash(head:*), Bash(grep:*), Bash(wc:*)
 ---
 You are a code reviewer running under copse. Your prompt gives you the

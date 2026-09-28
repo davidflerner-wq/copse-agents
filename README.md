@@ -364,7 +364,11 @@ You are a frontend engineer...
 
 **Permissions.** Workers run with Claude Code's normal permission prompts. When a
 worker is waiting on one, `copse ls` shows it as `waiting`, and you attach to
-approve it. The built-in `developer` profile edits files without asking
+approve it; if it's still waiting after 90 seconds, its supervisor gets a message
+saying so (once). copse marks each worktree it starts Claude Code in as trusted,
+so a worker never stops on the first-run "trust this folder?" dialog. The
+built-in `reviewer` runs with `dontAsk`: anything outside its `allowed_tools` is
+refused rather than waiting for an answer. The built-in `developer` profile edits files without asking
 (`acceptEdits`) and has an `allowed_tools` list covering git inspect/commit and
 common test/build commands: `pytest`, `uv run`, `npm/pnpm/yarn test|run`,
 `cargo`, `go`, `make`, `swift`, `xcodebuild`. It can't push or run arbitrary

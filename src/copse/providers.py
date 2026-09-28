@@ -116,6 +116,87 @@ def claude_binary() -> str:
     return os.environ.get("COPSE_CLAUDE_BIN") or "claude"
 
 
+def claude_global_config() -> str:
+    """Claude Code's global state file, where it records trusted folders:
+    ``$CLAUDE_CONFIG_DIR/.claude.json``, else ``~/.claude.json``."""
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    return os.path.join(config, ".claude.json") if config else os.path.expanduser("~/.claude.json")
+
+
+def trust_folder(path: str) -> bool:
+    """Mark ``path`` as trusted in Claude Code's own state, so a worker
+    started there never stops on the first-run "trust this folder?" dialog
+    (after_launch still answers it, but only for its first 30 seconds, and a
+    worker nobody watches would otherwise wait on it for good). copse made
+    the folder from the person's own repo, which is the answer after_launch
+    gives anyway. Only adds the one flag; leaves the file alone if it's
+    missing (Claude Code hasn't been set up yet) or unreadable. Returns
+    whether the folder is trusted now.
+
+    A write keeps the file's mode (it's private: 0600), goes through a temp
+    file beside it that never exists with a wider mode and is always
+    removed, and holds a copse lock so two copse launches can't drop each
+    other's flag. Claude Code writes this file too, without that lock, so
+    the file is re-read right before the replace to keep the window for
+    losing one of its writes as small as possible."""
+    import fcntl
+
+    from copse.config import copse_home
+
+    # Through any symlink (dotfile managers link this file): replacing the
+    # link itself would orphan the file it points to.
+    config = os.path.realpath(claude_global_config())
+    key = os.path.realpath(path)  # how Claude Code keys it (its cwd, symlinks resolved)
+    try:
+        if _trusted(_read_json(config), key):
+            return True  # the usual case: nothing to write
+        lock_dir = copse_home() / "locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        with open(lock_dir / "claude-trust.lock", "a+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                return _write_trust(config, key)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
+
+
+def _read_json(path: str) -> dict:
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _trusted(data: dict, key: str) -> bool:
+    return (data.get("projects") or {}).get(key, {}).get("hasTrustDialogAccepted") is True
+
+
+def _write_trust(config: str, key: str) -> bool:
+    """trust_folder's write; the caller holds the lock."""
+    import stat
+    import uuid
+
+    mode = stat.S_IMODE(os.stat(config).st_mode)
+    tmp = f"{config}.copse-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    try:
+        data = _read_json(config)  # as late as possible: Claude Code may have just written it
+        if _trusted(data, key):
+            return True
+        data.setdefault("projects", {}).setdefault(key, {})["hasTrustDialogAccepted"] = True
+        text = json.dumps(data, indent=2)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(tmp, mode)  # the umask may have narrowed it
+        os.replace(tmp, config)  # atomic: Claude Code never reads half a file
+        return True
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
 class ClaudeCode(Provider):
     name = "claude"
     uses_hooks = True
@@ -243,7 +324,8 @@ class ClaudeCode(Provider):
     def screen_state(self, screen: str) -> str | None:
         lines = screen.rstrip().splitlines()
         tail = "\n".join(lines[-25:])
-        if "Do you want to proceed?" in tail or "Enter to confirm" in tail:
+        if ("Do you want to proceed?" in tail or "Enter to confirm" in tail
+                or self.TRUST_DIALOG.search(tail)):
             return "waiting"
         box = [i for i, line in enumerate(lines) if line.lstrip().startswith("❯")]
         footer = lines[box[-1] + 1:] if box else []

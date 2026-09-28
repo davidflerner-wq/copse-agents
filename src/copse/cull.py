@@ -99,11 +99,56 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
             done.append(f"closed {'idle' if finished else 'stopped'} worker {a.id} "
                         f"after {int(idle_for // 60)} min")
 
+    # 3. Workers stuck on a prompt nobody is answering.
+    done.extend(note_stuck(db, now, panes))
 
-    # 3. Sidebar locks of sessions that are over.
+    # 4. Sidebar locks of sessions that are over.
     removed = clean_locks(db, now)
     if removed:
         done.append(f"removed {removed} stale sidebar lock(s)")
+    return done
+
+
+# How long a worker may sit on a permission or trust prompt before its
+# supervisor is told (once per spell of waiting).
+STUCK_AFTER = 90.0
+
+
+def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
+    """Tell each supervisor, once, about a worker that has been waiting on a
+    prompt (a permission request, or Claude Code's folder-trust dialog) for
+    STUCK_AFTER seconds: it can't go on until someone answers, and nobody
+    may be looking at its pane. The screen is read here too, since a trust
+    dialog comes up before any hook runs to report it."""
+    done = []
+    for a in db.list_agents():
+        if (a.mode not in agents.REPORTING_MODES or not a.parent_id or a.result is not None
+                or a.dismissed_at is not None or a.status not in ("starting", "processing", "waiting")
+                or not agents.runs_process(a) or not agents.is_alive(a, panes)):
+            continue
+        if a.status != "waiting":
+            agents.screen_status(db, a, samples=1)
+            a = db.get_agent(a.id) or a
+        since = a.status_since or a.created_at
+        if a.status != "waiting" or now - since < STUCK_AFTER or a.stuck_noted == since:
+            continue
+        ws = db.get_workspace(a.workspace_id)
+        try:
+            screen = tmux.capture(a.tmux_window, lines=40)
+        except tmux.TmuxError:
+            screen = ""
+        tail = "\n".join([ln for ln in screen.rstrip().splitlines() if ln.strip()][-12:])
+        where = f" on branch `{ws.branch}`" if ws else ""
+        attach = f" Attach with `copse attach {ws.name}` to answer it," if ws else " Answer it in its pane,"
+        body = (f"Worker {a.id} ({a.profile}){where} has been waiting on a prompt for "
+                f"{int(now - since)}s and can't continue until someone answers it.{attach} "
+                f"or remove the workspace if it's no longer needed.\n\nIts screen:\n{tail}")
+        try:
+            agents.send_message(db, a.parent_id, body, sender_id=a.id)
+        except agents.AgentError:
+            continue  # its supervisor isn't running; try again on a later sweep
+        db.update_agent(a.id, stuck_noted=since)
+        done.append(f"told {a.parent_id} that worker {a.id} is stuck on a prompt")
     return done
 
 
