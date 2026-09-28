@@ -62,6 +62,29 @@ def test_a_supervisor_that_just_stopped_lingers_briefly(db, repo, root):
     assert db.get_agent("fresh").status == "idle"  # not touched yet
 
 
+def test_a_new_launch_hides_the_session_it_just_paused(db, repo, root):
+    # `copse` pauses the chat running here and starts a new one: the old one
+    # mustn't linger beside it, paused or stopped without being paused.
+    add(db, root, "older", window="%99997", age=5)
+    add(db, root, "old", status="paused", window="%99999", age=2)
+    pane = running_window(root)
+    add(db, root, "new", window=pane)
+    got = shown(db, repo)
+    assert "new" in got and "old" not in got and "older" not in got
+    assert {s.root.id for s in sessions.paused(db, str(repo))} == {"old", "older"}
+
+
+def test_a_hidden_session_takes_its_stopped_workers_with_it(db, repo, root):
+    add(db, root, "boss", status="paused", window="%99999", age=LONG_AGO)
+    add(db, root, "w1", mode="assign", status="paused", parent="boss", window="%99998",
+        profile="developer", age=LONG_AGO)
+    add(db, root, "sub", mode="assign", status="paused", parent="w1", window="%99996",
+        profile="developer", age=LONG_AGO)
+    got = shown(db, repo)
+    assert not {"boss", "w1", "sub"} & set(got)
+    assert [m.id for m in sessions.paused(db, str(repo))[0].members] == ["boss", "w1", "sub"]
+
+
 def test_a_live_supervisor_and_its_workers_show(db, repo, root):
     pane = running_window(root)
     add(db, root, "boss", window=pane, age=LONG_AGO)

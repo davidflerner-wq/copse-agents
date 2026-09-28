@@ -26,7 +26,9 @@ _PARENT_NOT_RUNNING = ("paused", "exited", "done")
 # How long a session root (a supervisor chat) whose terminal is gone still
 # shows as stopped before it leaves the sidebar, counted from its last status
 # change. It stays resumable (`copse continue`); it just stops cluttering the
-# sidebar once none of its workers is running either.
+# sidebar once none of its workers is running either. A newer session
+# running in the same repo cuts this short: launching `copse` pauses the old
+# chat, and it shouldn't sit next to the new one.
 STOPPED_ROOT_LINGER = NATIVE_SUBAGENT_LINGER
 # A worktree that never had an agent is only treated as finished (see
 # ``retired``) once it's this old, so one just made by hand isn't hidden
@@ -127,16 +129,19 @@ def live_agents(db: DB, panes: dict[str, bool]) -> set[str]:
             if agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)}
 
 
-def _stopped_root(db: DB, a: Agent, alive: set[str], now: float) -> bool:
+def _stopped_root(db: DB, a: Agent, alive: set[str], now: float,
+                  newest_live_root: float = 0.0) -> bool:
     """A session root (a supervisor chat) whose terminal is gone, with none
     of its workers still running, that has been stopped long enough to leave
-    the sidebar."""
+    the sidebar, or has been replaced by a newer session (one started at
+    ``newest_live_root``)."""
     if a.mode != "interactive" or a.parent_id or not agents.runs_process(a) or a.id in alive:
         return False
     members = agents.tree(db, a.id)
     if any(m.id in alive for m in members[1:]):
         return False  # its workers still show, so it does too
-    if now - max(a.status_since or 0, a.created_at) <= STOPPED_ROOT_LINGER:
+    superseded = newest_live_root > a.created_at
+    if not superseded and now - max(a.status_since or 0, a.created_at) <= STOPPED_ROOT_LINGER:
         return False
     if a.status not in ("paused", "done"):
         # It ended without pausing its session (agents.ended runs from inside
@@ -188,11 +193,33 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
     if panes is None:
         panes = tmux.list_panes()
     alive = live_agents(db, panes)
+    found = [(ws, db.list_agents(ws.id)) for ws in db.find_workspaces(repo_root)]
+    by_id = {a.id: a for _, everyone in found for a in everyone}
+    newest_live_root = max((a.created_at for a in by_id.values()
+                            if a.id in alive and not a.parent_id and a.mode == "interactive"),
+                           default=0.0)
+    hidden_roots = {a.id for a in by_id.values()
+                    if _stopped_root(db, a, alive, now, newest_live_root)}
+
+    def hidden(a: Agent) -> bool:
+        # A stopped session leaves with everything it started that isn't
+        # running: its paused workers come back with `copse continue`.
+        if a.id in hidden_roots:
+            return True
+        if a.id in alive:
+            return False
+        seen = set()
+        while a.parent_id and a.parent_id not in seen:
+            seen.add(a.id)
+            parent = by_id.get(a.parent_id) or db.get_agent(a.parent_id)
+            if parent is None:
+                return False
+            a = parent
+        return a.id in hidden_roots
+
     out = []
-    for ws in db.find_workspaces(repo_root):
-        everyone = db.list_agents(ws.id)
-        shown = [a for a in everyone
-                 if a.dismissed_at is None and not _stopped_root(db, a, alive, now)]
+    for ws, everyone in found:
+        shown = [a for a in everyone if a.dismissed_at is None and not hidden(a)]
         if everyone and not shown and ws.kind != "main":
             continue
         if retired(db, ws, alive, now, everyone):
