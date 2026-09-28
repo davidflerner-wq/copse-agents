@@ -498,7 +498,7 @@ def history(
         try:
             repo_root = git.main_repo_root(os.getcwd())
         except git.GitError:
-            pass
+            typer.echo("not in a git repo: showing all repos")
     rows = db.list_history(repo_root, kind, limit)
     if not rows:
         typer.echo("no history")

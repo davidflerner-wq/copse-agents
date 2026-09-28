@@ -164,3 +164,111 @@ def test_history_cli_empty(db, repo, monkeypatch):
     res = CliRunner().invoke(app, ["history"])
     assert res.exit_code == 0
     assert "no history" in res.output
+
+
+# -- never blocks the thing it records ------------------------------------------
+
+
+def test_history_failure_does_not_block_merge_or_forward(db, repo, monkeypatch):
+    from copse import git
+
+    def boom(*a, **k):
+        raise RuntimeError("history is broken")
+
+    monkeypatch.setattr(history, "record", boom)
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+
+    root_ws = workspaces.adopt_root(db, str(repo))
+    add(db, root_ws, "boss")
+    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    add(db, ws, "w1", mode="assign", parent="boss")
+
+    assert agents.report_result(db, "w1", "done: added login") == \
+        "result recorded and sent to your supervisor"
+    assert "done: added login" in db.pop_pending("boss").body
+
+    with open(ws.path + "/new.py", "w") as f:
+        f.write("x = 1\n")
+    git.commit_all(ws.path, "work")
+    out = asyncio.run(mcp_server.merge_workspace(ws.id))
+    assert out.startswith("Merged feature into main")
+    assert db.list_history(ws.repo_root) == []
+
+
+# -- tokens: per-agent deltas, so totals add up ---------------------------------
+
+
+def _usage_line(msg_id, n):
+    import json
+
+    return json.dumps({"type": "assistant", "message": {
+        "id": msg_id, "model": "claude-sonnet-5",
+        "usage": {"input_tokens": n, "output_tokens": n,
+                  "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}) + "\n"
+
+
+def test_repeated_reports_and_merges_do_not_double_count(db, repo, tmp_path, monkeypatch):
+    from copse import git
+
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    boss_t, w_t = tmp_path / "boss.jsonl", tmp_path / "w1.jsonl"
+    boss_t.write_text(_usage_line("b1", 100))
+    w_t.write_text(_usage_line("w1", 1000))
+
+    root_ws = workspaces.adopt_root(db, str(repo))
+    add(db, root_ws, "boss")
+    db.update_agent("boss", transcript_path=str(boss_t))
+    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    add(db, ws, "w1", mode="assign", parent="boss")
+    db.update_agent("w1", transcript_path=str(w_t))
+
+    agents.report_result(db, "w1", "first")
+    agents.report_result(db, "w1", "again, no new work")
+    with w_t.open("a") as f:
+        f.write(_usage_line("w2", 500))
+    agents.report_result(db, "w1", "more work")
+
+    for i, branch in enumerate(("feature", "feature2")):
+        w = ws if branch == "feature" else workspaces.create(db, str(repo), branch).workspace
+        with open(f"{w.path}/f{i}.py", "w") as f:
+            f.write("x = 1\n")
+        git.commit_all(w.path, "work")
+        with boss_t.open("a") as f:
+            f.write(_usage_line(f"b{i + 2}", 10))
+        assert asyncio.run(mcp_server.merge_workspace(w.id)).startswith("Merged")
+
+    rows = db.list_history(ws.repo_root)
+    assert sum(history.tokens_total(r.tokens) for r in rows) == 2 * (1500 + 120)
+    worker_rows = [r for r in reversed(rows) if r.kind == "worker_result"]
+    assert [history.tokens_total(r.tokens) for r in worker_rows] == [2000, 0, 1000]
+    merge_rows = [r for r in reversed(rows) if r.kind == "merge"]
+    assert [history.tokens_total(r.tokens) for r in merge_rows] == [2 * 110, 2 * 10]
+
+
+def test_check_and_milestone_rows_carry_no_tokens(db, repo, tmp_path, monkeypatch):
+    t = tmp_path / "boss.jsonl"
+    t.write_text(_usage_line("b1", 100))
+    root_ws = workspaces.adopt_root(db, str(repo))
+    add(db, root_ws, "boss")
+    db.update_agent("boss", transcript_path=str(t))
+    db.add_autopilot("boss")
+    autopilot.set_goal(db, "boss", "Goal", [("M1", "test -f done.txt", None)])
+    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    (repo / "done.txt").write_text("x")
+
+    asyncio.run(mcp_server.check_milestone())
+
+    rows = db.list_history(root_ws.repo_root)
+    assert {r.kind for r in rows} == {"check", "milestone"}
+    assert all(r.tokens is None for r in rows)
+
+
+def test_history_cli_outside_a_repo_says_it_shows_all(db, tmp_path, monkeypatch):
+    history.record(db, "/elsewhere", "check", task="t")
+    monkeypatch.chdir(tmp_path)
+    res = CliRunner().invoke(app, ["history"])
+    assert res.exit_code == 0, res.output
+    assert "showing all repos" in res.output
+    assert "check" in res.output

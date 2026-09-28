@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS native_subagents (
 CREATE TABLE IF NOT EXISTS usage_cache (
     path TEXT PRIMARY KEY,
     size INTEGER NOT NULL,          -- bytes already parsed
+    inode INTEGER,                  -- st_ino when parsed; a new one means the file was replaced
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
     cache_read_tokens INTEGER NOT NULL DEFAULT 0,
@@ -156,9 +157,19 @@ CREATE TABLE IF NOT EXISTS history (
     profile TEXT,
     task TEXT,                      -- first ~300 chars of the task/summary
     result TEXT,                    -- trimmed result/verdict text
-    tokens TEXT                     -- JSON usage summary, or NULL
+    tokens TEXT                     -- JSON usage since the agent's previous row, or NULL
 );
 CREATE INDEX IF NOT EXISTS history_repo_root_id ON history(repo_root, id);
+-- Each agent's cumulative usage as of its latest history row, so the next row
+-- stores only the difference and summing rows never double counts. Separate
+-- from history so capping history doesn't lose it.
+CREATE TABLE IF NOT EXISTS history_usage_mark (
+    agent_id TEXT PRIMARY KEY,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_creation_tokens INTEGER NOT NULL
+);
 """
 
 
@@ -308,6 +319,9 @@ class DB:
                           ("transcript_path", "TEXT"), ("done_when", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
+        cache_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(usage_cache)")}
+        if "inode" not in cache_cols:
+            self.conn.execute("ALTER TABLE usage_cache ADD COLUMN inode INTEGER")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -633,19 +647,21 @@ class DB:
 
     def set_usage_cache(self, path: str, size: int, input_tokens: int, output_tokens: int,
                         cache_read_tokens: int, cache_creation_tokens: int,
-                        model: str | None, last_message_id: str | None) -> None:
+                        model: str | None, last_message_id: str | None,
+                        inode: int | None = None) -> None:
         with self.tx() as c:
             c.execute(
                 "INSERT INTO usage_cache (path, size, input_tokens, output_tokens, "
-                "cache_read_tokens, cache_creation_tokens, model, last_message_id, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?) "
+                "cache_read_tokens, cache_creation_tokens, model, last_message_id, updated_at, "
+                "inode) VALUES (?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(path) DO UPDATE SET size=excluded.size, "
                 "input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, "
                 "cache_read_tokens=excluded.cache_read_tokens, "
                 "cache_creation_tokens=excluded.cache_creation_tokens, model=excluded.model, "
-                "last_message_id=excluded.last_message_id, updated_at=excluded.updated_at",
+                "last_message_id=excluded.last_message_id, updated_at=excluded.updated_at, "
+                "inode=excluded.inode",
                 (path, size, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                 model, last_message_id, time.time()),
+                 model, last_message_id, time.time(), inode),
             )
 
     # -- history (copse.history) ----------------------------------------------
@@ -659,6 +675,20 @@ class DB:
                 "INSERT INTO history (repo_root, ts, kind, agent_id, branch, profile, task, "
                 "result, tokens) VALUES (?,?,?,?,?,?,?,?,?)",
                 (repo_root, time.time(), kind, agent_id, branch, profile, task, result, tokens),
+            )
+
+    def get_usage_mark(self, agent_id: str) -> sqlite3.Row | None:
+        return self.conn.execute(
+            "SELECT * FROM history_usage_mark WHERE agent_id=?", (agent_id,)
+        ).fetchone()
+
+    def set_usage_mark(self, agent_id: str, input_tokens: int, output_tokens: int,
+                       cache_read_tokens: int, cache_creation_tokens: int) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT OR REPLACE INTO history_usage_mark (agent_id, input_tokens, output_tokens, "
+                "cache_read_tokens, cache_creation_tokens) VALUES (?,?,?,?,?)",
+                (agent_id, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens),
             )
 
     def list_history(self, repo_root: str | None = None, kind: str | None = None,

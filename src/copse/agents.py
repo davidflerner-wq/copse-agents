@@ -10,6 +10,7 @@ nothing ever types into a terminal while the agent is mid-turn.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shlex
@@ -22,6 +23,8 @@ from copse.config import RepoConfig
 from copse.db import DB, Agent, Workspace
 from copse.profiles import load_profile
 from copse.providers import LaunchContext, get_provider
+
+log = logging.getLogger(__name__)
 
 WORKER_FOOTER = """
 
@@ -648,14 +651,18 @@ def report_result(db: DB, agent_id: str, result: str) -> str:
     agent = get(db, agent_id)
     db.set_result(agent.id, result)
     ws = db.get_workspace(agent.workspace_id)
-    u = usage_mod.agent_usage(db, agent)
+    # Usage and history are extras: never let them stop the result arriving.
+    try:
+        u = usage_mod.agent_usage(db, agent)
+    except Exception:
+        log.exception("copse: couldn't read usage for %s", agent.id)
+        u = None
     if ws:
-        history.record(
+        history.record_safely(
             db, ws.repo_root, "review" if agent.mode == "review" else "worker_result",
-            agent_id=agent.id, branch=ws.branch, profile=agent.profile,
-            task=agent.task, result=result, usage=u,
+            agent=agent, usage=u, branch=ws.branch, task=agent.task, result=result,
         )
-    forwarded = f"{result}\n\n{usage_mod.summary_line(u)}" if u else result
+    forwarded = f"{result}\n\n{usage_mod.summary_line(u)}" if u and u.total else result
     if agent.mode in FORWARDING_MODES and agent.parent_id and db.get_agent(agent.parent_id):
         where = f" on branch `{ws.branch}` (workspace {ws.id})" if ws else ""
         send_message(
@@ -891,7 +898,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
     if sid and sid != agent.session_ref:
         db.update_agent(agent_id, session_ref=str(sid))
     transcript = payload.get("transcript_path")
-    if transcript and transcript != agent.transcript_path:
+    if transcript and agent.provider == "claude" and transcript != agent.transcript_path:
         db.update_agent(agent_id, transcript_path=str(transcript))
 
     if event == "session-start":

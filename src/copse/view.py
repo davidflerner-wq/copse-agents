@@ -76,7 +76,7 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
         status = "exited"
     entry = {"id": a.id, "profile": a.profile, "provider": a.provider,
              "status": status, "mode": a.mode}
-    if u:
+    if u and u.total:
         entry["tokens"] = usage_mod.short_summary(u)
     if detail:
         subs = db.native_subagents(a.id) if native_subagents is None else native_subagents

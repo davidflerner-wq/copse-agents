@@ -9,7 +9,7 @@ import subprocess
 
 from mcp.server.mcpserver import MCPServer
 
-from copse import agents, autopilot, gates, git, history, usage as usage_mod, workspaces
+from copse import agents, autopilot, gates, git, history, workspaces
 from copse.config import RepoConfig, load_repo_config
 from copse.db import DB, Agent, Workspace
 from copse.profiles import list_profiles
@@ -331,11 +331,9 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
         except git.GitError as e:
             return f"Not merged: {e}"
         text = f"Merged {ws.branch} into {ws.base_branch} at {target} ({report.summary()})."
-        history.record(
-            db, ws.repo_root, "merge", agent_id=caller.id if caller else None,
-            branch=ws.branch, profile=caller.profile if caller else None,
+        history.record_safely(
+            db, ws.repo_root, "merge", agent=caller, with_usage=True, branch=ws.branch,
             task=f"merge {ws.branch} into {ws.base_branch}", result=text,
-            usage=usage_mod.agent_usage(db, caller) if caller else None,
         )
         if pilot:
             db.bump_progress(pilot.root_id)
@@ -479,19 +477,17 @@ async def check_milestone(milestone: int | None = None) -> str:
             text = autopilot.check_milestones(db, root_id, ws, milestone)
         except autopilot.AutopilotError as e:
             return str(e)
-        u = usage_mod.agent_usage(db, caller) if caller else None
-        for m in db.milestones(root_id):
-            if before.get(m.id) != m.status:
-                history.record(
-                    db, ws.repo_root, "milestone", agent_id=caller.id if caller else None,
-                    branch=ws.branch, profile=caller.profile if caller else None,
-                    task=m.title, result=f"{m.status}\n\n{m.output or ''}", usage=u,
-                )
-        history.record(
-            db, ws.repo_root, "check", agent_id=caller.id if caller else None,
-            branch=ws.branch, profile=caller.profile if caller else None,
+        # No tokens on these rows: the supervisor's usage belongs to its own
+        # report/merge rows, and a check would just re-count it.
+        for m in [m for m in db.milestones(root_id) if before.get(m.id) != m.status]:
+            history.record_safely(
+                db, ws.repo_root, "milestone", agent=caller, branch=ws.branch,
+                task=m.title, result=f"{m.status}\n\n{m.output or ''}",
+            )
+        history.record_safely(
+            db, ws.repo_root, "check", agent=caller, branch=ws.branch,
             task=f"check_milestone({milestone if milestone is not None else 'all'})",
-            result=text, usage=u,
+            result=text,
         )
         return text
 

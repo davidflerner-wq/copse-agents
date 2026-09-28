@@ -159,14 +159,18 @@ incrementally so it's cheap to check often. It shows up:
 
 - in the sidebar and `copse ls`, next to each agent (e.g. `191k tok`)
 - appended to the result a worker or reviewer forwards to its supervisor
-  (e.g. `tokens: 182k in (160k cached) · 9k out · sonnet`)
-- in `copse history`, per row, with a total across the rows shown
+  (e.g. `tokens: 182k in (160k cached, 20k written) · 9k out · sonnet`)
+- in `copse history`, per row, with a total across the rows shown. Each row
+  holds only what its agent used since that agent's previous row, so the
+  total never double counts
 
 `copse history` is an append-only log of what happened: a worker's report, a
-reviewer's verdict, a successful merge, and a milestone check, each with its
-tokens. Unlike `copse ls`, it survives session pruning (`copse prune`), so
+reviewer's verdict, a successful merge, and a milestone check (reports and
+merges carry tokens). Unlike `copse ls`, it survives session pruning (`copse prune`), so
 it's the place to look for what an agent did after its session is gone. It's
-capped at 5000 rows per repo, oldest dropped first.
+capped at 5000 rows per repo, oldest dropped first. Recording usage or
+history never blocks a report, merge or check: a failure there is logged and
+skipped.
 
 ## Repo config: `.copse/config.json`
 

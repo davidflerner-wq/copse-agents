@@ -131,6 +131,9 @@ def test_format_helpers():
     assert usage.format_tokens(999) == "999"
     assert usage.format_tokens(1000) == "1k"
     assert usage.format_tokens(182000) == "182k"
+    assert usage.format_tokens(1500) == "2k"  # half up, not banker's rounding to even
+    assert usage.format_tokens(2500) == "3k"
+    assert usage.format_tokens(2499) == "2k"
     assert usage.short_model("claude-opus-4-7") == "opus"
     assert usage.short_model("claude-sonnet-5") == "sonnet"
     assert usage.short_model(None) == "?"
@@ -139,7 +142,7 @@ def test_format_helpers():
 def test_summary_line_format():
     u = usage.Usage(input_tokens=2000, output_tokens=9000, cache_read_tokens=160000,
                     cache_creation_tokens=20000, model="claude-sonnet-5")
-    assert usage.summary_line(u) == "tokens: 182k in (160k cached) · 9k out · sonnet"
+    assert usage.summary_line(u) == "tokens: 182k in (160k cached, 20k written) · 9k out · sonnet"
 
 
 def test_report_result_forwards_usage_summary(db, tmp_path, monkeypatch):
@@ -171,7 +174,7 @@ def test_report_result_forwards_usage_summary(db, tmp_path, monkeypatch):
     msg = db.pop_pending("boss")
     assert msg is not None
     assert "done: added login" in msg.body
-    assert "tokens: 182k in (160k cached)" in msg.body
+    assert "tokens: 182k in (160k cached, 20k written)" in msg.body
     assert "sonnet" in msg.body
 
 
@@ -218,3 +221,91 @@ def test_agent_entry_reads_once_then_only_stats(db, tmp_path, monkeypatch):
     entry2 = view.agent_entry(db, db.get_agent("a1"))
     assert entry1["tokens"] == entry2["tokens"] == "30 tok"
     assert len(calls) == 1  # the second call found no new bytes: stat only
+
+
+# -- replaced/truncated files, model label, junk ------------------------------
+
+
+def test_truncated_file_is_reparsed_from_the_start(db, tmp_path):
+    t = tmp_path / "sess.jsonl"
+    write(t, [_line("m1", input_tokens=10, output_tokens=20),
+              _line("m2", input_tokens=10, output_tokens=20)])
+    assert usage.transcript_usage(db, str(t)).input_tokens == 20
+
+    t.write_text(_line("m3", input_tokens=1, output_tokens=2))  # truncated in place
+    u = usage.transcript_usage(db, str(t))
+    assert (u.input_tokens, u.output_tokens) == (1, 2)
+
+
+def test_replaced_larger_file_is_reparsed_from_the_start(db, tmp_path):
+    t = tmp_path / "sess.jsonl"
+    write(t, [_line("m1", input_tokens=10, output_tokens=20)])
+    assert usage.transcript_usage(db, str(t)).input_tokens == 10
+
+    new = tmp_path / "new.jsonl"
+    write(new, [_line("m2", input_tokens=1, output_tokens=2),
+                _line("m3", input_tokens=1, output_tokens=2),
+                _line("m4", input_tokens=1, output_tokens=2)])
+    assert new.stat().st_size > t.stat().st_size
+    new.replace(t)  # a new inode, larger than what was cached
+
+    u = usage.transcript_usage(db, str(t))
+    assert (u.input_tokens, u.output_tokens) == (3, 6)
+
+
+def test_model_label_is_the_main_transcripts_and_skips_synthetic(db, tmp_path):
+    t = tmp_path / "sess.jsonl"
+    write(t, [_line("m1", input_tokens=1, model="claude-opus-4-7"),
+              _line("m2", input_tokens=1, model="<synthetic>")])
+    sub = tmp_path / "sess" / "subagents" / "agent-abc.jsonl"
+    write(sub, [_line("m3", input_tokens=1, model="claude-haiku-4-5")])
+    u = usage.transcript_usage(db, str(t))
+    assert u.input_tokens == 3
+    assert u.model == "claude-opus-4-7"
+
+
+def test_malformed_usage_values_are_skipped(db, tmp_path):
+    t = tmp_path / "sess.jsonl"
+    bad = json.dumps({"type": "assistant",
+                      "message": {"id": "bad", "usage": {"input_tokens": "lots"}}}) + "\n"
+    write(t, [bad, _line("m1", input_tokens=5, output_tokens=6)])
+    u = usage.transcript_usage(db, str(t))
+    assert (u.input_tokens, u.output_tokens) == (5, 6)
+
+
+def test_unreadable_file_does_not_raise(db, tmp_path, monkeypatch):
+    t = tmp_path / "sess.jsonl"
+    write(t, [_line("m1", input_tokens=5)])
+
+    def boom(*a, **k):
+        raise PermissionError("nope")
+
+    monkeypatch.setattr(Path, "open", boom)
+    u = usage.transcript_usage(db, str(t))
+    assert u is not None and u.total == 0
+
+
+def test_no_summary_line_when_usage_is_empty(db, repo, monkeypatch):
+    from copse import workspaces
+
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    t = repo.parent / "empty.jsonl"
+    t.write_text("")
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
+                       "@0", None, time.time()))
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", "boss", "assign", "processing", "@1",
+                       None, time.time(), transcript_path=str(t)))
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+
+    agents.report_result(db, "w1", "done")
+    assert "tokens:" not in db.pop_pending("boss").body
+
+
+def test_hook_ignores_transcript_path_for_non_claude_providers(db, repo):
+    from copse import workspaces
+
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    db.add_agent(Agent("a1", ws.id, "developer", "antigravity", None, "assign", "idle", "", None,
+                       time.time()))
+    agents.handle_hook(db, "a1", "prompt-submit", {"transcript_path": "/tmp/x/a1.jsonl"})
+    assert db.get_agent("a1").transcript_path is None
