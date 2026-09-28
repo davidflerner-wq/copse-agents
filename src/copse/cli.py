@@ -156,9 +156,10 @@ def start(
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the copse watch dashboard in a pane under the agent."),
     autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="The supervisor drives toward a goal until it's verified (default: on, or `autopilot` in .copse/config.json)."),
 ) -> None:
-    """Start a fresh chat with an agent here (default: a supervisor), with the
-    dashboard of every agent in this repo beneath it. A session still running
-    here is paused first; `copse continue` brings paused sessions back."""
+    """Start a fresh chat with an agent here (default: a supervisor), with the dashboard alongside.
+
+    A session still running here is paused first; `copse continue` brings
+    paused sessions back."""
     from copse import sessions
     from copse.config import load_repo_config
 
