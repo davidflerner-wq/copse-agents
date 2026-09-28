@@ -46,6 +46,14 @@ who's waiting for your approval. Tell the supervisor what you want. It splits th
 work between workers, each on its own branch, then reviews and merges their
 branches. It starts in under a second.
 
+**The sidebar follows you.** There's one sidebar pane per session root, not
+one per window: switch to any other copse window or session (⏎ in the
+sidebar, `copse attach`, prefix-L back, clicking a pane) and it relocates
+there too, always beside whatever you're looking at, never spawning a second
+dashboard. Scroll it
+with the mouse wheel, PageUp/PageDown, or Home/End when there's more than fits;
+moving the ↑↓ selection scrolls to keep it in view.
+
 When an agent uses Claude Code's own Agent tool, its built-in subagents (Explore,
 Plan, ...) show up nested underneath it in the sidebar too, e.g. `↳ Explore ·
 running 1m`, so you can see what it's fanned out to without leaving copse.
@@ -195,11 +203,12 @@ skipped.
   "default_agent": "developer",
   "fetch": true,
   "checks": ["uv run pytest -q"],
-  "max_agents": 4
+  "max_agents": 4,
+  "pool_size": 1
 }
 ```
 
-The last two are for autopilot and merge gates:
+The last three are for autopilot and merge gates:
 
 | Key | Default | |
 |---|---|---|
@@ -212,6 +221,22 @@ The last two are for autopilot and merge gates:
 | `max_agents` | `4` | workers running at once per session (`0`: no cap) |
 | `check_timeout` | `900` | seconds each check may take |
 | `usage_limit` | `90` | autopilot stops pushing on at this % of your Claude usage limit |
+| `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
+
+When `pool_size` is greater than `0`, a claimed worktree keeps the path and
+port block it was built with -- it's never moved, and its port block is fixed
+before `setup` ever runs. That means `setup` (and anything it writes) must
+not depend on the workspace's branch name or assume it's running at
+`<worktrees_dir>/<repo>/<branch>`; use `$COPSE_WORKSPACE_PATH` and
+`$COPSE_BRANCH` instead of hardcoding either.
+
+A pool entry's `setup` runs under a placeholder identity (a `copse-pool/*`
+branch and a `pool-*` name) before any workspace claims it, but its
+`teardown` can run later against the real workspace's branch and name -- or,
+if the entry is discarded unclaimed, against that same placeholder identity.
+Only `$COPSE_WORKSPACE_PATH` and `$COPSE_PORT_BASE` are guaranteed to be the
+same value in both runs; `setup` must not write anything `teardown` needs to
+find by branch or workspace name/id.
 
 `.copse/config.local.json` is gitignored and overrides keys for you only. For
 `setup`/`teardown` it can also give `{"before": [...], "after": [...]}` to run
@@ -362,6 +387,10 @@ add rules to `~/.gemini/antigravity-cli/settings.json`, for example:
   `copse _hook <event>`. The `Stop` hook also delivers queued messages: it
   returns `{"decision": "block", "reason": <message>}`, so Claude continues with
   the message as its next instruction and nothing is typed into a busy terminal.
+  A message queued for an *idle* agent is typed in instead, but only once copse
+  checks the screen and finds a clear chat input: not text you're still typing,
+  and not Claude Code's background-session launcher (which would otherwise
+  start a whole new session). Otherwise it stays queued for the next chance.
 - **Results are explicit.** Workers call the `report_result` MCP tool instead of
   having their output parsed from the screen. If a worker stops without
   reporting, the Stop hook reminds it once.

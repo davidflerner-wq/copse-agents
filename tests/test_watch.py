@@ -47,6 +47,70 @@ def test_ago():
     assert [watch.ago(s) for s in (5, 125, 3720, 90000)] == ["5s", "2m", "1h02m", "1d"]
 
 
+def test_clamp_scroll_keeps_offset_in_bounds():
+    assert watch.clamp_scroll(0, total=10, visible=5) == 0
+    assert watch.clamp_scroll(-3, total=10, visible=5) == 0
+    assert watch.clamp_scroll(100, total=10, visible=5) == 5
+    # content that fits entirely: no scrolling at all
+    assert watch.clamp_scroll(3, total=4, visible=5) == 0
+
+
+def test_clamp_scroll_reclamps_when_content_shrinks():
+    # e.g. an agent finished and its lines disappeared from the render
+    assert watch.clamp_scroll(20, total=10, visible=5) == 5
+    assert watch.clamp_scroll(20, total=3, visible=5) == 0
+
+
+def test_scroll_into_view_scrolls_down_to_reveal_a_later_selection():
+    assert watch.scroll_into_view(0, index=12, visible=5, total=20) == 8
+
+
+def test_scroll_into_view_scrolls_up_to_reveal_an_earlier_selection():
+    assert watch.scroll_into_view(10, index=2, visible=5, total=20) == 2
+
+
+def test_scroll_into_view_leaves_offset_when_selection_already_visible():
+    assert watch.scroll_into_view(4, index=6, visible=5, total=20) == 4
+
+
+def test_content_layout_shows_no_indicators_when_everything_fits():
+    rows, above, below = watch.content_layout(total=10, height=10, offset=0)
+    assert (rows, above, below) == (10, False, False)
+
+
+def test_content_layout_reserves_a_row_for_more_below():
+    rows, above, below = watch.content_layout(total=11, height=10, offset=0)
+    assert (rows, above, below) == (9, False, True)
+
+
+def test_content_layout_reserves_rows_for_both_indicators():
+    rows, above, below = watch.content_layout(total=20, height=10, offset=5)
+    assert (rows, above, below) == (8, True, True)
+
+
+def test_content_layout_only_more_above_when_scrolled_to_the_end():
+    rows, above, below = watch.content_layout(total=15, height=10, offset=6)
+    assert (rows, above, below) == (9, True, False)
+
+
+def test_nearest_visible_row_prefers_a_row_already_on_the_new_page():
+    assert watch.nearest_visible_row([2, 8, 15], offset=5, visible=10) == 1  # row 8
+
+
+def test_nearest_visible_row_falls_back_to_the_closest_row_when_none_are_visible():
+    assert watch.nearest_visible_row([2, 30], offset=10, visible=5) == 0
+    assert watch.nearest_visible_row([2, 30], offset=25, visible=5) == 1
+
+
+def test_nearest_visible_row_with_no_agents_is_zero():
+    assert watch.nearest_visible_row([], offset=5, visible=10) == 0
+
+
+def test_scroll_into_view_clamps_to_content_bounds():
+    assert watch.scroll_into_view(0, index=19, visible=5, total=20) == 15
+    assert watch.scroll_into_view(0, index=0, visible=5, total=3) == 0
+
+
 def test_status_since_only_moves_on_change(tmp_path, monkeypatch):
     from copse.db import Agent
     db = DB(str(tmp_path / "t.db"))
@@ -74,6 +138,22 @@ def test_old_databases_are_migrated(tmp_path):
     assert a.status_since is None and a.status == "idle"
     db.set_status("a", "processing")
     assert db.get_agent("a").status_since is not None
+
+
+def test_old_databases_get_the_sidebars_table(tmp_path):
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.executescript("""
+        CREATE TABLE agents (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, profile TEXT NOT NULL,
+          provider TEXT NOT NULL, parent_id TEXT, mode TEXT NOT NULL, status TEXT NOT NULL,
+          tmux_window TEXT NOT NULL, result TEXT, created_at REAL NOT NULL);
+        INSERT INTO agents VALUES ('a','w','p','claude',NULL,'assign','idle','@1',NULL,7.0);
+    """)
+    con.commit(); con.close()
+    db = DB(str(path))
+    assert db.get_sidebar_pane("a") is None  # table exists and is queryable
+    db.set_sidebar_pane("a", "%1")
+    assert db.get_sidebar_pane("a") == "%1"
 
 
 def test_older_copse_ignores_columns_from_a_newer_one(tmp_path):
