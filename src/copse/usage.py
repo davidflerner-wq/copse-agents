@@ -182,6 +182,13 @@ def short_model(model: str | None) -> str:
     for name in ("opus", "sonnet", "haiku"):
         if name in m:
             return name
+    # For open-weight models, drop provider prefix and tag suffix
+    if "/" in model:
+        # Drop everything up to the last "/"
+        model = model[model.rindex("/") + 1:]
+    if ":" in model:
+        # Drop everything from the first ":"
+        model = model[:model.index(":")]
     return model
 
 

@@ -137,6 +137,10 @@ def test_format_helpers():
     assert usage.short_model("claude-opus-4-7") == "opus"
     assert usage.short_model("claude-sonnet-5") == "sonnet"
     assert usage.short_model(None) == "?"
+    # Test new functionality for open-weight models
+    assert usage.short_model("qwen3-coder:30b") == "qwen3-coder"
+    assert usage.short_model("qwen/qwen3.8-27b:free") == "qwen3.8-27b"
+    assert usage.short_model("sonnet-4-5") == "sonnet"
 
 
 def test_summary_line_format():
