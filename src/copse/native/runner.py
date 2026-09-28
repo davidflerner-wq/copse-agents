@@ -145,7 +145,7 @@ def server_context(endpoint: Endpoint, timeout: float = 3.0) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def copse_tools(db: DB,agent_id: str, ws: Workspace, mode: str) -> list[Tool]:
+def copse_tools(db: DB, agent_id: str, ws: Workspace, mode: str) -> list[Tool]:
     """copse's own tools, called in-process. Named as the MCP server names
     them, so the worker footers' instructions hold."""
     obj = {"type": "object"}
