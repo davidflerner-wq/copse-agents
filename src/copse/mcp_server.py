@@ -370,7 +370,7 @@ async def request_review(workspace: str, focus: str | None = None) -> str:
         # reviewer was told a summary is coming.
         subprocess.Popen(
             [*copse_invocation(), "_deliver-checks", reviewer.id, ws.id],
-            start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     return (f"Reviewer {reviewer.id} ({reviewer.profile}/{reviewer.provider}) is reviewing "
             f"{ws.branch}. Its verdict will arrive as a message.")

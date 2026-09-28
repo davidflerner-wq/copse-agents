@@ -852,6 +852,7 @@ def deliver_check_summary(db: DB, reviewer_id: str, ws: Workspace, cfg: RepoConf
 
     if db.get_agent(reviewer_id) is None:
         return
+    sha = gates.head(ws)  # label with the commit the checks ran on
     try:
         summary = gates.check_summary(db, ws, cfg)
     except Exception as e:
@@ -861,7 +862,7 @@ def deliver_check_summary(db: DB, reviewer_id: str, ws: Workspace, cfg: RepoConf
     if reviewer is None or reviewer.result is not None or reviewer.status == "done":
         return  # it submitted its review, was closed, or was removed while the checks ran
 
-    text = (f"Checks for {ws.branch} at {gates.head(ws)[:8]}:\n\n{summary}" if summary
+    text = (f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary
             else "No checks are configured for this repo.")
     db.enqueue(reviewer_id, text, None)
     flush(db, reviewer_id)
