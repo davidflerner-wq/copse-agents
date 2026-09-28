@@ -4,11 +4,14 @@
 ref resolution, two rev-lists, dirty files). Redrawn every 2s across N
 workspaces, that adds up. This module:
 
-- resolves and caches ``base_ref`` per workspace for the process lifetime
-  (it rarely changes once a workspace exists), and
+- caches ``base_ref`` per workspace behind a cheap fingerprint of the local
+  ref, the origin ref and ``packed-refs`` (it rarely changes once a
+  workspace exists, but a fetch or pull can flip which side it resolves to),
+  and
 - caches the rest of the status behind a cheap fingerprint (mtimes of the
-  worktree's index and HEAD files, plus the base ref's mtime/sha), so a
-  workspace nothing has touched costs zero git subprocesses on a redraw.
+  worktree's index, HEAD and logs/HEAD files, plus the base ref's
+  mtime/sha), so a workspace nothing has touched costs zero git subprocesses
+  on a redraw.
 
 The cache is process-lifetime, module-level state: correct for one
 long-lived ``copse watch``/``copse ls`` process, not meant to be shared
@@ -22,9 +25,9 @@ from pathlib import Path
 
 from copse import git
 
-TTL = 30.0  # safety net: recompute at least this often even if nothing else invalidated the cache
+TTL = 10.0  # safety net: recompute at least this often even if nothing else invalidated the cache
 
-_base_ref_cache: dict[tuple[str, str], str] = {}
+_base_ref_cache: dict[tuple[str, str], tuple[tuple, str]] = {}
 _status_cache: dict[str, tuple[tuple, float, git.Status]] = {}
 
 
@@ -34,23 +37,18 @@ def clear() -> None:
     _status_cache.clear()
 
 
-def _cached_base_ref(path: Path, base: str) -> str:
-    key = (str(path), base)
-    ref = _base_ref_cache.get(key)
-    if ref is None:
-        ref = git.base_ref(path, base)
-        _base_ref_cache[key] = ref
-    return ref
-
-
 def _worktree_gitdir(path: Path) -> Path:
     """The worktree's private gitdir: ``path/.git`` itself for a plain repo,
-    or wherever its ``.git`` file points for a linked worktree."""
+    or wherever its ``.git`` file points for a linked worktree. That pointer
+    may be a relative path (git writes one, for example, when the worktree
+    was created with a relative ``-C``), resolved against the worktree's own
+    directory rather than the process's cwd."""
     dotgit = path / ".git"
     if dotgit.is_dir():
         return dotgit
     text = dotgit.read_text()
-    return Path(text.split(":", 1)[1].strip())
+    raw = Path(text.split(":", 1)[1].strip())
+    return raw if raw.is_absolute() else (path / raw).resolve()
 
 
 def _common_gitdir(worktree_gitdir: Path) -> Path:
@@ -77,11 +75,36 @@ def _mtime(path: Path) -> float:
         return 0.0
 
 
-def _fingerprint(path: Path, ref: str) -> tuple[float, float, float, float]:
-    wt_gitdir = _worktree_gitdir(path)
-    common = _common_gitdir(wt_gitdir)
+def _refs_fingerprint(common: Path, base: str) -> tuple[float, float, float]:
+    """mtimes of the local ``base`` ref, its ``origin/<base>`` tracking ref,
+    and ``packed-refs``: whichever of these changes, ``git.base_ref`` might
+    now resolve differently (a fetch, a pull, or refs getting packed)."""
+    local = _mtime(common / "refs" / "heads" / base)
+    origin = _mtime(common / "refs" / "remotes" / "origin" / base)
+    packed = _mtime(common / "packed-refs")
+    return (local, origin, packed)
+
+
+def _cached_base_ref(path: Path, base: str, common: Path) -> str:
+    key = (str(path), base)
+    fp = _refs_fingerprint(common, base)
+    hit = _base_ref_cache.get(key)
+    if hit is not None and hit[0] == fp:
+        return hit[1]
+    ref = git.base_ref(path, base)
+    _base_ref_cache[key] = (fp, ref)
+    return ref
+
+
+def _fingerprint(path: Path, wt_gitdir: Path, common: Path,
+                 ref: str) -> tuple[float, float, float, float, float]:
     index_mtime = _mtime(wt_gitdir / "index")
     head_mtime = _mtime(wt_gitdir / "HEAD")
+    # Catches ref-moving operations (commit --amend, reset --soft, rebase)
+    # that update the current branch's own ref file -- which this fingerprint
+    # otherwise never looks at -- without touching the index, HEAD, or the
+    # base ref: git appends to logs/HEAD any time HEAD's target commit moves.
+    logs_head_mtime = _mtime(wt_gitdir / "logs" / "HEAD")
     ref_mtime = _mtime(_ref_file(common, ref))
     if ref_mtime == 0.0:
         ref_mtime = _mtime(common / "packed-refs")
@@ -91,7 +114,7 @@ def _fingerprint(path: Path, ref: str) -> tuple[float, float, float, float]:
     # cheaply. Editing an existing tracked file in place touches neither this
     # nor the index, so that case waits for the TTL safety net.
     root_mtime = _mtime(path)
-    return (index_mtime, head_mtime, ref_mtime, root_mtime)
+    return (index_mtime, head_mtime, logs_head_mtime, ref_mtime, root_mtime)
 
 
 def _parse_branch_header(line: str) -> tuple[str | None, bool, int]:
@@ -137,9 +160,14 @@ def cached_status(path: str | Path, base: str | None, now: float | None = None) 
         return git.status(path, base)
     path = Path(path)
     now = time.time() if now is None else now
-    ref = _cached_base_ref(path, base)
     try:
-        fp = _fingerprint(path, ref)
+        wt_gitdir = _worktree_gitdir(path)
+        common = _common_gitdir(wt_gitdir)
+    except OSError:
+        return git.status(path, base)
+    ref = _cached_base_ref(path, base, common)
+    try:
+        fp = _fingerprint(path, wt_gitdir, common, ref)
     except OSError:
         return _compute_status(path, base, ref)
     key = str(path)
@@ -153,7 +181,7 @@ def cached_status(path: str | Path, base: str | None, now: float | None = None) 
     # even when nothing changed, so re-fingerprint *after* computing: caching
     # the pre-call fingerprint would make every call look stale.
     try:
-        fp = _fingerprint(path, ref)
+        fp = _fingerprint(path, wt_gitdir, common, ref)
     except OSError:
         return st
     _status_cache[key] = (fp, now, st)

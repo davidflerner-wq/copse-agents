@@ -320,7 +320,7 @@ def test_dashboard_never_sleeps_or_reads_idle_screens(db, root, monkeypatch):
     with_goal(db)
     add_agent(db, ws, "w1", status="idle", status_since=LONG_AGO)
     add_agent(db, ws, "w2", status="idle")
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
 
     def no_sleep(s):
         raise AssertionError("the dashboard slept")

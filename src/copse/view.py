@@ -105,24 +105,27 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
     return entry
 
 
-def snapshot(db: DB, repo_root: str | None) -> list[dict]:
+def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> list[dict]:
     now = time.time()
     by_parent = db.all_native_subagents()
-    panes = tmux.list_panes()
+    if panes is None:
+        panes = tmux.list_panes()
     return [workspace_entry(db, ws, detail=True, native_subagents=by_parent, now=now, panes=panes)
             for ws in db.find_workspaces(repo_root)]
 
 
-def autopilot_entry(db: DB, repo_root: str | None) -> dict | None:
+def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> dict | None:
     """The goal and milestones of the newest running autopilot session in
-    ``repo_root``, for the sidebar."""
+    ``repo_root``, for the sidebar. ``panes`` should be the same
+    ``tmux.list_panes()`` result passed to ``snapshot`` for this refresh, so
+    liveness isn't checked with a second tmux subprocess."""
     from copse import autopilot
 
     if not repo_root:
         return None
     roots = [a for ws in db.find_workspaces(repo_root) for a in db.list_agents(ws.id)
              if a.mode == "interactive" and a.status not in ("paused", "done")
-             and db.get_autopilot(a.id) and agents.is_alive(a)]
+             and db.get_autopilot(a.id) and agents.is_alive(a, panes)]
     if not roots:
         return None
     root = max(roots, key=lambda a: a.created_at)

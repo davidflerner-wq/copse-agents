@@ -1,6 +1,8 @@
+import dataclasses
 import os
 import shutil
 import time
+from pathlib import Path
 
 import pytest
 
@@ -134,6 +136,127 @@ def test_status_matches_old_status_for_missing_base(db, repo):
     status_cache.clear()
     with pytest.raises(git.GitError):
         status_cache.cached_status(ws.path, "ghost")
+
+
+# -- review fixes: base_ref invalidation, relative gitdir, tmux edge cases --
+
+
+def test_base_ref_recomputed_when_origin_ref_changes(db, repo):
+    ws = make_workspaces(db, repo, ["feature"])[0]
+    wt_gitdir = status_cache._worktree_gitdir(Path(ws.path))
+    common = status_cache._common_gitdir(wt_gitdir)
+
+    first = status_cache._cached_base_ref(Path(ws.path), "main", common)
+    assert first == "main"  # local main isn't behind origin yet
+
+    other = repo.parent / "other"
+    sh(f"git clone -q {repo.parent / 'origin.git'} {other}", repo.parent)
+    (other / "b.txt").write_text("b")
+    sh("git add -A && git commit -qm upstream && git push -q", other)
+    sh("git fetch -q origin main", ws.path)
+
+    second = status_cache._cached_base_ref(Path(ws.path), "main", common)
+    assert second == "origin/main"  # local main is now behind: re-resolved, not stale-cached
+
+
+def test_base_ref_recomputed_when_local_ref_changes(db, repo):
+    ws = make_workspaces(db, repo, ["feature"])[0]
+    wt_gitdir = status_cache._worktree_gitdir(Path(ws.path))
+    common = status_cache._common_gitdir(wt_gitdir)
+
+    other = repo.parent / "other"
+    sh(f"git clone -q {repo.parent / 'origin.git'} {other}", repo.parent)
+    (other / "b.txt").write_text("b")
+    sh("git add -A && git commit -qm upstream && git push -q", other)
+    sh("git fetch -q origin main", ws.path)
+
+    first = status_cache._cached_base_ref(Path(ws.path), "main", common)
+    assert first == "origin/main"
+
+    sh("git pull -q origin main", repo)  # local main catches back up
+
+    second = status_cache._cached_base_ref(Path(ws.path), "main", common)
+    assert second == "main"  # re-resolved now that local isn't behind any more
+
+
+def test_base_ref_recomputed_when_packed_refs_change(db, repo):
+    ws = make_workspaces(db, repo, ["feature"])[0]
+    wt_gitdir = status_cache._worktree_gitdir(Path(ws.path))
+    common = status_cache._common_gitdir(wt_gitdir)
+
+    other = repo.parent / "other"
+    sh(f"git clone -q {repo.parent / 'origin.git'} {other}", repo.parent)
+    (other / "b.txt").write_text("b")
+    sh("git add -A && git commit -qm upstream && git push -q", other)
+    sh("git fetch -q origin main", ws.path)
+
+    first = status_cache._cached_base_ref(Path(ws.path), "main", common)
+    assert first == "origin/main"
+
+    sh("git pull -q origin main", repo)
+    sh("git pack-refs --all", repo)  # packs refs/heads/main away into packed-refs
+
+    second = status_cache._cached_base_ref(Path(ws.path), "main", common)
+    assert second == "main"
+
+
+def test_relative_gitdir_is_resolved_against_worktree(tmp_path):
+    real_gitdir = tmp_path / "elsewhere" / ".git" / "worktrees" / "wt"
+    real_gitdir.mkdir(parents=True)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text("gitdir: ../elsewhere/.git/worktrees/wt\n")
+
+    assert status_cache._worktree_gitdir(wt) == real_gitdir.resolve()
+
+
+def test_soft_reset_is_caught_by_logs_head_in_fingerprint(db, repo):
+    ws = make_workspaces(db, repo, ["feature"])[0]
+    with open(os.path.join(ws.path, "f.txt"), "w") as f:
+        f.write("f")
+    git.commit_all(ws.path, "feature work")
+
+    first = status_cache.cached_status(ws.path, "main")
+    assert first.ahead == 1
+
+    # Undoes the local commit while leaving the index, HEAD, the base ref and
+    # the worktree root all untouched -- only logs/HEAD records it.
+    sh("git reset --soft HEAD~1", Path(ws.path))
+
+    second = status_cache.cached_status(ws.path, "main")
+    assert second.ahead == 0
+
+
+@pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
+def test_list_panes_includes_legacy_window_ids(db, repo):
+    ws = make_workspaces(db, repo, ["one"])[0]
+    a = agents.spawn(db, ws, "developer", provider_name="shell")
+    try:
+        deadline = time.time() + 5
+        while time.time() < deadline and not agents.is_alive(a):
+            time.sleep(0.1)
+        assert agents.is_alive(a)
+
+        window_id = tmux._tmux(
+            "display-message", "-p", "-t", a.tmux_window, "#{window_id}"
+        ).stdout.strip()
+        panes = tmux.list_panes()
+        assert panes.get(window_id) is True
+
+        legacy = dataclasses.replace(a, tmux_window=window_id)
+        assert agents.is_alive(legacy, panes)
+    finally:
+        tmux.kill_session(ws.tmux_session)
+
+
+def test_list_panes_empty_when_tmux_not_installed(monkeypatch):
+    monkeypatch.setattr(tmux.shutil, "which", lambda name: None)
+    assert tmux.list_panes() == {}
+
+
+def test_list_panes_empty_when_no_server_running(monkeypatch):
+    monkeypatch.setenv("COPSE_TMUX_SOCKET", f"copse-test-no-server-{os.getpid()}")
+    assert tmux.list_panes() == {}
 
 
 # -- tmux: one list-panes per snapshot, shared across agents -----------------
