@@ -184,11 +184,12 @@ skipped.
   "default_agent": "developer",
   "fetch": true,
   "checks": ["uv run pytest -q"],
-  "max_agents": 4
+  "max_agents": 4,
+  "pool_size": 1
 }
 ```
 
-The last two are for autopilot and merge gates:
+The last three are for autopilot and merge gates:
 
 | Key | Default | |
 |---|---|---|
@@ -200,6 +201,14 @@ The last two are for autopilot and merge gates:
 | `max_agents` | `4` | workers running at once per session (`0`: no cap) |
 | `check_timeout` | `900` | seconds each check may take |
 | `usage_limit` | `90` | autopilot stops pushing on at this % of your Claude usage limit |
+| `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
+
+When `pool_size` is greater than `0`, a claimed worktree keeps the path and
+port block it was built with -- it's never moved, and its port block is fixed
+before `setup` ever runs. That means `setup` (and anything it writes) must
+not depend on the workspace's branch name or assume it's running at
+`<worktrees_dir>/<repo>/<branch>`; use `$COPSE_WORKSPACE_PATH` and
+`$COPSE_BRANCH` instead of hardcoding either.
 
 `.copse/config.local.json` is gitignored and overrides keys for you only. For
 `setup`/`teardown` it can also give `{"before": [...], "after": [...]}` to run

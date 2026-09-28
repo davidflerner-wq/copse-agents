@@ -79,6 +79,11 @@ def remote_branch_exists(root: str | Path, branch: str, remote: str = "origin") 
     return ok(["show-ref", "--verify", "--quiet", f"refs/remotes/{remote}/{branch}"], root)
 
 
+def list_branches(root: str | Path, pattern: str = "*") -> list[str]:
+    proc = out(["for-each-ref", "--format=%(refname:short)", f"refs/heads/{pattern}"], root)
+    return [b for b in proc.splitlines() if b]
+
+
 def has_remote(root: str | Path, remote: str = "origin") -> bool:
     return remote in out(["remote"], root).split()
 
@@ -158,6 +163,11 @@ def add_worktree(root: str | Path, path: str | Path, branch: str, start: str) ->
         return "remote"
     run(["worktree", "add", "--no-track", "-b", branch, str(path), start], root)
     return "new"
+
+
+def move_worktree(root: str | Path, src: str | Path, dest: str | Path) -> None:
+    Path(dest).parent.mkdir(parents=True, exist_ok=True)
+    run(["worktree", "move", str(src), str(dest)], root)
 
 
 def remove_worktree(root: str | Path, path: str | Path, force: bool = False) -> None:
