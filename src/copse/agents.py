@@ -699,6 +699,8 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True) -> list[Agent]:
                                             bool(a.headless)) + RESUME_NOTE
         else:
             prompt = (a.task + RESUME_NOTE) if a.task else None
+        if a.dismissed_at is not None:
+            db.update_agent(a.id, dismissed_at=None)  # running again: show it again
         _launch(db, a, ws, prompt=prompt, resume=ref,
                 watch_pane=watch_pane and a.id == root_id, background_setup=True)
         resumed.append(a)
@@ -1030,12 +1032,30 @@ def close_later(agent_id: str, delay: float = 5.0) -> None:
     )
 
 
-def kill(db: DB, agent_id: str) -> None:
-    agent = get(db, agent_id)
+def _stop(db: DB, agent: Agent) -> None:
     if agent.tmux_window:
         tmux.kill_window(agent.tmux_window)
     db.end_native_subagents(agent.id)
+
+
+def kill(db: DB, agent_id: str) -> None:
+    agent = get(db, agent_id)
+    _stop(db, agent)
     db.delete_agent(agent.id)
+
+
+def close(db: DB, agent_id: str, panes: dict[str, bool] | None = None) -> Agent:
+    """Hide an agent from the sidebar for good, stopping it first if it's
+    still running. Unlike ``kill`` its record stays, and nothing on disk is
+    touched: its worktree and branch keep any unmerged work, `copse ls` still
+    lists it, and a paused session can still be continued (which shows it
+    again). Returns the agent as it was before closing."""
+    agent = get(db, agent_id)
+    if is_alive(agent, panes):
+        _stop(db, agent)
+        db.set_status(agent.id, "done" if agent.result is not None else "paused")
+    db.update_agent(agent.id, dismissed_at=time.time())
+    return agent
 
 
 # -- delegation (used by the MCP tools) ------------------------------------
@@ -1319,6 +1339,14 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
     return None
 
 
+def agent_for_session(db: DB, session_id: object) -> str | None:
+    """The newest agent whose CLI session is ``session_id``, if any."""
+    if not session_id:
+        return None
+    matches = [a for a in db.list_agents() if a.session_ref == str(session_id)]
+    return matches[-1].id if matches else None
+
+
 def tell_parent_unreported(db: DB, agent: Agent) -> None:
     """A worker stopped again after being reminded to report, still without a
     result. It won't be reminded again on its own, and its supervisor has
@@ -1344,10 +1372,15 @@ def tell_parent_unreported(db: DB, agent: Agent) -> None:
         pass
 
 
-def hook_main(db: DB, agent_id: str, event: str, stdin_text: str) -> str:
+def hook_main(db: DB, agent_id: str, event: str, stdin_text: str, trusted: bool = True) -> str:
+    """``trusted`` is False when ``agent_id`` came from the environment,
+    which can be stale (see ClaudeCode._hook): then an agent already known
+    by the payload's session id wins over it."""
     try:
         payload = json.loads(stdin_text) if stdin_text.strip() else {}
     except json.JSONDecodeError:
         payload = {}
+    if not trusted:
+        agent_id = agent_for_session(db, payload.get("session_id")) or agent_id
     out = handle_hook(db, agent_id, event, payload)
     return json.dumps(out) if out else ""
