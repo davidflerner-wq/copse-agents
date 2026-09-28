@@ -377,9 +377,13 @@ def capture(target: str, lines: int = 200, escapes: bool = False) -> str:
     return _tmux("capture-pane", "-p", "-J", *flags, "-t", target, "-S", f"-{lines}").stdout
 
 
-def paste(target: str, text: str, submit: bool = True) -> None:
+def paste(target: str, text: str, submit: bool = True, lead: str | None = None) -> None:
     """Paste ``text`` as one bracketed paste (so newlines don't submit early),
-    then press Enter."""
+    then press Enter. ``lead``, a single line, is typed before it instead of
+    pasted: agent CLIs treat pasted text as untrusted content, and typed
+    text as the person's own words, so the lead is what vouches for it."""
+    if lead:
+        _tmux("send-keys", "-t", target, "-l", lead.replace("\n", " ") + " ")
     buf = f"copse-{uuid.uuid4().hex[:8]}"
     _tmux("load-buffer", "-b", buf, "-", input=text)
     _tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", target)

@@ -554,3 +554,33 @@ def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws):
     assert "Don't run the full suite yourself" in prompt and "`uv run pytest -q`" in prompt
     sub = agents.subagent_prompt("You are a subagent.", "add a flag", ws, None)
     assert "Don't run the full suite yourself" in sub
+
+
+def test_flush_types_a_lead_naming_the_sender(db, ws, monkeypatch):
+    """Agent CLIs distrust pasted text, so copse vouches for its delivery by
+    typing (not pasting) a line naming the sender."""
+    fake_agent(db, ws, status="processing", agent_id="sup1")
+    fake_agent(db, ws, status="idle", mode="assign", parent="sup1")
+    db.enqueue("a1", agents.format_message(db, "fix the test", "sup1"), "sup1")
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
+    calls = []
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: calls.append((body, k.get("lead"))))
+    assert agents.flush(db, "a1") is True
+    (body, lead), = calls
+    assert "fix the test" in body
+    assert lead == "copse delivered this message from developer agent sup1:"
+
+
+def test_no_lead_is_typed_into_a_plain_shell(db, ws):
+    a = fake_agent(db, ws)
+    a.provider = "shell"
+    assert agents.message_lead(db, a, "sup1") is None
+
+
+def test_claude_agents_are_told_what_vouches_for_a_message():
+    from copse.profiles import load_profile
+    from copse.providers import DELIVERY_NOTE, LaunchContext
+
+    argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "hi", mode="assign"))
+    prompt = argv[argv.index("--append-system-prompt") + 1]
+    assert DELIVERY_NOTE in prompt and load_profile("developer").prompt in prompt
