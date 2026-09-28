@@ -314,6 +314,7 @@ def test_context_is_trimmed_then_folded_to_fit(fake, tmp_path):
     fake.replies = [openai_reply(calls=[(f"c{i}", "Read", {"path": "big.txt"})]) for i in range(12)]
     fake.replies.append(openai_reply("done"))
     a = agent(fake, tmp_path, config=LoopConfig(context_tokens=2000, keep_recent=4, old_result_chars=100))
+    a._model_summary = lambda head, folded: None  # the deterministic fold; test_native_fold covers the model's
     assert a.run("the task") == "done"
     # Every request stayed near the budget: the recent messages kept verbatim
     # (two 4k results) are what's left over it.
