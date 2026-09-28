@@ -111,12 +111,36 @@ def _dep_branch(db: DB, dep: str) -> str:
     return dep
 
 
+def _dep_task(db: DB, repo_root: str, dep: str) -> Task | None:
+    """The task copse is tracking for ``dep`` (an agent id or branch name), if
+    any. A dependency copse started itself is tracked precisely by state
+    (merged or not); an untracked one (e.g. a branch never assigned through
+    copse) falls back to a git ancestry check in ``unmet_dependencies``."""
+    branch = _dep_branch(db, dep)
+    candidates = [t for t in db.list_tasks(repo_root)
+                  if t.state != "cancelled" and (t.agent_id == dep or t.branch == branch)]
+    return max(candidates, key=lambda t: t.created_at) if candidates else None
+
+
 def unmet_dependencies(db: DB, caller_ws: Workspace, depends_on: list[str] | None) -> list[str]:
-    """``depends_on`` entries not yet merged into ``caller_ws``'s branch."""
+    """``depends_on`` entries not yet merged into ``caller_ws``'s branch.
+
+    A dependency a task hasn't diverged from yet (no commits beyond its base)
+    would trivially satisfy a plain git ancestry check even though it hasn't
+    been merged, so a dependency copse is tracking as a task is judged by its
+    recorded state (only 'merged' counts) instead; only a dependency copse
+    never started falls back to ancestry."""
     if not depends_on:
         return []
-    return [dep for dep in depends_on
-            if not git.ok(["merge-base", "--is-ancestor", _dep_branch(db, dep), "HEAD"], caller_ws.path)]
+    unmet = []
+    for dep in depends_on:
+        task = _dep_task(db, caller_ws.repo_root, dep)
+        if task is not None:
+            if task.state != "merged":
+                unmet.append(dep)
+        elif not git.ok(["merge-base", "--is-ancestor", _dep_branch(db, dep), "HEAD"], caller_ws.path):
+            unmet.append(dep)
+    return unmet
 
 
 def _dep_matches(dep: str, ws: Workspace, worker_id: str | None) -> bool:
@@ -178,11 +202,16 @@ def start_queued(db: DB, task: Task) -> Agent:
 
 
 def on_merged(db: DB, ws: Workspace) -> None:
-    """``ws``'s branch was just merged into its base: start any pending task
-    that was only waiting on it and now has every dependency merged, and tell
-    its caller."""
+    """``ws``'s branch was just merged into its base: mark its own task
+    'merged' (so dependents judge it correctly, and it stops counting as
+    started), then start any pending task that was only waiting on it and now
+    has every dependency merged, and tell its caller."""
     worker = agents.workspace_worker(db, ws)
     dep_ref = worker.id if worker else ws.branch
+    if worker:
+        for t in db.list_tasks(ws.repo_root, state="started"):
+            if t.agent_id == worker.id:
+                db.update_task(t.id, state="merged")
     for t in db.list_tasks(ws.repo_root, state="pending"):
         deps = _loads(t.depends_on)
         if not any(_dep_matches(d, ws, worker.id if worker else None) for d in deps):
@@ -230,7 +259,7 @@ def list_text(db: DB, repo_root: str) -> str:
     """Pending and cancelled tasks: started ones already show in list_agents."""
     lines = []
     for t in db.list_tasks(repo_root):
-        if t.state == "started":
+        if t.state not in ("pending", "cancelled"):
             continue
         deps = _loads(t.depends_on)
         parts = [t.id, t.state, t.profile, f"branch={t.branch or '(auto)'}"]

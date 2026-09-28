@@ -139,7 +139,8 @@ def test_depends_on_queues_the_task_until_the_dependency_is_unmet(db, repo, boss
     assert not any(w.branch == "feat-b" for w in db.find_workspaces(str(repo)))
 
 
-def test_queued_task_auto_starts_after_dependency_merges_cut_from_updated_base(db, repo, boss):
+def test_queued_task_auto_starts_after_dependency_merges_cut_from_updated_base(db, repo, boss, monkeypatch):
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
     out_a = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
     worker_a = started_worker_id(out_a)
     ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
@@ -152,10 +153,9 @@ def test_queued_task_auto_starts_after_dependency_merges_cut_from_updated_base(d
     merge_out = asyncio.run(mcp_server.merge_workspace(ws_a.id))
     assert "Merged" in merge_out
 
-    [t] = db.list_tasks(str(repo), state="started")
-    # (the earlier 'feat-a' task row plus this one; filter to the dependent)
-    b_tasks = [t for t in db.list_tasks(str(repo)) if t.branch == "feat-b"]
-    [b_task] = b_tasks
+    # Merging retires 'feat-a's own task, so only the dependent stays 'started'.
+    [b_task] = db.list_tasks(str(repo), state="started")
+    assert b_task.branch == "feat-b"
     assert b_task.state == "started"
     assert b_task.agent_id
 
@@ -202,7 +202,8 @@ def test_queued_task_stays_queued_if_only_some_dependencies_merged(db, repo, bos
 # -- cancellation on unmerged removal --------------------------------------------
 
 
-def test_queued_task_is_cancelled_when_dependency_workspace_removed_unmerged(db, repo, boss):
+def test_queued_task_is_cancelled_when_dependency_workspace_removed_unmerged(db, repo, boss, monkeypatch):
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
     out_a = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
     worker_a = started_worker_id(out_a)
     ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
@@ -210,7 +211,7 @@ def test_queued_task_is_cancelled_when_dependency_workspace_removed_unmerged(db,
 
     asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", depends_on=[worker_a]))
 
-    remove_out = mcp_server.remove_workspace.fn(ws_a.id, force=True)
+    remove_out = mcp_server.remove_workspace(ws_a.id, force=True)
     assert "Removed" in remove_out
 
     [b_task] = [t for t in db.list_tasks(str(repo)) if t.branch == "feat-b"]
@@ -233,7 +234,7 @@ def test_removing_a_fully_merged_workspace_does_not_cancel_dependents(db, repo, 
     assert b_task.state == "started"  # already started; removing A now must not touch it
 
     ws_a = db.get_workspace(ws_a.id)
-    mcp_server.remove_workspace.fn(ws_a.id, force=True)
+    mcp_server.remove_workspace(ws_a.id, force=True)
 
     b_task = db.get_task(b_task.id)
     assert b_task.state == "started"
