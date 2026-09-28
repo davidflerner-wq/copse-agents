@@ -856,6 +856,10 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
     ``profile`` picks the reviewer profile; None uses
     ``default_review_profile``.
 
+    Raises ``AgentError`` if the chosen profile (explicit or picked) doesn't
+    exist, or if it uses the codex provider but codex isn't on PATH -- rather
+    than spawning a reviewer doomed to fail in a dead pane.
+
     ``cfg.checks`` are NOT run here (that would block the caller on the full
     suite): the caller runs them in the background and delivers a pass/fail
     summary to the reviewer as a message once they finish, via
@@ -868,6 +872,15 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | N
     cfg = cfg or load_repo_config(ws.repo_root)
     worker = workspace_worker(db, ws)
     profile = profile or default_review_profile(cfg, worker)
+    try:
+        chosen = load_profile(profile, ws.repo_root)
+    except KeyError as e:
+        raise AgentError(str(e)) from e
+    if chosen.provider == "codex" and not shutil.which("codex"):
+        raise AgentError(
+            f"reviewer profile {profile!r} uses the codex provider, but codex isn't on PATH; "
+            "install it, or set review_profile (or pass profile) to a different reviewer"
+        )
 
     base = ws.base_branch or "the base branch"
     task = (f"Review the changes on branch `{ws.branch}` (workspace {ws.id}) against `{base}`: "

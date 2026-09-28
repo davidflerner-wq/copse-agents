@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 import time
 from pathlib import PurePath
 
@@ -36,8 +37,15 @@ def _loads(text: str | None) -> list[str]:
 # -- overlap warnings ---------------------------------------------------------
 
 
+def _normpath(p: str) -> str:
+    """``p`` with a leading './' and redundant separators collapsed, so
+    "./src/a.py" compares equal to "src/a.py"."""
+    return os.path.normpath(p) if p else p
+
+
 def _glob_match(a: str, b: str) -> bool:
     """Whether globs/paths ``a`` and ``b`` could refer to the same file(s)."""
+    a, b = _normpath(a), _normpath(b)
     if a == b:
         return True
     if fnmatch.fnmatch(b, a) or fnmatch.fnmatch(a, b):
@@ -64,11 +72,11 @@ def _changed_files(ws: Workspace) -> list[str]:
     return [f for f in (*names.splitlines(), *untracked.splitlines()) if f]
 
 
-def active_tasks(db: DB, repo_root: str, *, exclude_agent_id: str | None = None) -> list[Task]:
+def active_tasks(db: DB, repo_root: str) -> list[Task]:
     """Started tasks in ``repo_root`` whose worker hasn't reported yet."""
     out = []
     for t in db.list_tasks(repo_root, state="started"):
-        if not t.agent_id or t.agent_id == exclude_agent_id:
+        if not t.agent_id:
             continue
         agent = db.get_agent(t.agent_id)
         if agent and agent.result is None:
@@ -113,17 +121,21 @@ def _dep_branch(db: DB, dep: str) -> str:
 
 def _dep_task(db: DB, repo_root: str, dep: str) -> Task | None:
     """The task copse is tracking for ``dep`` (an agent id or branch name), if
-    any. A dependency copse started itself is tracked precisely by state
-    (merged or not); an untracked one (e.g. a branch never assigned through
-    copse) falls back to a git ancestry check in ``unmet_dependencies``."""
+    any -- including one that was cancelled: a cancelled dependency can never
+    become merged, so ``unmet_dependencies`` must treat it as a hard failure
+    rather than something to keep waiting on. An untracked dependency (e.g. a
+    branch never assigned through copse) falls back to a git ancestry check
+    in ``unmet_dependencies``."""
     branch = _dep_branch(db, dep)
-    candidates = [t for t in db.list_tasks(repo_root)
-                  if t.state != "cancelled" and (t.agent_id == dep or t.branch == branch)]
+    candidates = [t for t in db.list_tasks(repo_root) if t.agent_id == dep or t.branch == branch]
     return max(candidates, key=lambda t: t.created_at) if candidates else None
 
 
 def unmet_dependencies(db: DB, caller_ws: Workspace, depends_on: list[str] | None) -> list[str]:
     """``depends_on`` entries not yet merged into ``caller_ws``'s branch.
+
+    Raises ``agents.AgentError`` if any dependency's task was cancelled: it
+    can never merge, so there's nothing left to wait for.
 
     A dependency a task hasn't diverged from yet (no commits beyond its base)
     would trivially satisfy a plain git ancestry check even though it hasn't
@@ -136,6 +148,8 @@ def unmet_dependencies(db: DB, caller_ws: Workspace, depends_on: list[str] | Non
     for dep in depends_on:
         task = _dep_task(db, caller_ws.repo_root, dep)
         if task is not None:
+            if task.state == "cancelled":
+                raise agents.AgentError(f"dependency {dep} was cancelled and will never merge")
             if task.state != "merged":
                 unmet.append(dep)
         elif not git.ok(["merge-base", "--is-ancestor", _dep_branch(db, dep), "HEAD"], caller_ws.path):
@@ -145,6 +159,34 @@ def unmet_dependencies(db: DB, caller_ws: Workspace, depends_on: list[str] | Non
 
 def _dep_matches(dep: str, ws: Workspace, worker_id: str | None) -> bool:
     return dep == ws.branch or (worker_id is not None and dep == worker_id)
+
+
+def _refers_to(dep: str, t: Task) -> bool:
+    """Whether a ``depends_on`` entry names task ``t``: its worker's agent id
+    (once it has one) or its declared branch."""
+    return dep == t.branch or (t.agent_id is not None and dep == t.agent_id)
+
+
+def _cancel(db: DB, task_id: str, reason: str) -> None:
+    """Cancel a still-pending task and tell its caller, then cascade the
+    cancellation to any pending task depending on it, recursively: a task
+    waiting on one that can never merge can itself never merge. Re-fetches
+    and checks state so cancelling the same task twice (reachable via more
+    than one dependency path) is a no-op the second time."""
+    t = db.get_task(task_id)
+    if t is None or t.state != "pending":
+        return
+    db.update_task(t.id, state="cancelled")
+    if t.caller_id:
+        try:
+            agents.send_message(
+                db, t.caller_id, f"Cancelled queued task {t.id}: {reason}", sender_id=None,
+            )
+        except agents.AgentError:
+            pass
+    for dependent in db.list_tasks(t.repo_root, state="pending"):
+        if any(_refers_to(d, t) for d in _loads(dependent.depends_on)):
+            _cancel(db, dependent.id, f"its dependency {t.id} ({t.branch or t.id}) was cancelled")
 
 
 # -- queueing and starting -------------------------------------------------------
@@ -217,7 +259,13 @@ def on_merged(db: DB, ws: Workspace) -> None:
         if not any(_dep_matches(d, ws, worker.id if worker else None) for d in deps):
             continue
         caller_ws = db.get_workspace(t.caller_ws_id)
-        if not caller_ws or unmet_dependencies(db, caller_ws, deps):
+        if not caller_ws:
+            continue
+        try:
+            if unmet_dependencies(db, caller_ws, deps):
+                continue
+        except agents.AgentError as e:
+            _cancel(db, t.id, str(e))
             continue
         try:
             new_worker = start_queued(db, t)
@@ -235,24 +283,13 @@ def on_merged(db: DB, ws: Workspace) -> None:
 
 def on_removed_unmerged(db: DB, ws: Workspace) -> None:
     """``ws`` was removed while its branch still had commits not in its base:
-    cancel any pending task depending on it, and tell its caller."""
+    cancel any pending task depending on it -- and, recursively, any pending
+    task that in turn depends on those -- and tell each one's caller."""
     worker = agents.workspace_worker(db, ws)
     dep_ref = worker.id if worker else ws.branch
     for t in db.list_tasks(ws.repo_root, state="pending"):
-        deps = _loads(t.depends_on)
-        if not any(_dep_matches(d, ws, worker.id if worker else None) for d in deps):
-            continue
-        db.update_task(t.id, state="cancelled")
-        if t.caller_id:
-            try:
-                agents.send_message(
-                    db, t.caller_id,
-                    f"Cancelled queued task {t.id}: it was waiting on {dep_ref}, which was "
-                    "removed unmerged.",
-                    sender_id=None,
-                )
-            except agents.AgentError:
-                pass
+        if any(_dep_matches(d, ws, worker.id if worker else None) for d in _loads(t.depends_on)):
+            _cancel(db, t.id, f"it was waiting on {dep_ref}, which was removed unmerged.")
 
 
 def list_text(db: DB, repo_root: str) -> str:

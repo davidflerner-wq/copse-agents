@@ -120,6 +120,12 @@ def test_overlap_warning_matches_recursive_globs(db, repo, boss):
     assert "Warning" in out_b
 
 
+def test_overlap_warning_matches_despite_a_leading_dot_slash(db, repo, boss):
+    asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a", files=["./src/a.py"]))
+    out_b = asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", files=["src/a.py"]))
+    assert "Warning" in out_b
+
+
 # -- dependencies: queue until merge, then auto-start --------------------------
 
 
@@ -238,3 +244,49 @@ def test_removing_a_fully_merged_workspace_does_not_cancel_dependents(db, repo, 
 
     b_task = db.get_task(b_task.id)
     assert b_task.state == "started"
+
+
+def test_cancellation_cascades_to_a_task_depending_on_the_cancelled_one(db, repo, boss, monkeypatch):
+    """A unmerged -> B depends_on=[A] queued -> C depends_on=["feat-b"]
+    queued -> removing A unmerged must cancel both B and C, not just B."""
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    out_a = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
+    worker_a = started_worker_id(out_a)
+    ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
+    commit_file(Path(ws_a.path), "a_output.txt")  # ahead of main: "unmerged"
+
+    out_b = asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b",
+                                          depends_on=[worker_a]))
+    assert "Queued task" in out_b
+    out_c = asyncio.run(mcp_server.assign("developer", "do C", branch="feat-c",
+                                          depends_on=["feat-b"]))
+    assert "Queued task" in out_c
+
+    mcp_server.remove_workspace(ws_a.id, force=True)
+
+    [b_task] = [t for t in db.list_tasks(str(repo)) if t.branch == "feat-b"]
+    [c_task] = [t for t in db.list_tasks(str(repo)) if t.branch == "feat-c"]
+    assert b_task.state == "cancelled"
+    assert c_task.state == "cancelled"
+
+    first = db.pop_pending("boss")
+    second = db.pop_pending("boss")
+    assert first is not None and second is not None
+    bodies = first.body + second.body
+    assert "Cancelled" in first.body and "Cancelled" in second.body
+    assert worker_a in bodies and b_task.id in bodies
+
+
+def test_new_task_depending_on_an_already_cancelled_task_fails_clearly(db, repo, boss, monkeypatch):
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    out_a = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
+    ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
+    commit_file(Path(ws_a.path), "a_output.txt")  # ahead of main: "unmerged"
+    asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", depends_on=["feat-a"]))
+    mcp_server.remove_workspace(ws_a.id, force=True)  # cancels B
+
+    out_d = asyncio.run(mcp_server.assign("developer", "do D", branch="feat-d",
+                                          depends_on=["feat-b"]))
+    assert "cancelled" in out_d.lower() and "feat-b" in out_d
+    # D was neither started nor queued: unmet_dependencies failed before either.
+    assert not any(t.branch == "feat-d" for t in db.list_tasks(str(repo)))

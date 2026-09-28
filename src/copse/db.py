@@ -196,7 +196,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     done_when TEXT,
     files TEXT,                    -- JSON list of globs this task expects to touch
     depends_on TEXT,               -- JSON list of agent ids / branch names to wait on
-    state TEXT NOT NULL,           -- pending | started | cancelled
+    state TEXT NOT NULL,           -- pending | started | merged | cancelled
     created_at REAL NOT NULL,
     started_at REAL
 );

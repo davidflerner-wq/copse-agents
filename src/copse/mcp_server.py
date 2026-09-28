@@ -150,7 +150,10 @@ async def handoff(
     def run() -> str:
         db = DB()
         caller, ws = _caller(db)
-        unmet = tasks.unmet_dependencies(db, ws, depends_on)
+        try:
+            unmet = tasks.unmet_dependencies(db, ws, depends_on)
+        except agents.AgentError as e:
+            return str(e)
         if unmet:
             t = tasks.enqueue(
                 db, caller, ws, agent_profile, task, "handoff", isolate=isolate, branch=branch,
@@ -210,7 +213,10 @@ async def assign(
     def run() -> str:
         db = DB()
         caller, ws = _caller(db)
-        unmet = tasks.unmet_dependencies(db, ws, depends_on)
+        try:
+            unmet = tasks.unmet_dependencies(db, ws, depends_on)
+        except agents.AgentError as e:
+            return str(e)
         if unmet:
             t = tasks.enqueue(
                 db, caller, ws, agent_profile, task, "assign", isolate=isolate, branch=branch,
@@ -421,7 +427,10 @@ async def request_review(workspace: str, focus: str | None = None, profile: str 
         if ws.kind != "worktree":
             return "Only a worker's workspace (its own branch and worktree) can be reviewed this way."
         cfg = load_repo_config(ws.repo_root)
-        reviewer = agents.request_review(db, caller, ws, profile, focus, cfg)
+        try:
+            reviewer = agents.request_review(db, caller, ws, profile, focus, cfg)
+        except agents.AgentError as e:
+            return str(e)
         return reviewer, ws, cfg
 
     result = await asyncio.to_thread(start)

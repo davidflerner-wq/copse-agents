@@ -3,16 +3,17 @@ else the repo's `review_profile` config, else the built-in `reviewer-codex`
 profile when Codex is installed and the worker being reviewed ran on Claude,
 else `reviewer`."""
 
+import asyncio
 import time
 from pathlib import Path
 
 import pytest
 
 from conftest import sh
-from copse import agents, workspaces
+from copse import agents, mcp_server, workspaces
 from copse.config import RepoConfig, load_repo_config
 from copse.db import Agent
-from copse.profiles import load_profile
+from copse.profiles import Profile, load_profile
 
 
 @pytest.fixture
@@ -31,7 +32,11 @@ def add_worker(db, ws, agent_id, provider="claude", mode="handoff", status="done
 
 def capture_profile(monkeypatch):
     """Replace agents.spawn to record the profile request_review chose,
-    without launching a real reviewer process."""
+    without launching a real reviewer process. Also stubs load_profile to
+    resolve any name (these tests use fake profile names like
+    "team-reviewer" purely to check which one was picked, not that it's a
+    real, loadable profile) to a harmless claude profile, so request_review's
+    own profile-existence check doesn't get in the way of that."""
     captured = {}
 
     def fake_spawn(db_, ws_, profile, *, prompt=None, parent_id=None, mode="review", **kw):
@@ -40,6 +45,8 @@ def capture_profile(monkeypatch):
                      None, time.time())
 
     monkeypatch.setattr(agents, "spawn", fake_spawn)
+    monkeypatch.setattr(agents, "load_profile",
+                        lambda name, repo_root=None: Profile(name, "", "claude", ""))
     return captured
 
 
@@ -129,6 +136,45 @@ def test_request_review_skips_reviewer_codex_when_worker_already_used_codex(db, 
     captured = capture_profile(monkeypatch)
     agents.request_review(db, None, worker_ws)
     assert captured["profile"] == "reviewer"
+
+
+# -- agents.request_review: clear errors instead of a dead reviewer -------------
+
+
+def test_request_review_raises_clearly_for_an_unknown_profile(db, worker_ws):
+    add_worker(db, worker_ws, "w1")
+    with pytest.raises(agents.AgentError, match="bogus-profile"):
+        agents.request_review(db, None, worker_ws, "bogus-profile")
+    assert db.list_agents(worker_ws.id) == [db.get_agent("w1")]  # no reviewer was spawned
+
+
+def test_request_review_raises_clearly_for_an_unknown_configured_review_profile(db, worker_ws):
+    add_worker(db, worker_ws, "w1")
+    with pytest.raises(agents.AgentError, match="bogus-profile"):
+        agents.request_review(db, None, worker_ws, cfg=RepoConfig(review_profile="bogus-profile"))
+
+
+def test_request_review_raises_clearly_when_codex_profile_but_codex_missing(db, worker_ws, monkeypatch):
+    add_worker(db, worker_ws, "w1")
+    codex_present(monkeypatch, False)
+    with pytest.raises(agents.AgentError, match="codex"):
+        agents.request_review(db, None, worker_ws, "reviewer-codex")
+    assert db.list_agents(worker_ws.id) == [db.get_agent("w1")]  # no dead reviewer pane
+
+
+def test_mcp_request_review_returns_a_message_instead_of_raising_for_bad_profile(db, worker_ws):
+    add_worker(db, worker_ws, "w1")
+    out = asyncio.run(mcp_server.request_review(worker_ws.id, profile="bogus-profile"))
+    assert "bogus-profile" in out
+
+
+def test_mcp_request_review_returns_a_message_instead_of_raising_when_codex_missing(
+    db, worker_ws, monkeypatch,
+):
+    add_worker(db, worker_ws, "w1")
+    codex_present(monkeypatch, False)
+    out = asyncio.run(mcp_server.request_review(worker_ws.id, profile="reviewer-codex"))
+    assert "codex" in out.lower()
 
 
 # -- config.py: review_profile -----------------------------------------------------
