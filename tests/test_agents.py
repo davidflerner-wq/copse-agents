@@ -71,6 +71,9 @@ def test_claude_command_wires_hooks_mcp_and_profile():
     assert "_hook" in settings and "Stop" in settings
     assert '"COPSE_AGENT_ID": "abc"' in argv[argv.index("--mcp-config") + 1]
     assert argv[argv.index("--permission-mode") + 1] == "acceptEdits"
+    # Agent view (background sessions) is where a pasted message can land in
+    # the wrong conversation or start a brand-new one; disable it outright.
+    assert '"disableAgentView": true' in settings
 
 
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
@@ -178,6 +181,155 @@ def test_claude_screen_state(screen, want):
 ])
 def test_claude_busy_in_footer(screen, want):
     assert ClaudeCode().busy_in_footer(screen) is want
+
+
+CLAUDE_TYPING = "⏺ Done.\n\n────\n❯ half a message I'm still writ\n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+# The real agent-view screen: its footer ("ctrl+x to delete") is the reliable
+# anchor, not the loose "moved to the background" phrasing, which can appear
+# quoted in an ordinary transcript (see CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES).
+CLAUDE_BACKGROUND = (
+    "Your conversation moved to the background — enter opens it · esc returns to it\n"
+    "────\n❯ describe a task for a new session\n────\n"
+    "⏵⏵ auto mode · enter to open · space to reply · ctrl+x to delete · ? for shortcuts\n"
+)
+CLAUDE_BACKGROUND_RETURN_FOOTER = (
+    "Some other session's last message\n"
+    "────\n❯ describe a task for a new session\n────\n"
+    "⏵⏵ auto mode · enter to return · space to reply · ctrl+x to delete · ? for shortcuts\n"
+)
+# A transcript that happens to quote both telltale phrases, above the last
+# border: must NOT be mistaken for the real agent-view footer.
+CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES = (
+    '⏺ I told them: "Your conversation moved to the background" and to press\n'
+    '  "ctrl+x to delete" if they wanted out.\n'
+    "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt\n"
+)
+# Claude Code's dim placeholder/suggestion in an otherwise-empty input box:
+# looks like typed text unless the styling (SGR 2, faint) is taken into account.
+CLAUDE_PLACEHOLDER = (
+    "⏺ Done.\n\n────\n"
+    '❯ \x1b[2mTry "create a util logging.py that..."\x1b[0m\n'
+    "────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+)
+CLAUDE_PLACEHOLDER_GREY_256 = (
+    "⏺ Done.\n\n────\n"
+    '❯ \x1b[38;5;244mTry "fix the flaky test in test_agents.py"\x1b[0m\n'
+    "────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+)
+# A worker's own pane, its box border woven with its own session title (not
+# some OTHER session): must not be mistaken for a wrong-session pane and
+# block delivery. See test_claude_paste_blocked's own-title case below.
+CLAUDE_OWN_SESSION_TITLE = (
+    "⏺ working on it\n"
+    "──── feat/sidebar-everywhere-3 ────\n"
+    "❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt\n"
+)
+# A dim placeholder styled with a truecolor (38;2;r;g;b) grey instead of the
+# 256-color palette.
+CLAUDE_PLACEHOLDER_TRUECOLOR_GREY = (
+    "⏺ Done.\n\n────\n"
+    '❯ \x1b[38;2;128;128;128mTry "fix the flaky test in test_agents.py"\x1b[0m\n'
+    "────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+)
+# Real typed text in a non-grey truecolor (not dim) must still count as typing.
+CLAUDE_TYPING_TRUECOLOR_COLOR = (
+    "⏺ Done.\n\n────\n"
+    '❯ \x1b[38;2;200;60;60mnot a placeholder\x1b[0m\n'
+    "────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+)
+# A bright color (91-97) is a real color, not dimming -- must still count as typing.
+CLAUDE_TYPING_BRIGHT_COLOR = (
+    "⏺ Done.\n\n────\n"
+    '❯ \x1b[91mnot a placeholder\x1b[0m\n'
+    "────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+)
+# The terminal cursor sits on the first cell in inverse video (SGR 7); it must
+# be ignored so real typed text right after it is still detected.
+CLAUDE_TYPING_WITH_INVERSE_CURSOR = (
+    "⏺ Done.\n\n────\n"
+    '❯ \x1b[7mh\x1b[27mello\n'
+    "────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+)
+
+
+@pytest.mark.parametrize("screen,interactive,want", [
+    (CLAUDE_IDLE, True, None),
+    (CLAUDE_IDLE, False, None),
+    (CLAUDE_TYPING, True, "typing"),
+    (CLAUDE_TYPING, False, None),  # a worker's input box is never hand-typed
+    (CLAUDE_BACKGROUND, True, "background"),
+    (CLAUDE_BACKGROUND, False, "background"),  # workers can end up here too
+    (CLAUDE_BACKGROUND_RETURN_FOOTER, True, "background"),
+    (CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES, True, None),  # not the real footer
+    (CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES, False, None),
+    (CLAUDE_PLACEHOLDER, True, None),  # dim placeholder, not real input
+    (CLAUDE_PLACEHOLDER_GREY_256, True, None),  # grey 256-colour placeholder
+    (CLAUDE_PLACEHOLDER_TRUECOLOR_GREY, True, None),  # grey truecolor placeholder
+    (CLAUDE_TYPING_TRUECOLOR_COLOR, True, "typing"),  # non-grey truecolor is real input
+    (CLAUDE_TYPING_BRIGHT_COLOR, True, "typing"),  # bright (91-97) is a color, not dimming
+    (CLAUDE_TYPING_WITH_INVERSE_CURSOR, True, "typing"),  # ignore the inverse-video cursor cell
+    # A worker's own session title in its border isn't a "wrong session"
+    # any more: nothing blocks it (there's no queued/typed text either).
+    (CLAUDE_OWN_SESSION_TITLE, True, None),
+    (CLAUDE_OWN_SESSION_TITLE, False, None),
+])
+def test_claude_paste_blocked(screen, interactive, want):
+    assert ClaudeCode().paste_blocked(screen, interactive) == want
+
+
+def test_titled_border_detection_is_removed():
+    """A worker whose pane border shows its own session title must never be
+    blocked as 'wrong-session' -- that check is gone entirely."""
+    assert not hasattr(ClaudeCode, "TITLED_BORDER")
+
+
+def test_flush_keeps_message_queued_when_user_is_mid_typing(db, ws, monkeypatch):
+    fake_agent(db, ws, status="idle")
+    db.enqueue("a1", "queued message", None)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_TYPING)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    assert agents.flush(db, "a1") is False
+    assert not pasted
+    assert db.get_agent("a1").status == "idle"
+    assert db.pending_count("a1") == 1
+
+
+def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, monkeypatch):
+    # A worker too: a blind paste there would start a NEW background session
+    # instead of reaching this one.
+    fake_agent(db, ws, status="idle", mode="assign")
+    db.enqueue("a1", "queued message", None)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_BACKGROUND)
+    sent, pasted = [], []
+    monkeypatch.setattr(tmux, "send_keys", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    assert agents.flush(db, "a1") is False
+    assert sent and sent[0][1] == "Escape"  # tried backing out before giving up
+    assert not pasted
+    assert db.pending_count("a1") == 1
+
+
+def test_flush_delivers_once_background_view_clears_after_escape(db, ws, monkeypatch):
+    fake_agent(db, ws, status="idle")
+    db.enqueue("a1", "queued message", None)
+    screens = iter([CLAUDE_BACKGROUND, CLAUDE_IDLE])
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: next(screens))
+    monkeypatch.setattr(tmux, "send_keys", lambda *a, **k: None)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    assert agents.flush(db, "a1") is True
+    assert pasted == ["queued message"]
+
+
+def test_flush_delivers_when_input_box_is_clear(db, ws, monkeypatch):
+    fake_agent(db, ws, status="idle")
+    db.enqueue("a1", "queued message", None)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    assert agents.flush(db, "a1") is True
+    assert pasted == ["queued message"]
 
 
 def test_reconcile_recovers_from_interrupted_turn(db, ws, monkeypatch):

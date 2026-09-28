@@ -176,6 +176,15 @@ CREATE TABLE IF NOT EXISTS history_usage_mark (
     cache_read_tokens INTEGER NOT NULL,
     cache_creation_tokens INTEGER NOT NULL
 );
+-- The one `copse watch --sidebar` pane per interactive session root (see
+-- agents.sidebar_follow): its tmux pane id, so any session in that root's
+-- tree can find and relocate it instead of starting a second one. Keyed by
+-- root, not repo, so a second supervisor in the same repo gets its own.
+CREATE TABLE IF NOT EXISTS sidebars (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    pane TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -337,6 +346,15 @@ class DB:
         mark_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(history_usage_mark)")}
         if "transcript_path" not in mark_cols:
             self.conn.execute("ALTER TABLE history_usage_mark ADD COLUMN transcript_path TEXT")
+        tables = {r["name"] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "sidebars" not in tables:
+            self.conn.execute(
+                """CREATE TABLE sidebars (
+                    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+                    pane TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                )"""
+            )
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -373,6 +391,12 @@ class DB:
 
     def workspace_by_path(self, path: str) -> Workspace | None:
         row = self.conn.execute("SELECT * FROM workspaces WHERE path=?", (path,)).fetchone()
+        return _load(Workspace, row) if row else None
+
+    def workspace_by_tmux_session(self, session: str) -> Workspace | None:
+        row = self.conn.execute(
+            "SELECT * FROM workspaces WHERE tmux_session=?", (session,)
+        ).fetchone()
         return _load(Workspace, row) if row else None
 
     def delete_workspace(self, ws_id: str) -> None:
@@ -651,6 +675,26 @@ class DB:
             "SELECT * FROM native_subagents WHERE parent_id=? ORDER BY started_at", (parent_id,)
         )
         return [_load(NativeSubagent, r) for r in rows]
+
+    # -- sidebar (one `copse watch --sidebar` pane per session root) --------
+
+    def get_sidebar_pane(self, root_id: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT pane FROM sidebars WHERE root_id=?", (root_id,)
+        ).fetchone()
+        return row["pane"] if row else None
+
+    def set_sidebar_pane(self, root_id: str, pane: str) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO sidebars (root_id, pane, updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(root_id) DO UPDATE SET pane=excluded.pane, updated_at=excluded.updated_at",
+                (root_id, pane, time.time()),
+            )
+
+    def clear_sidebar_pane(self, root_id: str) -> None:
+        with self.tx() as c:
+            c.execute("DELETE FROM sidebars WHERE root_id=?", (root_id,))
 
     def all_native_subagents(self) -> dict[str, list[NativeSubagent]]:
         """Every native subagent worth showing, grouped by parent id: one
