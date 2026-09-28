@@ -160,6 +160,11 @@ def add_worktree(root: str | Path, path: str | Path, branch: str, start: str) ->
     return "new"
 
 
+def move_worktree(root: str | Path, src: str | Path, dest: str | Path) -> None:
+    Path(dest).parent.mkdir(parents=True, exist_ok=True)
+    run(["worktree", "move", str(src), str(dest)], root)
+
+
 def remove_worktree(root: str | Path, path: str | Path, force: bool = False) -> None:
     args = ["worktree", "remove", str(path)]
     if force:

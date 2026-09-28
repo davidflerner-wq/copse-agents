@@ -201,7 +201,29 @@ def create(
     start_point = start or git.resolve_start_point(
         repo_root, base, cfg.fetch if fetch is None else fetch
     )
-    how = git.add_worktree(repo_root, path, branch, start_point)
+    start_sha = git.out(["rev-parse", start_point], repo_root)
+
+    # A pool entry is only a safe substitute for `git worktree add` when the
+    # new branch would start exactly at the base branch's current tip -- the
+    # same thing a pool fill builds from. That's the common case (a worker's
+    # base is the caller's own branch), but not e.g. create_from_pr, where
+    # `start` is a fetched PR head unrelated to `base`.
+    claimed = None
+    if run_setup:
+        from copse import pool
+
+        base_now = git.resolve_start_point(repo_root, base, False)
+        if start_sha == git.out(["rev-parse", base_now], repo_root):
+            candidate = pool.claim(db, repo_root, base)
+            if candidate is not None:
+                try:
+                    pool.move_into_place(repo_root, candidate, path, branch, start_sha)
+                    claimed = candidate
+                except (git.GitError, OSError):
+                    pool.discard(repo_root, candidate, dest=path)
+                    claimed = None
+
+    how = "pool" if claimed is not None else git.add_worktree(repo_root, path, branch, start_point)
     git.set_base(repo_root, branch, base)
 
     ws = Workspace(
@@ -219,7 +241,17 @@ def create(
     db.add_workspace(ws)
 
     copied = _copy_local_files(repo_root, path, cfg.copy)
-    setup = run_commands(cfg.setup, path, workspace_env(ws)) if run_setup and cfg.setup else None
+
+    if claimed is not None:
+        from copse import pool
+
+        if cfg.setup and pool.fingerprint(repo_root, start_sha, cfg) != claimed.fingerprint:
+            setup = run_commands(cfg.setup, path, workspace_env(ws))
+        else:
+            setup = None
+        pool.fill_in_background(repo_root)
+    else:
+        setup = run_commands(cfg.setup, path, workspace_env(ws)) if run_setup and cfg.setup else None
     return Created(ws, how, start_point, copied, setup)
 
 

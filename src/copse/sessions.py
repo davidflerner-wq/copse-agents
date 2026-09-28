@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from copse import agents, git, scratch, tmux, workspaces
+from copse import agents, git, pool, scratch, tmux, workspaces
 from copse.db import DB, Agent, Workspace
 
 # Free-tier retention. Read from the environment so a paid add-on (or a person
@@ -90,6 +90,10 @@ def enforce(db: DB, repo_root: str, now: float | None = None) -> int:
         if i >= KEEP or too_old:
             _forget(db, s)
             dropped += 1
+    try:
+        pool.trim(db, repo_root)
+    except git.GitError:
+        pass
     return dropped
 
 

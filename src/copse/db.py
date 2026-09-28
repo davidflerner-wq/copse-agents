@@ -127,6 +127,19 @@ CREATE TABLE IF NOT EXISTS native_subagents (
     started_at REAL,
     ended_at REAL
 );
+-- Pre-built worktrees (see pool.py): checked out on a placeholder branch at
+-- the base branch's tip, with `copy` files and `setup` already applied, so
+-- `create` can claim one instead of doing that work live. Never exposed as a
+-- workspace: find_workspaces/view.snapshot don't touch this table.
+CREATE TABLE IF NOT EXISTS pool_entries (
+    path TEXT PRIMARY KEY,
+    repo_root TEXT NOT NULL,
+    base_branch TEXT NOT NULL,
+    base_sha TEXT NOT NULL,
+    branch TEXT NOT NULL,           -- the placeholder branch, e.g. copse-pool/<token>
+    fingerprint TEXT NOT NULL,      -- setup commands + lockfile contents at base_sha
+    created_at REAL NOT NULL
+);
 """
 
 
@@ -222,6 +235,17 @@ class NativeSubagent:
 
 
 @dataclass
+class PoolEntry:
+    path: str
+    repo_root: str
+    base_branch: str
+    base_sha: str
+    branch: str
+    fingerprint: str
+    created_at: float
+
+
+@dataclass
 class Message:
     id: int
     agent_id: str
@@ -306,6 +330,54 @@ class DB:
     def used_port_bases(self) -> set[int]:
         rows = self.conn.execute("SELECT port_base FROM workspaces WHERE port_base IS NOT NULL")
         return {r[0] for r in rows}
+
+    # -- worktree pool -------------------------------------------------------
+
+    def add_pool_entry(self, e: PoolEntry) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO pool_entries VALUES (?,?,?,?,?,?,?)",
+                (e.path, e.repo_root, e.base_branch, e.base_sha, e.branch,
+                 e.fingerprint, e.created_at),
+            )
+
+    def pool_entries(self, repo_root: str, base_branch: str | None = None) -> list[PoolEntry]:
+        if base_branch:
+            rows = self.conn.execute(
+                "SELECT * FROM pool_entries WHERE repo_root=? AND base_branch=? "
+                "ORDER BY created_at",
+                (repo_root, base_branch),
+            )
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM pool_entries WHERE repo_root=? ORDER BY created_at", (repo_root,)
+            )
+        return [_load(PoolEntry, r) for r in rows]
+
+    def count_pool_entries(self, repo_root: str, base_branch: str) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM pool_entries WHERE repo_root=? AND base_branch=?",
+            (repo_root, base_branch),
+        ).fetchone()
+        return int(row[0])
+
+    def take_pool_entry(self, repo_root: str, base_branch: str) -> PoolEntry | None:
+        """Atomically claim (remove and return) the oldest matching entry, if
+        any, so two concurrent creates never claim the same one."""
+        with self.tx() as c:
+            row = c.execute(
+                "SELECT * FROM pool_entries WHERE repo_root=? AND base_branch=? "
+                "ORDER BY created_at LIMIT 1",
+                (repo_root, base_branch),
+            ).fetchone()
+            if not row:
+                return None
+            c.execute("DELETE FROM pool_entries WHERE path=?", (row["path"],))
+            return _load(PoolEntry, row)
+
+    def delete_pool_entry(self, path: str) -> None:
+        with self.tx() as c:
+            c.execute("DELETE FROM pool_entries WHERE path=?", (path,))
 
     # -- agents ------------------------------------------------------------
 
