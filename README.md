@@ -97,7 +97,13 @@ or put the goal in `.copse/goals.md`, and it works like a project manager:
 2. **Workers in parallel.** The supervisor splits each milestone into tasks
    and starts workers on their own branches, up to `max_agents` at once.
    Claude workers run the task as a Claude Code `/goal` with a finish line, so
-   they keep going until it's met.
+   they keep going until it's met. `assign`/`handoff` take `files` (the
+   paths/globs a task expects to touch, checked for overlap against other
+   active workers' declared and actually-changed files — a warning, not a
+   block) and `depends_on` (earlier tasks, by agent id or branch, that must
+   merge first): a task with unmet dependencies is queued instead of started,
+   and starts automatically, cut from the updated base, once
+   `merge_workspace` resolves them. `list_tasks` shows what's queued.
 3. **Gated merges.** A branch merges only when everything is committed, a
    reviewer agent has approved that exact commit, your pre-commit hooks pass,
    and your `checks` pass. copse runs these itself before `merge_workspace`,
@@ -106,6 +112,11 @@ or put the goal in `.copse/goals.md`, and it works like a project manager:
    reviewer immediately and runs `checks` in the background, delivering a
    pass/fail summary (output only for failures) as a message once they
    finish, instead of asking the reviewer to run the whole suite itself.
+   `request_review` picks the reviewer profile itself unless you pass one: an
+   explicit `profile` argument, else `review_profile` in the repo config,
+   else the built-in `reviewer-codex` profile (Codex reviewing Claude's
+   work, a different model from the worker) when `codex` is on `PATH` and
+   the worker ran on Claude, else `reviewer`.
 4. **It keeps going.** If the supervisor stops while milestones are still
    unverified and no worker is running, copse tells it to continue. It stops
    when every check passes, when it needs a decision from you, after three
@@ -205,6 +216,7 @@ The last three are for autopilot and merge gates:
 | `checks` | `[]` | commands that must pass in a worker's branch before it merges |
 | `review` | only under autopilot | require a reviewer's approval before merging |
 | `reviewer` | `"reviewer"` | the agent profile that reviews (a Codex profile gives a second model's view) |
+| `review_profile` | none | force `request_review`'s profile, skipping its automatic cross-model pick (see below) |
 | `pre_commit` | `true` | run [pre-commit](https://pre-commit.com) over the branch, if the repo uses it |
 | `max_agents` | `4` | workers running at once per session (`0`: no cap) |
 | `check_timeout` | `900` | seconds each check may take |
@@ -239,7 +251,8 @@ servers don't collide. Agents also get `COPSE_AGENT_ID`.
 ## Agent profiles
 
 Markdown files with frontmatter. copse looks in `.copse/agents/`, then
-`~/.copse/agents/`, then its built-ins (`supervisor`, `developer`, `reviewer`, `subagent`):
+`~/.copse/agents/`, then its built-ins (`supervisor`, `developer`, `reviewer`,
+`reviewer-codex`, `subagent`):
 
 ```markdown
 ---
