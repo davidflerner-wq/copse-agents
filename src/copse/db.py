@@ -480,9 +480,14 @@ class DB:
             c.execute("DELETE FROM pool_entries WHERE path=?", (row["path"],))
             return _load(PoolEntry, row)
 
-    def delete_pool_entry(self, path: str) -> None:
+    def delete_pool_entry(self, path: str) -> int:
+        """Returns the number of rows deleted (0 or 1). A caller trimming or
+        sweeping the pool must check this: a concurrent claim (take_pool_entry)
+        may have already removed the row, in which case the worktree now
+        belongs to a workspace and must not be discarded."""
         with self.tx() as c:
-            c.execute("DELETE FROM pool_entries WHERE path=?", (path,))
+            cur = c.execute("DELETE FROM pool_entries WHERE path=?", (path,))
+            return cur.rowcount
 
     def record_pool_failure(self, repo_root: str, base_branch: str) -> None:
         with self.tx() as c:

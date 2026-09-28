@@ -19,7 +19,6 @@ first sweeps up anything a crashed fill (or a config change) left behind.
 from __future__ import annotations
 
 import fcntl
-import filecmp
 import hashlib
 import os
 import shutil
@@ -91,7 +90,7 @@ def fill_one(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> PoolEntry
         git.run(["worktree", "add", "--no-track", "-b", branch, path, base_sha], repo_root)
     except git.GitError:
         db.delete_pool_entry(path)
-        discard(repo_root, entry)
+        discard(repo_root, entry, cfg)
         return None
 
     workspaces._copy_local_files(repo_root, path, cfg.copy)
@@ -106,7 +105,7 @@ def fill_one(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> PoolEntry
     )
     if setup is not None and not setup.ok:
         db.delete_pool_entry(path)
-        discard(repo_root, entry)
+        discard(repo_root, entry, cfg)
         return None
     db.mark_pool_ready(path)
     entry.ready = 1
@@ -191,8 +190,24 @@ def rebind(repo_root: str, entry: PoolEntry, branch: str, start_sha: str) -> Non
     git.run(["branch", "-m", entry.branch, branch], entry.path)
 
 
-def discard(repo_root: str, entry: PoolEntry) -> None:
-    """Best-effort cleanup of an entry that's being dropped."""
+def discard(repo_root: str, entry: PoolEntry, cfg: RepoConfig | None = None) -> None:
+    """Best-effort cleanup of an entry that's being dropped. Runs the repo's
+    teardown first, same as removing a real workspace, since setup may have
+    left behind something (a container, a lockfile) that needs it undone.
+    Only ``entry.path`` and ``entry.port_base`` are guaranteed to still mean
+    what they did when ``fill_one`` ran setup -- there's no live workspace
+    row for an unclaimed entry, so this builds a throwaway one just to get
+    teardown the env vars it expects."""
+    cfg = cfg or load_repo_config(repo_root)
+    if os.path.exists(entry.path) and cfg.teardown:
+        name = f"pool-{entry.branch.removeprefix('copse-pool/')}"
+        placeholder = Workspace(
+            id=f"{workspaces._repo_slug(repo_root)}/{name}", repo_root=repo_root, name=name,
+            kind="worktree", branch=entry.branch, base_branch=entry.base_branch,
+            path=entry.path, port_base=entry.port_base,
+            tmux_session=workspaces._session_name(repo_root, name), created_at=entry.created_at,
+        )
+        workspaces.run_commands(cfg.teardown, entry.path, workspaces.workspace_env(placeholder))
     if os.path.exists(entry.path):
         git.run(["worktree", "remove", "--force", entry.path], repo_root, check=False)
     git.run(["branch", "-D", entry.branch], repo_root, check=False)
@@ -216,16 +231,32 @@ def sweep(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> None:
 
     for e in db.pool_entries(repo_root, ready_only=False):
         if not e.ready or e.base_branch != current_base:
-            db.delete_pool_entry(e.path)
-            discard(repo_root, e)
+            if db.delete_pool_entry(e.path) == 1:
+                discard(repo_root, e, cfg)
 
+    # Everything currently claimed -- by a pool row or by a live workspace --
+    # is off limits, no matter what directory it happens to sit in. A claim
+    # renames the placeholder branch to the workspace's real one but never
+    # moves the path (see rebind), so a claimed entry's directory stays right
+    # here in the pool dir; only known_paths tells them apart.
     known_paths = {e.path for e in db.pool_entries(repo_root, ready_only=False)}
+    known_paths |= {ws.path for ws in db.find_workspaces()}
+    pool_branches = set(git.list_branches(repo_root, "copse-pool/*"))
+    branch_by_path = {
+        wt["worktree"]: wt["branch"].removeprefix("refs/heads/")
+        for wt in git.list_worktrees(repo_root) if "branch" in wt
+    }
     base_dir = pool_dir(repo_root)
     if base_dir.is_dir():
         for child in base_dir.iterdir():
-            if str(child) not in known_paths:
-                git.run(["worktree", "remove", "--force", str(child)], repo_root, check=False)
-                shutil.rmtree(child, ignore_errors=True)
+            path = str(child)
+            if path in known_paths:
+                continue
+            branch = branch_by_path.get(path)
+            if branch is not None and branch not in pool_branches:
+                continue  # not a pool worktree (or claimed and renamed): not ours to touch
+            git.run(["worktree", "remove", "--force", path], repo_root, check=False)
+            shutil.rmtree(child, ignore_errors=True)
     git.run(["worktree", "prune"], repo_root, check=False)
 
     live_branches = {
@@ -239,13 +270,19 @@ def sweep(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> None:
 
 def trim(db: DB, repo_root: str) -> int:
     """Drop ready entries beyond the repo's current ``pool_size`` (e.g. after
-    it was lowered, or disabled). Returns how many were removed."""
+    it was lowered, or disabled). Returns how many were actually removed."""
     cfg = load_repo_config(repo_root)
     target = max(0, cfg.pool_size or 0)
     base = cfg.base_branch or git.default_branch(repo_root)
     entries = db.pool_entries(repo_root, base)
     excess = entries[: max(0, len(entries) - target)]
+    removed = 0
     for e in excess:
-        db.delete_pool_entry(e.path)
-        discard(repo_root, e)
-    return len(excess)
+        # A concurrent claim (take_pool_entry) may have taken this exact
+        # entry between listing it above and deleting it here; only discard
+        # the worktree when our delete actually removed the row -- otherwise
+        # it's now a live workspace and must be left alone.
+        if db.delete_pool_entry(e.path) == 1:
+            discard(repo_root, e, cfg)
+            removed += 1
+    return removed

@@ -314,6 +314,55 @@ def test_two_concurrent_claims_only_one_wins(db, repo):
     assert db.count_pool_entries(str(repo), "main") == 0
 
 
+def test_sweep_never_deletes_a_worktree_claimed_by_a_workspace(db, repo):
+    """CRITICAL regression: once a pool entry is claimed, its pool_entries row
+    is gone but its directory stays right where it was, inside the pool dir.
+    sweep must recognize it as a live workspace (by path, and by its branch
+    no longer being a copse-pool/* placeholder) and leave it alone."""
+    write_config(repo, setup=["true"])
+    pool.fill(db, str(repo))
+    assert db.count_pool_entries(str(repo), "main") == 1
+
+    created = workspaces.create(db, str(repo), "feature")
+    assert created.how == "pool"
+    assert db.count_pool_entries(str(repo), "main") == 0  # claimed: row gone
+
+    pool.sweep(db, str(repo))
+
+    assert os.path.isdir(created.workspace.path)
+    assert git.branch_exists(str(repo), created.workspace.branch)
+    assert db.workspace_by_path(created.workspace.path) is not None
+
+
+def test_trim_skips_discard_when_a_claim_wins_the_race(db, repo, monkeypatch):
+    """If a claim (take_pool_entry) removes an entry's row between trim
+    listing it and trim deleting it, trim must not discard the now-claimed
+    worktree: delete_pool_entry's rowcount is the only reliable signal."""
+    write_config(repo, setup=["true"], pool_size=2)
+    pool.fill(db, str(repo))
+    assert db.count_pool_entries(str(repo), "main") == 2
+
+    write_config(repo, setup=["true"], pool_size=0)
+    victim = db.pool_entries(str(repo), "main")[0]
+
+    real_delete = DB.delete_pool_entry
+
+    def racing_delete(self, path):
+        if path == victim.path:
+            # A concurrent claim grabs this exact (oldest) entry first.
+            DB().take_pool_entry(str(repo), "main")
+        return real_delete(self, path)
+
+    monkeypatch.setattr(DB, "delete_pool_entry", racing_delete)
+
+    removed = pool.trim(db, str(repo))
+
+    assert removed == 1  # only the entry that wasn't raced was actually trimmed
+    assert db.count_pool_entries(str(repo), "main") == 0
+    assert os.path.isdir(victim.path)  # claimed worktree left untouched
+    assert git.branch_exists(str(repo), victim.branch)
+
+
 def test_fill_backs_off_after_a_setup_failure(db, repo, monkeypatch):
     write_config(repo, setup=["false"])  # always fails
     assert pool.fill(db, str(repo)) == 0

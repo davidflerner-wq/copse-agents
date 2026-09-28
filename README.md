@@ -210,6 +210,14 @@ not depend on the workspace's branch name or assume it's running at
 `<worktrees_dir>/<repo>/<branch>`; use `$COPSE_WORKSPACE_PATH` and
 `$COPSE_BRANCH` instead of hardcoding either.
 
+A pool entry's `setup` runs under a placeholder identity (a `copse-pool/*`
+branch and a `pool-*` name) before any workspace claims it, but its
+`teardown` can run later against the real workspace's branch and name -- or,
+if the entry is discarded unclaimed, against that same placeholder identity.
+Only `$COPSE_WORKSPACE_PATH` and `$COPSE_PORT_BASE` are guaranteed to be the
+same value in both runs; `setup` must not write anything `teardown` needs to
+find by branch or workspace name/id.
+
 `.copse/config.local.json` is gitignored and overrides keys for you only. For
 `setup`/`teardown` it can also give `{"before": [...], "after": [...]}` to run
 commands around the team's list.
