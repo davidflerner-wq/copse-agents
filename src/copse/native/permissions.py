@@ -117,13 +117,15 @@ def _cd_inside(part: str, cwd: str | None, root: str) -> str | None:
     """The directory ``part`` (a ``cd`` command) would land in, if that is
     ``root`` or below it; None for any other command or target."""
     tokens = part.split()
-    if len(tokens) != 2 or tokens[0] != "cd" or tokens[1].startswith("-"):
-        return None
+    if len(tokens) != 2 or tokens[0] != "cd" or tokens[1].startswith("-") or "$" in tokens[1]:
+        return None  # a variable expands at run time to who knows where
     import os
 
-    target = os.path.normpath(os.path.join(cwd or root, os.path.expanduser(tokens[1])))
-    root = os.path.normpath(root)
-    return target if target == root or target.startswith(root + os.sep) else None
+    # realpath on both sides: a symlink inside the worktree may point out of
+    # it, and the worktree itself may sit under one (/tmp on macOS).
+    target = os.path.realpath(os.path.join(cwd or root, os.path.expanduser(tokens[1])))
+    real_root = os.path.realpath(root)
+    return target if target == real_root or target.startswith(real_root + os.sep) else None
 
 
 def _covers(spec: str, part: str) -> bool:

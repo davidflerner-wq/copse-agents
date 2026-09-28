@@ -95,6 +95,11 @@ def test_uncovered_part_follows_cd_across_parts(tmp_path):
     assert uncovered_part(specs, "cd a && cd ../.. && ls", cd_root=root) == "cd ../.."
     assert uncovered_part(specs, "cd && ls", cd_root=root) == "cd"
     assert uncovered_part(specs, "cd - && ls", cd_root=root) == "cd -"
+    assert uncovered_part(specs, "cd $HOME && ls", cd_root=root) == "cd $HOME"
+    assert uncovered_part(specs, "cd a/../../.. && ls", cd_root=root) == "cd a/../../.."
+    # A symlink inside the worktree that points out of it leads out of it.
+    (tmp_path / "out").symlink_to(tmp_path.parent)
+    assert uncovered_part(specs, "cd out && ls", cd_root=root) == "cd out"
     # Without a root, cd is an ordinary uncovered command, as before.
     assert uncovered_part(specs, "cd a && ls") == "cd a"
 
