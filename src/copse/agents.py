@@ -9,6 +9,8 @@ nothing ever types into a terminal while the agent is mid-turn.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -208,17 +210,144 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     db.update_agent(agent.id, tmux_window=target)
     agent.tmux_window = target
     if watch_pane:
-        # The dashboard for this repo, under the agent in the same window.
-        # Best effort: a failed split must not fail the agent it sits beside.
-        from copse.providers import copse_invocation
-
+        # Best effort: a failed split (or a lock some other process holds,
+        # see _sidebar_lock's nonblocking mode) must not fail the agent it
+        # sits beside or the hook that triggered this launch.
         try:
-            tmux.split_left(target, ws.path, [*copse_invocation(), "watch", "--sidebar"],
-                            workspaces.workspace_env(ws))
-        except tmux.TmuxError:
+            _ensure_sidebar(db, root_of(db, agent.id), ws, target)
+        except Exception:
             pass
     tmux.apply_theme(ws.tmux_session)
     return target
+
+
+SIDEBAR_COLUMNS = 30
+SIDEBAR_TAG = "@copse_sidebar"
+
+
+def root_of(db: DB, agent_id: str) -> str:
+    """Walk up ``parent_id`` to the top of this agent's tree: the interactive
+    session root the sidebar is keyed by (see db.sidebars)."""
+    seen: set[str] = set()
+    current = agent_id
+    while current not in seen:
+        seen.add(current)
+        a = db.get_agent(current)
+        if a is None or a.parent_id is None:
+            return current
+        current = a.parent_id
+    return current  # a parent_id cycle would be a bug elsewhere; don't loop forever
+
+
+@contextlib.contextmanager
+def _sidebar_lock(root_id: str, nonblocking: bool = False):
+    """Serialize sidebar operations for one session root: _ensure_sidebar,
+    sidebar_follow and pause's cleanup can all run from different, concurrent
+    processes (background hook invocations, a resume, a pause), and without
+    this a relocate can interleave with a create or a kill.
+
+    ``nonblocking`` (for _ensure_sidebar, called from the launch path a hook
+    can trigger) raises BlockingIOError instead of waiting for a lock some
+    other process holds, so a hook is never stuck behind another's sidebar
+    work; the caller treats a failed _ensure_sidebar as best-effort."""
+    from copse.config import copse_home
+
+    lock_dir = copse_home() / "locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with open(lock_dir / f"sidebar-{root_id}.lock", "w") as f:
+        flags = fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblocking else 0)
+        fcntl.flock(f.fileno(), flags)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def _valid_sidebar(pane: str | None, root_id: str) -> bool:
+    """Whether ``pane`` is still really this root's sidebar: alive, and
+    tagged with this root's id. Pane ids are a per-server counter that
+    restarts at 0 after a tmux server restart, so a stale DB row's pane id
+    can silently now refer to a completely different, unrelated pane; the
+    tag (set once, at creation) is what tells the two apart."""
+    return bool(pane) and tmux.window_alive(pane) and tmux.get_pane_tag(pane, SIDEBAR_TAG) == root_id
+
+
+def _agent_for_window(db: DB, ws: Workspace, window: str) -> Agent | None:
+    """The agent whose pane lives in ``window``, or (for a window with no
+    agent record of its own, e.g. the session's default 'shell' window) any
+    agent in this workspace -- they all share one lineage, so any of them
+    gives the right session root."""
+    agents_here = db.list_agents(ws.id)
+    for a in agents_here:
+        if a.tmux_window and tmux.pane_window(a.tmux_window) == window:
+            return a
+    return agents_here[0] if agents_here else None
+
+
+def _ensure_sidebar(db: DB, root_id: str, ws: Workspace, target_pane: str) -> None:
+    """Make sure ``root_id``'s one `copse watch --sidebar` pane is beside
+    ``target_pane``: move it there if it already exists elsewhere (never
+    start a second one -- that would double the dashboard's 2s polling), or
+    create it fresh if it's dead, stale (see _valid_sidebar) or has never
+    run. The only place that creates a sidebar: sidebar_follow only ever
+    relocates one, so quitting it with `q` keeps it gone."""
+    with _sidebar_lock(root_id, nonblocking=True):
+        existing = db.get_sidebar_pane(root_id)
+        if _valid_sidebar(existing, root_id):
+            assert existing is not None
+            if tmux.pane_window(existing) != tmux.pane_window(target_pane):
+                tmux.move_pane(existing, target_pane, SIDEBAR_COLUMNS)
+            return
+        from copse.providers import copse_invocation
+
+        pane = tmux.split_left(target_pane, ws.path, [*copse_invocation(), "watch", "--sidebar"],
+                               workspaces.workspace_env(ws), columns=SIDEBAR_COLUMNS)
+        tmux.set_pane_tag(pane, SIDEBAR_TAG, root_id)
+        db.set_sidebar_pane(root_id, pane)
+
+
+def sidebar_follow(db: DB, session: str) -> None:
+    """Called from the session-window-changed / client-session-changed hooks
+    tmux.apply_theme sets on every copse session: its active window just
+    changed, or a client just switched into it, so make sure the sidebar is
+    there instead of wherever it used to be. Never creates one (see
+    _ensure_sidebar), and skips entirely once its root has been paused (a
+    tombstone pause() sets before it starts closing windows)."""
+    ws = db.workspace_by_tmux_session(session)
+    if ws is None:
+        return
+    window = tmux.active_window(session)
+    if not window:
+        return
+    agent = _agent_for_window(db, ws, window)
+    if agent is None:
+        return
+    # Only to pick which root's lock to take; re-derived below once it's
+    # held, since the window (and so the agent and root) may have changed
+    # while this call waited for the lock.
+    root_id = root_of(db, agent.id)
+    with _sidebar_lock(root_id):
+        window = tmux.active_window(session)
+        if not window:
+            return
+        agent = _agent_for_window(db, ws, window)
+        if agent is None:
+            return
+        if root_of(db, agent.id) != root_id:
+            return  # the root changed while waiting; let the next call catch up
+        root = db.get_agent(root_id)
+        if root is None or root.status == "paused":
+            return
+        sidebar = db.get_sidebar_pane(root_id)
+        if not _valid_sidebar(sidebar, root_id):
+            return
+        assert sidebar is not None
+        if tmux.pane_window(sidebar) == window:
+            return  # already here
+        target_pane = tmux.agent_pane_in_window(window, sidebar)
+        if not target_pane:
+            return
+        tmux.move_pane(sidebar, target_pane, SIDEBAR_COLUMNS)
 
 
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
@@ -248,7 +377,8 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     db.set_status(agent.id, status)
     agent.status = status
 
-    argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path))
+    argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
+                                          mode=agent.mode))
     target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane)
 
     if provider.name == "shell" and prompt:
@@ -346,7 +476,7 @@ def run_headless(db: DB, agent_id: str, resume: str | None = None, *,
             new_session = str(uuid.uuid4())
             db.update_agent(agent_id, session_ref=new_session)
         ctx = LaunchContext(agent_id, _profile_for(db, agent, ws), msg.body, resume=session,
-                            cwd=ws.path, session_id=new_session)
+                            cwd=ws.path, session_id=new_session, mode=agent.mode)
         print(f"\n── copse: turn {turn} ──\n{_preview(msg.body)}\n", flush=True)
         try:
             code = subprocess.call(provider.command(ctx), cwd=ws.path, stdin=subprocess.DEVNULL)
@@ -416,10 +546,26 @@ def pause(db: DB, root_id: str) -> list[Agent]:
         else:
             db.set_status(a.id, "paused")
             paused.append(a)
-    for w in windows:
-        # Dead or alive: a dead pane (the chat that just exited) would
-        # otherwise hold the window, and the session, open.
-        tmux.kill_window(w)
+    # The sidebar follows the person around, so it may not be sitting in any
+    # of the windows about to close: find it wherever it is and stop it too,
+    # rather than leaving it running with nothing left to show it. Status was
+    # already set to "paused" above (a tombstone), and the lock keeps this
+    # from interleaving with a concurrent sidebar_follow or _ensure_sidebar.
+    # Checked (and, if it's really ours, killed) around the window closes,
+    # not after: a sidebar living in a window being closed here would
+    # otherwise already look dead by the time _valid_sidebar ran, and get
+    # skipped instead of having its now-stale DB row cleared.
+    with _sidebar_lock(root_id):
+        sidebar = db.get_sidebar_pane(root_id)
+        sidebar_is_ours = _valid_sidebar(sidebar, root_id)
+        for w in windows:
+            # Dead or alive: a dead pane (the chat that just exited) would
+            # otherwise hold the window, and the session, open.
+            tmux.kill_window(w)
+        if sidebar_is_ours:
+            assert sidebar is not None
+            tmux.kill_pane(sidebar)
+            db.clear_sidebar_pane(root_id)
     root = db.get_agent(root_id)
     root_ws = db.get_workspace(root.workspace_id) if root else None
     for session in sessions:
@@ -625,6 +771,11 @@ def flush(db: DB, agent_id: str) -> bool:
         return False  # its runner takes messages from the inbox itself
     if db.pending_count(agent_id) == 0 or not db.claim_idle(agent_id):
         return False
+    if _paste_blocked(agent):
+        # Leave it queued: the next flush (a later message, or a resumed
+        # session's start-up) gets another chance.
+        db.set_status(agent_id, "idle", only_if="processing")
+        return False
     msg = db.pop_pending(agent_id)
     if not msg:
         db.set_status(agent_id, "idle", only_if="processing")
@@ -633,6 +784,32 @@ def flush(db: DB, agent_id: str) -> bool:
     assert agent is not None
     tmux.paste(agent.tmux_window, msg.body)
     return True
+
+
+def _paste_blocked(agent: Agent) -> bool:
+    """Whether pasting into ``agent``'s pane right now would land somewhere
+    other than its chat: over text the person is mid-typing (interactive
+    only), into Claude Code's background-session launcher, or into a pane
+    whose foreground session has changed to something else entirely (any
+    mode -- a blind paste in either case reaches the wrong conversation or
+    starts a brand-new one). A background view gets one Escape and a
+    re-check before giving up."""
+    provider = get_provider(agent.provider)
+    interactive = agent.mode == "interactive"
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=40, escapes=True)
+    except tmux.TmuxError:
+        return False
+    reason = provider.paste_blocked(screen, interactive)
+    if reason == "background":
+        tmux.send_keys(agent.tmux_window, "Escape")
+        time.sleep(0.3)
+        try:
+            screen = tmux.capture(agent.tmux_window, lines=40, escapes=True)
+        except tmux.TmuxError:
+            return False
+        reason = provider.paste_blocked(screen, interactive)
+    return reason is not None
 
 
 # -- subagent provider -------------------------------------------------------------
