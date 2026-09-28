@@ -499,6 +499,15 @@ def sidebar_follow(db: DB, session: str) -> None:
             return
         if tmux.pane_window(sidebar) == window:
             return  # already here
+        # A worker's session changes its active window on its own (its
+        # placeholder shell window closing once the agent's is up, a
+        # relaunch), and the hook fires just the same with nobody attached.
+        # The sidebar follows the person, not the windows: it never leaves a
+        # session someone is looking at for one nobody is.
+        if not tmux.session_attached(session):
+            home = tmux.pane_session(sidebar)
+            if home and home != session and tmux.session_attached(home):
+                return
         target_pane = tmux.agent_pane_in_window(window, sidebar)
         if not target_pane:
             return
