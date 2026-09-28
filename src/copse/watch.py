@@ -383,9 +383,10 @@ def close_request(agent: dict, armed: tuple[str, float] | None,
                   now: float) -> tuple[bool, tuple[str, float] | None, str]:
     """What an `x` press on ``agent``'s row does: (close it now, the new
     armed state, a notice to show). ``armed`` is (agent id, when) from an
-    earlier press waiting for its confirmation."""
+    earlier press waiting for its confirmation; closing a stopped row leaves
+    another row's arming as it was."""
     if agent["status"] in STOPPED:
-        return True, None, f"closed {agent['id'][:6]}"
+        return True, armed, f"closed {agent['id'][:6]}"
     if armed and armed[0] == agent["id"] and now - armed[1] <= CLOSE_CONFIRM_SECONDS:
         return True, None, f"stopped and closed {agent['id'][:6]}"
     return False, (agent["id"], now), "still running: x again to stop and close it"
@@ -810,12 +811,8 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
                 stale = True
 
 
-# Set by `copse watch --sidebar` (see cli.watch) when running as the sidebar.
-SIDEBAR = False
-
-
-def run(repo_root: str | None, sidebar: bool | None = None) -> None:
+def run(repo_root: str | None, sidebar: bool = False) -> None:
     # Esc clears the filter; don't make it wait curses' default second to
     # tell a lone Esc from the start of an arrow key's escape sequence.
     os.environ.setdefault("ESCDELAY", "25")
-    curses.wrapper(_loop, repo_root, SIDEBAR if sidebar is None else sidebar)
+    curses.wrapper(_loop, repo_root, sidebar)

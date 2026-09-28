@@ -549,7 +549,6 @@ def watch(
     """Live dashboard of workspaces and agents (highlights agents waiting on you)."""
     from copse import watch as watch_mod
 
-    watch_mod.SIDEBAR = sidebar
     repo_root = None
     if not all_repos:
         try:
@@ -559,7 +558,7 @@ def watch(
     if once or not sys.stdout.isatty():
         typer.echo(watch_mod.print_once(DB(), repo_root, color=sys.stdout.isatty()))
         return
-    watch_mod.run(repo_root)
+    watch_mod.run(repo_root, sidebar=sidebar)
     if sidebar:
         # Quit on purpose (a crash raises instead): keep it gone.
         agents.dismiss_sidebar(DB(), os.environ.get("TMUX_PANE"))
@@ -579,7 +578,8 @@ def close(
         _fail("pass an agent id, or --exited")
     panes = tmux.list_panes()
     if agent_id:
-        was_running = agents.is_alive(_run(agents.get, db, agent_id), panes)
+        target = _run(agents.get, db, agent_id)
+        was_running = agents.is_alive(target, panes) and agents.owns_pane(db, target)
         a = _run(agents.close, db, agent_id, panes)
         typer.echo(f"✓ closed {a.id}" + (" (stopped it first)" if was_running else ""))
         return

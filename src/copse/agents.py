@@ -630,11 +630,12 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True) -> list[Agent]:
     Records every status first and closes windows last: this can run inside
     one of the windows it closes (see _pause_when_done)."""
     paused, sessions, windows = [], set(), []
+    owners = pane_owners(db)
     for a in tree(db, root_id):
         ws = db.get_workspace(a.workspace_id)
         if ws:
             sessions.add(ws.tmux_session)
-        if a.tmux_window:
+        if a.tmux_window and owns_pane(db, a, owners):
             windows.append(a.tmux_window)
         # Its own SubagentStop hooks will never fire once its process stops.
         db.end_native_subagents(a.id)
@@ -774,6 +775,24 @@ def is_alive(agent: Agent, panes: dict[str, bool] | None = None) -> bool:
     if panes is not None:
         return panes.get(agent.tmux_window, False)
     return tmux.window_alive(agent.tmux_window)
+
+
+def pane_owners(db: DB) -> dict[str, str]:
+    """Which agent each recorded pane id belongs to. tmux reuses pane ids once
+    its server restarts (a reboot, `tmux kill-server`), so an old agent's
+    stored pane can now belong to a newer agent: only the newest agent
+    recorded on a pane can be the one running in it."""
+    return {a.tmux_window: a.id for a in db.list_agents() if a.tmux_window}  # oldest first
+
+
+def owns_pane(db: DB, agent: Agent, owners: dict[str, str] | None = None) -> bool:
+    """False when a newer agent has since been recorded on ``agent``'s pane
+    id: that pane, if alive, is the newer agent's, never ``agent``'s. Check
+    this before touching an agent's window (killing it, reading it).
+    ``owners`` is a pre-fetched ``pane_owners`` result, for loops."""
+    if not agent.tmux_window:
+        return True
+    return (pane_owners(db) if owners is None else owners).get(agent.tmux_window) == agent.id
 
 
 def format_message(db: DB, body: str, sender_id: str | None) -> str:
@@ -1066,12 +1085,14 @@ def close_later(agent_id: str, delay: float = 5.0) -> None:
 
 def _stop(db: DB, agent: Agent) -> None:
     """Stop an agent: its window, and every process of its that outlives the
-    window (Claude Code's daemon can host the real session; see copse.procs)."""
+    window (Claude Code's daemon can host the real session; see copse.procs).
+    A pane id a newer agent has since been given is left alone (see owns_pane)."""
     from copse import procs
 
-    pane_pids = tmux.window_pids(agent.tmux_window) if agent.tmux_window else []
-    if agent.tmux_window:
-        tmux.kill_window(agent.tmux_window)
+    window = agent.tmux_window if owns_pane(db, agent) else ""
+    pane_pids = tmux.window_pids(window) if window else []
+    if window:
+        tmux.kill_window(window)
     procs.stop([agent.id], {agent.id: pane_pids})
     db.end_native_subagents(agent.id)
 
@@ -1089,7 +1110,7 @@ def close(db: DB, agent_id: str, panes: dict[str, bool] | None = None) -> Agent:
     lists it, and a paused session can still be continued (which shows it
     again). Returns the agent as it was before closing."""
     agent = get(db, agent_id)
-    if is_alive(agent, panes):
+    if is_alive(agent, panes) and owns_pane(db, agent):
         _stop(db, agent)
         db.set_status(agent.id, "done" if agent.result is not None else "paused")
     else:

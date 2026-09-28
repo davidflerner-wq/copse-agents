@@ -135,6 +135,14 @@ def test_x_closes_a_stopped_agent_at_once():
     assert close and armed is None and "closed" in notice
 
 
+def test_x_on_a_stopped_row_keeps_another_rows_arming():
+    _, armed, _ = watch.close_request({"id": "live", "status": "processing"}, None, 100.0)
+    close, still, _ = watch.close_request({"id": "dead", "status": "exited"}, armed, 101.0)
+    assert close and still == armed
+    close, _, _ = watch.close_request({"id": "live", "status": "processing"}, still, 102.0)
+    assert close
+
+
 def test_x_twice_closes_a_running_agent():
     agent = {"id": "a1", "status": "processing"}
     close, armed, notice = watch.close_request(agent, None, 100.0)
@@ -167,9 +175,86 @@ def test_watch_sidebar_flag_reaches_the_loop(db, repo, monkeypatch):
     seen = {}
     monkeypatch.setattr(watch.curses, "wrapper", lambda fn, root, sidebar: seen.setdefault("sidebar", sidebar))
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(watch, "SIDEBAR", False)
+    monkeypatch.setattr(agents, "dismiss_sidebar", lambda *a: None)
     monkeypatch.chdir(repo)
     from copse.cli import watch as watch_cmd
 
     watch_cmd(all_repos=False, once=False, sidebar=True)
     assert seen["sidebar"] is True
+
+
+# -- pane ids tmux has reused ------------------------------------------------------
+
+
+def reused_pane(db, ws, *, stale_status="idle", stale_result=None, age=0.0):
+    """An old agent ("stale") whose recorded pane id tmux has since given to a
+    newer agent ("current"), which is running in it."""
+    pane = running_window(ws)
+    old = time.time() - age
+    db.add_agent(Agent("stale", ws.id, "developer", "claude", None, "assign", stale_status,
+                       pane, stale_result, old - 1))
+    db.add_agent(Agent("current", ws.id, "developer", "claude", None, "assign", "processing",
+                       pane, None, old))
+    return pane
+
+
+def test_only_the_newest_agent_on_a_pane_owns_it(db, worker_ws):
+    pane = reused_pane(db, worker_ws)
+    assert agents.pane_owners(db) == {pane: "current"}
+    assert not agents.owns_pane(db, db.get_agent("stale"))
+    assert agents.owns_pane(db, db.get_agent("current"))
+    assert view.live_agents(db, tmux.list_panes()) == {"current"}
+
+
+def test_closing_a_stale_row_never_kills_the_pane_it_used_to_have(db, worker_ws):
+    pane = reused_pane(db, worker_ws)
+    agents.close(db, "stale")
+    assert tmux.window_alive(pane)
+    assert db.get_agent("stale").dismissed_at is not None
+    assert db.get_agent("stale").status == "idle"  # it wasn't running: nothing stopped
+    assert db.get_agent("current").dismissed_at is None
+
+
+def test_kill_of_a_stale_row_leaves_the_newer_agents_pane(db, worker_ws):
+    pane = reused_pane(db, worker_ws)
+    agents.kill(db, "stale")
+    assert tmux.window_alive(pane) and db.get_agent("stale") is None
+
+
+def test_killing_the_owner_still_kills_its_pane(db, worker_ws):
+    pane = reused_pane(db, worker_ws)
+    agents.kill(db, "current")
+    assert not tmux.window_alive(pane)
+
+
+def test_cli_close_of_a_stale_row_says_nothing_was_stopped(db, repo, worker_ws, monkeypatch):
+    pane = reused_pane(db, worker_ws)
+    monkeypatch.chdir(repo)
+    res = CliRunner().invoke(app, ["close", "stale"])
+    assert res.exit_code == 0, res.output
+    assert "closed stale" in res.output and "stopped" not in res.output
+    assert tmux.window_alive(pane)
+
+
+def test_cli_close_exited_skips_a_pane_reused_by_a_live_agent(db, repo, worker_ws, monkeypatch):
+    pane = reused_pane(db, worker_ws)
+    monkeypatch.chdir(repo)
+    res = CliRunner().invoke(app, ["close", "--exited"])
+    assert res.exit_code == 0, res.output
+    assert "closed 1 agent(s)" in res.output
+    assert db.get_agent("stale").dismissed_at is not None
+    assert db.get_agent("current").dismissed_at is None
+    assert tmux.window_alive(pane)
+
+
+def test_culling_a_stale_worker_leaves_the_newer_agents_pane(db, worker_ws):
+    from copse import cull
+
+    # Reported and idle for two hours, past stale_after, on a pane that's now
+    # someone else's: closed as stopped, without touching that pane.
+    pane = reused_pane(db, worker_ws, stale_result="done", age=7200)
+    notes = cull.sweep(db)
+    assert any("closed stopped worker stale" in n for n in notes)
+    assert db.get_agent("stale").dismissed_at is not None
+    assert db.get_agent("current").dismissed_at is None
+    assert tmux.window_alive(pane)

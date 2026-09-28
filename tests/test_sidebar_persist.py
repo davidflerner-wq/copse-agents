@@ -252,7 +252,7 @@ def test_quitting_watch_sidebar_dismisses_it(db, tmp_path, session, monkeypatch)
 
     from copse import watch as watch_mod
 
-    monkeypatch.setattr(watch_mod, "run", lambda repo_root: None)  # pressed q
+    monkeypatch.setattr(watch_mod, "run", lambda repo_root, sidebar=False: None)  # pressed q
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setenv("TMUX_PANE", sidebar)
     cli.watch(all_repos=True, once=False, sidebar=True)
@@ -269,7 +269,7 @@ def test_crashing_watch_sidebar_does_not_dismiss_it(db, tmp_path, session, monke
 
     from copse import watch as watch_mod
 
-    def crash(repo_root):
+    def crash(repo_root, sidebar=False):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(watch_mod, "run", crash)
