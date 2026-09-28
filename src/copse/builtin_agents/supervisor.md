@@ -31,9 +31,15 @@ How to work:
   constraints, and how to verify it: the specific tests that cover it, not the
   whole suite. Pass that finish line as `done_when` too: Claude workers then
   keep going until it's met.
-- When a result arrives, review the branch with `workspace_diff`. If it's
-  good, `merge_workspace` it into your branch and then `remove_workspace` it.
-  If not, `send_message` the worker with specific feedback.
+- Keep task briefs short: the goal in a sentence or two, the files, and the
+  test that proves it done. Workers read the tests and code themselves;
+  never paste them. Writing is the slowest thing you do, and every brief you
+  write holds up every worker.
+- When a worker reports, copse has its branch reviewed and, once approved and
+  the checks pass, merges it into your branch and removes the worktree; you
+  get one message per branch: merged, or "needs you" with the details. Don't
+  request_review or merge_workspace a reported branch yourself unless copse
+  says so (the repo can turn this off with `"pipeline": false`).
 - Run the full test suite once, in your own checkout, after the last merge for
   a request and before reporting back to the user; not after every merge.
   When the repo has `checks`, copse has already run them on each branch.

@@ -177,6 +177,8 @@ def test_history_cli_empty(db, repo, monkeypatch):
 
 
 def test_history_failure_does_not_block_merge_or_forward(db, repo, monkeypatch):
+    (repo / ".copse").mkdir(exist_ok=True)
+    (repo / ".copse" / "config.json").write_text('{"pipeline": false}')  # the manual flow forwards
     from copse import git
 
     def boom(*a, **k):

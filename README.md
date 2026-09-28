@@ -301,6 +301,9 @@ Autopilot, merge gates and cleanup:
 | `usage_limit` | `90` | autopilot stops pushing on at this % of your Claude usage limit |
 | `graphify` | if the graph is there | point agents at the repo's [graphify](https://github.com/safishamsi/graphify) code map (`false` turns it off) |
 | `stale_after` | `30` | minutes before a worker that reported and sat idle is closed (`0`: never) |
+| `pipeline` | `true` | copse reviews and merges reported branches itself; the supervisor gets one message per branch |
+| `review_rounds` | `2` | fix-and-re-review rounds the pipeline runs before handing findings to the supervisor |
+| `overlap` | `"block"` | a task whose `files` overlap a running task's is refused (`"warn"` starts it with a warning) |
 | `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
 
 **Closing and cleaning up.** Press `x` on an agent in the sidebar (twice for one
@@ -316,6 +319,18 @@ the sidebar; `copse prune` then removes it (the branch stays, and a worktree wit
 uncommitted changes is kept and listed). `prune` also kills copse tmux sessions that
 hold only idle shells and no running agent, stops leftover copse tmux servers, and
 removes stale locks and empty worktree folders.
+
+**The pipeline.** The slow part of delegating isn't the workers, it's the supervisor's
+turns between the stages: report, review, merge, remove, each waiting on a model turn
+that carries the whole session's context. So copse runs those stages itself. When a
+worker reports, copse starts the review at once and runs the checks in the
+background; when the reviewer approves and the checks pass, copse merges the branch,
+removes the worktree, and sends the supervisor one message with the worker's report
+and the review. Findings go straight back to the worker to fix (`review_rounds`
+times) before they reach the supervisor, and anything the pipeline can't settle (a
+conflict, a failing check, no reviewer) arrives as "needs you" with the details.
+`"pipeline": false` restores the manual flow. Supervisors are also told to keep task
+briefs short: writing a long brief holds up every worker waiting on it.
 
 **Spending fewer tokens.** Workers run only the tests that cover their change while
 they work. The full suite runs once: as the repo's `checks` before a branch merges,

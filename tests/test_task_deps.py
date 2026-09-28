@@ -33,6 +33,9 @@ def no_real_spawn(monkeypatch):
 def boss(db, repo, monkeypatch):
     """A supervisor caller adopted on the main checkout, so mcp_server tools
     that need `_caller` resolve without touching the real process cwd."""
+    # These tests exercise overlap *warnings*; the default now refuses overlaps.
+    (repo / ".copse").mkdir(exist_ok=True)
+    (repo / ".copse" / "config.json").write_text('{"overlap": "warn", "pipeline": false}')
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                         "@0", None, time.time()))

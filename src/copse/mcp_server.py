@@ -9,7 +9,7 @@ import subprocess
 
 from mcp.server.mcpserver import MCPServer
 
-from copse import agents, autopilot, codemap, gates, git, history, tasks, workspaces
+from copse import agents, autopilot, codemap, gates, git, history, pipeline, tasks, workspaces
 from copse.config import RepoConfig, load_repo_config
 from copse.db import DB, Agent, Workspace
 from copse.profiles import list_profiles
@@ -49,21 +49,7 @@ def _ws(db: DB, ref: str) -> Workspace:
     return workspaces.resolve(db, ref, cwd=here.path)
 
 
-def _busy_worker(db: DB, ws: Workspace, exclude_id: str | None) -> Agent | None:
-    """A live worker (not a reviewer) still at work in ``ws``, other than the
-    caller itself. Used to avoid racing a worker mid-commit. A worker whose
-    result is already recorded is finished even if its Stop hook hasn't
-    fired yet."""
-    modes = tuple(m for m in agents.REPORTING_MODES if m != "review")
-    for a in db.list_agents(ws.id):
-        if a.id == exclude_id or a.mode not in modes or a.result is not None:
-            continue
-        if not agents.is_alive(a):
-            continue
-        a = agents.reconcile(db, a, samples=1)
-        if a.status in ("processing", "waiting"):
-            return a
-    return None
+_busy_worker = pipeline.busy_worker
 
 
 def _summary(db: DB, ws: Workspace) -> str:
@@ -140,8 +126,8 @@ async def handoff(
     going until it's met.
 
     files: paths/globs this task expects to touch. If they overlap another
-    active worker's declared or actually-changed files, the worker still
-    starts, but the reply includes a warning. depends_on: agent ids or branch
+    active worker's declared or actually-changed files, the task isn't
+    started (the repo's `overlap` setting can make that a warning instead). depends_on: agent ids or branch
     names of earlier tasks that must be merged into your branch first; if any
     aren't yet, this task is queued instead of starting, and started
     automatically (cut from your branch as it stands then) once
@@ -161,6 +147,10 @@ async def handoff(
             )
             return f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
         warning = tasks.overlap_warning(db, ws, files)
+        if warning and load_repo_config(ws.repo_root).overlap == "block":
+            return (f"Not started: this task {warning}. Two workers editing the same files "
+                    "end in conflicts. Fold it into that worker's task (send_message), or pass "
+                    "depends_on so it starts once that branch has merged.")
         worker, wws = agents.delegate(
             db, caller, ws, agent_profile, task, "handoff", isolate=isolate, branch=branch,
             done_when=done_when,
@@ -203,8 +193,8 @@ async def assign(
     tests/test_ls.py passes"); Claude workers keep going until it's met.
 
     files: paths/globs this task expects to touch. If they overlap another
-    active worker's declared or actually-changed files, the worker still
-    starts, but the reply includes a warning. depends_on: agent ids or branch
+    active worker's declared or actually-changed files, the task isn't
+    started (the repo's `overlap` setting can make that a warning instead). depends_on: agent ids or branch
     names of earlier tasks that must be merged into your branch first; if any
     aren't yet, this task is queued instead of starting, and started
     automatically (cut from your branch as it stands then) once
@@ -224,6 +214,10 @@ async def assign(
             )
             return f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
         warning = tasks.overlap_warning(db, ws, files)
+        if warning and load_repo_config(ws.repo_root).overlap == "block":
+            return (f"Not started: this task {warning}. Two workers editing the same files "
+                    "end in conflicts. Fold it into that worker's task (send_message), or pass "
+                    "depends_on so it starts once that branch has merged.")
         worker, wws = agents.delegate(
             db, caller, ws, agent_profile, task, "assign", isolate=isolate, branch=branch,
             done_when=done_when,
@@ -359,60 +353,7 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
         db = DB()
         caller, _ = _caller(db)
         ws = _ws(db, workspace)
-        cfg = load_repo_config(ws.repo_root)
-        pilot = autopilot.for_agent(db, caller.id) if caller else None
-        review = cfg.review if cfg.review is not None else bool(pilot and pilot.enabled)
-
-        try:
-            behind, _ahead = git.ahead_behind(ws.path, workspaces.require_base(ws))
-            if behind:
-                busy = _busy_worker(db, ws, caller.id if caller else None)
-                if busy:
-                    return (f"Not merged: {busy.id} is still working on {ws.branch}; "
-                            "retry once it reports.")
-            sync_result = workspaces.sync_with_base(ws)
-        except git.GitError as e:
-            return f"Not merged: {e}"
-        if sync_result.status == "conflict":
-            files = ", ".join(sync_result.conflicts) or "?"
-            return (f"Not merged: {ws.branch} conflicts with {ws.base_branch} in: {files}. "
-                    f"Ask the worker to merge {ws.base_branch} and resolve.")
-        if sync_result.status == "synced" and review:
-            # The branch's own commits are unchanged: an approval of them
-            # carries over the merge commit, and the checks below still run
-            # on the merged result. Only an unreviewed branch needs a review.
-            prior = db.latest_review(ws.id, sync_result.old_sha) if sync_result.old_sha else None
-            if prior and prior.approved:
-                db.add_review(ws.id, sync_result.new_sha, prior.reviewer_id, True,
-                              f"Carried over from the approved review of {sync_result.old_sha[:8]}: "
-                              f"{ws.base_branch} merged in cleanly (commit {sync_result.new_sha[:8]}), "
-                              "and the checks run on the merged result below.")
-            else:
-                return (f"Not merged: synced {ws.branch} with {ws.base_branch} "
-                        f"(new commit {sync_result.new_sha[:8]}); request_review again, then merge.")
-
-        report = gates.run(db, ws, cfg, review_required=review)
-        if not report.ok:
-            return f"Not merged. {report.problem}"
-        if gates.head(ws) != report.sha:
-            return (f"Not merged: {ws.branch} got new commits while the gates ran. "
-                    "Call merge_workspace again to check the new commits.")
-        try:
-            target = workspaces.merge_back(db, ws, squash=squash)
-        except git.GitError as e:
-            return f"Not merged: {e}"
-        text = f"Merged {ws.branch} into {ws.base_branch} at {target} ({report.summary()})."
-        history.record_safely(
-            db, ws.repo_root, "merge", agent=caller, with_usage=True, branch=ws.branch,
-            task=f"merge {ws.branch} into {ws.base_branch}", result=text,
-        )
-        tasks.on_merged(db, ws)
-        codemap.refresh_later(ws.repo_root)
-        if pilot:
-            db.bump_progress(pilot.root_id)
-            if pilot.goal:
-                text += " Next: call check_milestone to verify progress."
-        return text
+        return pipeline.merge(db, caller, ws, squash=squash)
 
     return await asyncio.to_thread(run)
 
@@ -474,11 +415,12 @@ def submit_review(approved: bool, summary: str) -> str:
         root = autopilot.root_of(db, caller.id)
         db.bump_progress(root)
     verdict = "APPROVED" if approved else "CHANGES REQUESTED"
-    agents.report_result(
-        db, caller.id,
-        f"Review of {ws.branch} (workspace {ws.id}) at {sha[:8]}: {verdict}\n\n{summary}",
-    )
+    text = f"Review of {ws.branch} (workspace {ws.id}) at {sha[:8]}: {verdict}\n\n{summary}"
+    handled = pipeline.on_review(db, caller, ws, approved, summary)
+    agents.report_result(db, caller.id, text, forward=not handled)
     agents.close_later(caller.id)
+    if handled:
+        return f"Review recorded ({verdict}); copse takes it from here. You're done."
     return f"Review recorded ({verdict}) and sent to your supervisor. You're done."
 
 

@@ -1085,8 +1085,11 @@ def complete_subagent(db: DB, agent_id: str, result: str) -> Agent:
     return db.get_agent(agent.id) or agent
 
 
-def report_result(db: DB, agent_id: str, result: str) -> str:
-    from copse import history, usage as usage_mod
+def report_result(db: DB, agent_id: str, result: str, forward: bool = True) -> str:
+    """Record a worker's or reviewer's result. A piped worker's report goes
+    to the pipeline (which reviews and merges the branch); otherwise, and
+    with ``forward``, it's sent to the parent as a message."""
+    from copse import history, pipeline, usage as usage_mod
 
     agent = get(db, agent_id)
     db.set_result(agent.id, result)
@@ -1105,7 +1108,10 @@ def report_result(db: DB, agent_id: str, result: str) -> str:
     forwarded = f"{result}\n\n{usage_mod.summary_line(u)}" if u and u.total else result
     if ws and agent.mode in ("handoff", "handoff_detached", "assign"):
         warm_checks(ws)
-    if agent.mode in FORWARDING_MODES and agent.parent_id and db.get_agent(agent.parent_id):
+        if forward and pipeline.on_report(db, agent, ws, forwarded):
+            return ("result recorded. copse is having your branch reviewed; it will merge it, "
+                    "or send you the review's findings to fix.")
+    if forward and agent.mode in FORWARDING_MODES and agent.parent_id and db.get_agent(agent.parent_id):
         where = f" on branch `{ws.branch}` (workspace {ws.id})" if ws else ""
         send_message(
             db, agent.parent_id,
@@ -1288,7 +1294,7 @@ def workspace_worker(db: DB, ws: Workspace) -> Agent | None:
     """The worker whose task produced the code in ``ws``, if any: the earliest
     handoff/assign agent in the workspace (excludes reviewers, which run there
     too). Used to give a reviewer the original task and finish line."""
-    workers = [a for a in db.list_agents(ws.id) if a.mode in ("handoff", "assign")]
+    workers = [a for a in db.list_agents(ws.id) if a.mode in ("handoff", "handoff_detached", "assign")]
     return workers[0] if workers else None
 
 

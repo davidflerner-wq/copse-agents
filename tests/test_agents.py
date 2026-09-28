@@ -54,6 +54,11 @@ def test_claim_idle_is_exclusive(db, ws):
 
 
 def test_report_result_forwards_to_parent_on_assign(db, ws, monkeypatch):
+    # The manual flow: with the pipeline off, the report goes to the parent.
+    from pathlib import Path
+
+    (Path(ws.repo_root) / ".copse").mkdir(exist_ok=True)
+    (Path(ws.repo_root) / ".copse" / "config.json").write_text('{"pipeline": false}')
     fake_agent(db, ws, status="processing", agent_id="boss")
     fake_agent(db, ws, mode="assign", parent="boss", agent_id="w1")
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
@@ -367,6 +372,10 @@ def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch)
 
 
 def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
+    from pathlib import Path
+
+    (Path(ws.repo_root) / ".copse").mkdir(exist_ok=True)
+    (Path(ws.repo_root) / ".copse" / "config.json").write_text('{"pipeline": false}')
     from copse import mcp_server
 
     fake_agent(db, ws, status="processing", agent_id="boss")

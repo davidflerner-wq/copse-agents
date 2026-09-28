@@ -158,6 +158,8 @@ def test_report_result_forwards_usage_summary(db, tmp_path, monkeypatch):
     (work / "f.txt").write_text("x")
     sh("git add -A && git commit -qm init", work)
 
+    (work / ".copse").mkdir()
+    (work / ".copse" / "config.json").write_text('{"pipeline": false}')  # the manual flow forwards reports
     ws = workspaces.create(db, str(work), "feature").workspace
     t = tmp_path / "sess.jsonl"
     write(t, [_line("m1", input_tokens=2000, output_tokens=9000, cache_read=160000, cache_creation=20000)])
@@ -288,6 +290,8 @@ def test_unreadable_file_does_not_raise(db, tmp_path, monkeypatch):
 def test_no_summary_line_when_usage_is_empty(db, repo, monkeypatch):
     from copse import workspaces
 
+    (repo / ".copse").mkdir(exist_ok=True)
+    (repo / ".copse" / "config.json").write_text('{"pipeline": false}')
     ws = workspaces.create(db, str(repo), "feature").workspace
     t = repo.parent / "empty.jsonl"
     t.write_text("")

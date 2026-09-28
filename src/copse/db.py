@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS agents (
     dismissed_at REAL,             -- closed from the sidebar (`copse close`): hidden there for good
     inbox_socket TEXT,             -- Claude Code's inbox for this session (copse.inbox)
     inbox_token TEXT,
+    pipeline TEXT,                 -- a worker's branch in copse's hands: 'reviewing' or 'fixing'
+    pipeline_rounds INTEGER,
     stuck_noted REAL               -- status_since of the 'waiting' spell its supervisor was told about (copse.cull)
 );
 CREATE TABLE IF NOT EXISTS inbox (
@@ -282,6 +284,8 @@ class Agent:
     dismissed_at: float | None = None
     inbox_socket: str | None = None
     inbox_token: str | None = None
+    pipeline: str | None = None
+    pipeline_rounds: int | None = None
     stuck_noted: float | None = None
 
 
@@ -431,7 +435,8 @@ class DB:
                           ("stop_blocked", "INTEGER"), ("headless", "INTEGER"),
                           ("transcript_path", "TEXT"), ("done_when", "TEXT"),
                           ("dismissed_at", "REAL"), ("stuck_noted", "REAL"),
-                          ("inbox_socket", "TEXT"), ("inbox_token", "TEXT")):
+                          ("inbox_socket", "TEXT"), ("inbox_token", "TEXT"),
+                          ("pipeline", "TEXT"), ("pipeline_rounds", "INTEGER")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(autopilot)")}

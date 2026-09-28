@@ -58,6 +58,9 @@ class RepoConfig:
     usage_limit: int = 90              # autopilot stops pushing on at this % of the Claude usage limit
     graphify: bool | None = None       # point agents at graphify-out/graph.json (None: if it's there)
     stale_after: int = 30              # minutes before an idle, reported worker is closed; 0: never
+    pipeline: bool = True              # copse reviews and merges reported branches itself (copse.pipeline)
+    review_rounds: int = 2             # fix-and-re-review rounds the pipeline runs before asking the supervisor
+    overlap: str = "block"             # a task whose files overlap a running one: "block" or "warn"
     # Worktree pool: pre-built worktrees (checked out, files copied, setup run)
     # that `create` claims instead of doing that work live. None here means
     # "not set"; load_repo_config resolves it to 1 if the repo has `setup`
@@ -97,7 +100,8 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
         setattr(cfg, key, merged)
     for key in ("base_branch", "branch_prefix", "default_agent", "fetch", "autopilot", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
-                "usage_limit", "pool_size", "graphify", "stale_after"):
+                "usage_limit", "pool_size", "graphify", "stale_after", "pipeline",
+                "review_rounds", "overlap"):
         if key in local:
             setattr(cfg, key, local[key])
         elif key in shared:

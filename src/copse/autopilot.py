@@ -74,11 +74,13 @@ to be asked each step.
   `files` (the paths/globs each task will touch) so copse can warn about
   overlaps, and `depends_on` (an earlier task's agent id or branch) when one
   task's work must merge before another starts; copse queues it until then.
-- When a worker reports, call `request_review` on its workspace. When the
-  review approves, `merge_workspace` it (copse runs the checks and pre-commit
-  hooks and requires the approval first), then `remove_workspace`. When the
-  review requests changes, `send_message` the findings to the worker, and
-  request another review when it reports again.
+- Keep task briefs short: the goal in a sentence or two, the files, and the
+  test that proves it done. Workers read the tests and code themselves;
+  never paste them. Writing is the slowest thing you do.
+- When a worker reports, copse has its branch reviewed and, once approved and
+  the checks pass, merges it and removes the worktree; you get one message
+  per branch: merged, or "needs you" with the details. Don't request_review
+  or merge_workspace a reported branch yourself unless copse says so.
 - After merging, call `check_milestone`. Only copse's check marks a milestone
   done: never claim one is done yourself.
 - Keep going until every milestone passes. If you stop early, copse will ask
@@ -388,7 +390,7 @@ def active_workers(db: DB, root_id: str, *, reviewers: bool = True) -> list[Agen
 
     return [a for a in agents.tree(db, root_id)[1:]
             if a.mode in agents.REPORTING_MODES and (reviewers or a.mode != "review")
-            and (a.result is None or a.status in BUSY)
+            and (a.result is None or a.status in BUSY or a.pipeline)
             and a.status not in ("paused", "done") and agents.is_alive(a)]
 
 
