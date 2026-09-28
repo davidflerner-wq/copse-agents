@@ -76,7 +76,8 @@ CREATE TABLE IF NOT EXISTS milestones (
     detail TEXT,
     status TEXT NOT NULL DEFAULT 'pending', -- pending | passed | failed
     checked_at REAL,
-    output TEXT                    -- the tail of the last check's output
+    output TEXT,                   -- the tail of the last check's output
+    checked_sha TEXT               -- the checkout's HEAD when it was last checked
 );
 -- A reviewer agent's verdict on a branch at one commit. A merge gate only
 -- accepts an approval of the commit it is about to merge.
@@ -150,6 +151,7 @@ class Milestone:
     status: str
     checked_at: float | None
     output: str | None
+    checked_sha: str | None = None
 
 
 @dataclass
@@ -202,6 +204,9 @@ class DB:
                           ("stop_blocked", "INTEGER"), ("headless", "INTEGER")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(milestones)")}
+        if "checked_sha" not in cols:
+            self.conn.execute("ALTER TABLE milestones ADD COLUMN checked_sha TEXT")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -412,11 +417,12 @@ class DB:
         )
         return [_load(Milestone, r) for r in rows]
 
-    def record_check(self, milestone_id: int, passed: bool, output: str) -> None:
+    def record_check(self, milestone_id: int, passed: bool, output: str,
+                     sha: str | None = None) -> None:
         with self.tx() as c:
             c.execute(
-                "UPDATE milestones SET status=?, checked_at=?, output=? WHERE id=?",
-                ("passed" if passed else "failed", time.time(), output, milestone_id),
+                "UPDATE milestones SET status=?, checked_at=?, output=?, checked_sha=? WHERE id=?",
+                ("passed" if passed else "failed", time.time(), output, sha, milestone_id),
             )
 
     # -- reviews -------------------------------------------------------------

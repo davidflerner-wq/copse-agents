@@ -520,12 +520,21 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None) ->
 def reconcile(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> Agent:
     """Correct a status the hooks left stale. Claude Code runs no Stop hook
     when a turn is interrupted (Esc), so the agent can sit idle while we still
-    think it's busy; and after a permission prompt is approved the status
-    stays 'waiting' until the tool finishes. The screen must agree across
-    ``samples`` reads before we override the hooks."""
+    think it's busy; after a permission prompt is approved the status stays
+    'waiting' until the tool finishes; and an 'idle' status can outlive the
+    turn that followed it. The screen must agree across ``samples`` reads
+    before we override the hooks."""
+    screen_status(db, agent, samples, gap)
+    return agent
+
+
+def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> str | None:
+    """``reconcile``, returning the status the screen showed consistently
+    ('idle', 'processing' or 'waiting'), or None when it can't be read or
+    didn't agree across samples."""
     provider = get_provider(agent.provider)
-    if agent.headless or not provider.uses_hooks or agent.status not in ("processing", "waiting"):
-        return agent  # a headless pane shows output, not a TUI to read
+    if agent.headless or not provider.uses_hooks or agent.status not in ("idle", "processing", "waiting"):
+        return None  # a headless pane shows output, not a TUI to read
     seen = set()
     for i in range(samples):
         if i:
@@ -533,15 +542,15 @@ def reconcile(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> Agent
         try:
             seen.add(provider.screen_state(tmux.capture(agent.tmux_window, lines=40)))
         except tmux.TmuxError:
-            return agent
+            return None
     if len(seen) != 1:
-        return agent
+        return None
     state = seen.pop()
     new = {"idle": "idle", "busy": "processing", "waiting": "waiting"}.get(state or "")
     if new and new != agent.status:
         db.set_status(agent.id, new, only_if=agent.status)
         agent.status = new
-    return agent
+    return new
 
 
 def flush(db: DB, agent_id: str) -> bool:
@@ -812,6 +821,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 "If your task is finished, commit your work and call it now. "
                 "If you are blocked, call it with a description of what's blocking you.",
             }
+        if needs_report:
+            db.set_status(agent_id, "idle")
+            tell_parent_unreported(db, agent)
+            return None
         if agent.mode == "interactive":
             from copse import autopilot as pilot
 
@@ -828,6 +841,30 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
 
             pilot.limit_reached(db, agent)
     return None
+
+
+def tell_parent_unreported(db: DB, agent: Agent) -> None:
+    """A worker stopped again after being reminded to report, still without a
+    result. It won't be reminded again, and its supervisor has usually gone
+    idle waiting for it with nothing left to wake it, so tell the supervisor
+    (queued if it's busy, typed in now if it's idle)."""
+    if agent.mode not in FORWARDING_MODES or not agent.parent_id:
+        return  # a synchronous handoff's caller is still waiting on it
+    if db.get_agent(agent.parent_id) is None:
+        return
+    ws = db.get_workspace(agent.workspace_id)
+    where = f" (branch `{ws.branch}`, workspace {ws.id})" if ws else ""
+    tool = "submit_review" if agent.mode == "review" else "report_result"
+    body = (
+        f"Worker {agent.id}{where} stopped without calling {tool}, and won't be reminded "
+        f"again. Check on it: workspace_diff to see what it did, send_message to ask it "
+        f"to finish or report, or remove_workspace if the work is abandoned."
+    )
+    db.enqueue(agent.parent_id, format_message(db, body, agent.id), agent.id)
+    try:
+        flush(db, agent.parent_id)
+    except tmux.TmuxError:
+        pass  # stays queued; its Stop hook hands it over
 
 
 def hook_main(db: DB, agent_id: str, event: str, stdin_text: str) -> str:
