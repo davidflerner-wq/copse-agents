@@ -505,9 +505,18 @@ def test_chat_exit_closes_its_session_even_with_extra_windows(db, ws):
 
 def test_claude_command_defaults_are_unchanged():
     argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "do the thing"))
-    for flag in ("-p", "--strict-mcp-config", "--setting-sources", "--effort"):
+    for flag in ("-p", "--strict-mcp-config", "--setting-sources", "--effort", "--add-dir"):
         assert flag not in argv
     assert argv[:2] == ["claude", "--settings"]
+
+
+def test_claude_command_passes_one_add_dir_per_directory():
+    from dataclasses import replace
+
+    profile = replace(load_profile("developer"), add_dirs=["/srv/cache", "/srv/refs"])
+    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
+    pairs = [(argv[i], argv[i + 1]) for i, a in enumerate(argv) if a == "--add-dir"]
+    assert pairs == [("--add-dir", "/srv/cache"), ("--add-dir", "/srv/refs")]
 
 
 def test_claude_command_emits_lightweight_flags():

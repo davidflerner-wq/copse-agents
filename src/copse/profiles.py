@@ -36,6 +36,10 @@ class Profile:
     effort: str | None = None                # --effort low|medium|high|xhigh|max
     headless: bool = False                   # run with `claude -p`, turn by turn
     tool_search: bool | None = None          # Claude Code's deferred tool loading (None: off for workers)
+    # --add-dir. Full tool access, not read access: edits and Bash reach these too,
+    # and Claude Code loads any CLAUDE.md it finds in them. Added to the repo's own
+    # add_dirs rather than replacing it; see load_profile.
+    add_dirs: list[str] | None = None
 
 
 _COMMENT = re.compile(r"(?:^|\s)#.*$")
@@ -91,6 +95,7 @@ def _parse(text: str, fallback_name: str) -> Profile:
         allowed_tools=_list(meta.get("allowed_tools")),
         strict_mcp=_flag(meta.get("strict_mcp")),
         setting_sources=_list(meta.get("setting_sources")),
+        add_dirs=_list(meta.get("add_dirs")),
         effort=meta.get("effort") or None,
         tool_search=_bool(meta.get('tool_search')) if meta.get('tool_search') else None,
         headless=_flag(meta.get("headless")),

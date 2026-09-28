@@ -427,6 +427,12 @@ Code only, all off by default) trim it:
 | `effort: low` | `--effort` | `low`, `medium`, `high`, `xhigh` or `max`. |
 | `headless: true` | `claude -p` | No interactive TUI; each turn is one `claude -p` run (see below). |
 
+One more Claude Code field, which is not about cost:
+
+| Field | Passes | Effect |
+|---|---|---|
+| `add_dirs: /srv/cache, /srv/refs` | `--add-dir` once per entry | Directories outside the workspace the agent may read. A worktree is the agent's world, so a build cache shared between workspaces, a checked-out reference repo, or a directory of profiles kept outside the repo is otherwise unreadable, and the agent stops for a permission it cannot be granted. |
+
 ```markdown
 ---
 name: cheap

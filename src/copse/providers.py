@@ -286,6 +286,11 @@ class ClaudeCode(Provider):
             argv += ["--setting-sources", ",".join(p.setting_sources)]
         if p.effort:
             argv += ["--effort", p.effort]
+        # A worktree is the agent's world, so anything shared between workspaces —
+        # a build cache, a checked-out reference repo, a directory of profiles kept
+        # outside the repo — is outside it and unreadable without this.
+        for directory in p.add_dirs or []:
+            argv += ["--add-dir", directory]
         argv += ["--append-system-prompt",
                  "\n\n".join(filter(None, [ctx.profile.prompt, DELIVERY_NOTE]))]
         if ctx.profile.model:
