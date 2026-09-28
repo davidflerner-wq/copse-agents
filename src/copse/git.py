@@ -226,13 +226,14 @@ def base_ref(path: str | Path, base: str) -> str:
     return f"origin/{base}" if local_behind else base
 
 
-def dirty_files(path: str | Path) -> list[str]:
+def dirty_files(path: str | Path, tracked_only: bool = False) -> list[str]:
     # Deliberately not out(): it strips, and porcelain's status field is two
     # columns whose first is blank when a change is not staged. " M app.py"
     # arrives as "M app.py", and the three-character slice then eats the first
     # letter of the path. Untracked files are "?? path" and were unaffected,
     # which is why this survived.
-    proc = run(["status", "--porcelain", "--untracked-files=all"], path)
+    untracked = "no" if tracked_only else "all"
+    proc = run(["status", "--porcelain", f"--untracked-files={untracked}"], path)
     return [line[3:] for line in proc.stdout.splitlines() if line]
 
 
@@ -325,8 +326,13 @@ def merge_local_base(path: str | Path, base: str) -> tuple[str, list[str]]:
 
 
 def merge_into(root: str | Path, target_path: str | Path, branch: str, squash: bool) -> None:
-    """Merge ``branch`` into whatever is checked out at ``target_path``."""
-    if dirty_files(target_path):
+    """Merge ``branch`` into whatever is checked out at ``target_path``.
+
+    Only tracked changes block this: stray untracked files (build output,
+    ``.DS_Store``, ...) sitting in the target checkout shouldn't stop a
+    merge. If the merge would actually overwrite one, git itself refuses and
+    that failure surfaces below as a GitError."""
+    if dirty_files(target_path, tracked_only=True):
         raise GitError(f"{target_path} has uncommitted changes; commit or stash them first")
     if squash:
         proc = run(["merge", "--squash", branch], target_path, check=False)

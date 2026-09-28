@@ -143,6 +143,31 @@ def test_merge_workspace_up_to_date_branch_merges_as_before(db, repo, boss):
     assert (repo / "new.py").read_text() == "x = 1\n"
 
 
+def test_merge_into_ignores_untracked_files_in_target(db, repo):
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    open(os.path.join(ws.path, "new.py"), "w").write("x = 1\n")
+    git.commit_all(ws.path, "work")
+    (repo / ".DS_Store").write_bytes(b"junk")  # untracked cruft in the target checkout
+
+    target = workspaces.merge_back(db, ws)
+
+    assert target == str(repo)
+    assert (repo / "new.py").read_text() == "x = 1\n"
+    assert (repo / ".DS_Store").read_bytes() == b"junk"  # left alone
+
+
+def test_merge_workspace_succeeds_despite_untracked_files_in_target(db, repo, boss):
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    open(os.path.join(ws.path, "new.py"), "w").write("x = 1\n")
+    git.commit_all(ws.path, "work")
+    (repo / ".DS_Store").write_bytes(b"junk")
+
+    out = asyncio.run(mcp_server.merge_workspace(ws.id))
+
+    assert out.startswith("Merged feature into main")
+    assert (repo / "new.py").read_text() == "x = 1\n"
+
+
 def test_merge_workspace_reports_giterror_from_merge_back(db, repo, boss, monkeypatch):
     ws = workspaces.create(db, str(repo), "feature").workspace
     open(os.path.join(ws.path, "new.py"), "w").write("x = 1\n")
