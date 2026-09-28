@@ -185,7 +185,8 @@ def set_goal(db: DB, root_id: str, goal: str,
     for m in db.milestones(root_id):
         prev = old.get((m.title, m.check_cmd))
         if prev and prev.status != "pending":
-            db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha)
+            db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
+                            passed_sha=prev.passed_sha)
     db.bump_progress(root_id)
 
 
@@ -232,8 +233,8 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
     the other milestones currently marked passed are re-run too, to catch a
     merge that broke one of them while another is still in progress; those
     that passed at the checkout's current HEAD are skipped. Only a milestone
-    newly passing counts as progress, so a flaky check can't keep resetting
-    the nudge limit."""
+    newly passing, and not already passed at this commit, counts as progress,
+    so a flaky check can't keep resetting the nudge limit."""
     from copse import git, workspaces
 
     cfg = cfg or load_repo_config(ws.repo_root)
@@ -258,7 +259,9 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
             if not m.check_cmd:
                 continue
             ok, out = run_check(m.check_cmd, ws.path, env, cfg.check_timeout)
-            newly_passed |= ok and m.status != "passed"
+            # Not if it already passed at this very commit: a flaky check
+            # flipping back isn't progress.
+            newly_passed |= ok and m.status != "passed" and (head is None or m.passed_sha != head)
             db.record_check(m.id, ok, out, head)
 
     run(chosen)
@@ -343,7 +346,7 @@ def active_workers(db: DB, root_id: str, *, reviewers: bool = True) -> list[Agen
             and a.status not in ("paused", "done") and agents.is_alive(a)]
 
 
-def split_workers(db: DB, root_id: str) -> tuple[list[Agent], list[Agent]]:
+def split_workers(db: DB, root_id: str, *, screen: bool = False) -> tuple[list[Agent], list[Agent]]:
     """``active_workers`` split into (working, stalled). Stalled: idle without
     reporting a result for more than ``IDLE_GRACE_SECONDS``. Claude Code
     already reminded them once to call report_result (see agents.handle_hook's
@@ -353,10 +356,11 @@ def split_workers(db: DB, root_id: str) -> tuple[list[Agent], list[Agent]]:
 
     Only workers whose provider reports idle through hooks can stall this way
     (Codex and shell workers never leave 'unknown'). A stale 'idle' can also
-    outlive the turn after it, so a worker with a screen to read is only
-    stalled when the screen shows it idle too (its status is reconciled
-    otherwise). That's sampled just for idle, unreported workers past the
-    grace period, so it stays cheap."""
+    outlive the turn after it, so with ``screen`` a worker with a screen to
+    read is only stalled when the screen shows it idle too (its status is
+    reconciled otherwise). That sleeps between samples, so only the Stop hook
+    asks for it, and only for idle, unreported workers past the grace period.
+    Without it (the dashboard), the status is taken as it stands."""
     from copse import agents
     from copse.providers import get_provider
 
@@ -366,7 +370,7 @@ def split_workers(db: DB, root_id: str) -> tuple[list[Agent], list[Agent]]:
         maybe = (a.result is None and a.status == "idle"
                  and get_provider(a.provider).uses_hooks
                  and now - (a.status_since or a.created_at) >= IDLE_GRACE_SECONDS)
-        if maybe and (a.headless or agents.screen_status(db, a) == "idle"):
+        if maybe and (not screen or a.headless or agents.screen_status(db, a, samples=2) == "idle"):
             stalled.append(a)
         else:
             working.append(a)
@@ -468,7 +472,7 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
         return None
     from copse import agents
 
-    working, stalled = split_workers(db, agent.id)
+    working, stalled = split_workers(db, agent.id, screen=True)
     if any(agents.runs_process(a) for a in working):
         return None  # their results arrive as messages and wake it up
     ws = db.get_workspace(agent.workspace_id)

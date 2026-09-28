@@ -137,7 +137,8 @@ def test_stale_idle_status_of_a_busy_worker_is_corrected_not_flagged(db, root, m
     add_agent(db, ws, "w1", status="idle", status_since=LONG_AGO)
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_BUSY)
-    assert autopilot.stalled_workers(db, "boss") == []
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    assert autopilot.split_workers(db, "boss", screen=True)[1] == []
     assert db.get_agent("w1").status == "processing"
     assert autopilot.on_stop(db, agent, {}) is None
 
@@ -190,6 +191,9 @@ def test_worker_stopping_unreported_wakes_an_idle_supervisor(db, root, monkeypat
 def test_worker_stopping_unreported_is_queued_for_a_busy_supervisor(db, root, monkeypatch):
     _, ws = root
     add_agent(db, ws, "w1", status="processing")
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_BUSY)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
     pasted = []
     monkeypatch.setattr(tmux, "paste", lambda target, text: pasted.append(text))
     agents.handle_hook(db, "w1", "stop", {"stop_hook_active": True})
@@ -268,3 +272,82 @@ def test_regression_is_not_progress(db, root, repo):
     commit(repo, "fix")
     autopilot.check_milestones(db, "boss", ws, position=1)
     assert db.get_autopilot("boss").progress == before + 1
+
+
+def test_flaky_pass_at_the_same_commit_is_not_progress(db, root, repo):
+    _, ws = root
+    with_goal(db, checks=("test -f api.txt", "test -f ui.txt"))
+    (repo / "api.txt").write_text("")
+    commit(repo)
+    autopilot.check_milestones(db, "boss", ws, position=1)
+    before = db.get_autopilot("boss").progress
+    m1 = db.milestones("boss")[0]
+    db.record_check(m1.id, False, "flaked", m1.checked_sha)   # failed once, same HEAD
+    assert db.milestones("boss")[0].passed_sha == m1.checked_sha
+    autopilot.check_milestones(db, "boss", ws, position=1)
+    assert db.milestones("boss")[0].status == "passed"
+    assert db.get_autopilot("boss").progress == before
+
+
+# -- Re-review: a cheap dashboard, no false busy, parents always told -------
+
+
+def test_dashboard_never_sleeps_or_reads_idle_screens(db, root, monkeypatch):
+    from copse import view
+
+    _, ws = root
+    with_goal(db)
+    add_agent(db, ws, "w1", status="idle", status_since=LONG_AGO)
+    add_agent(db, ws, "w2", status="idle")
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+
+    def no_sleep(s):
+        raise AssertionError("the dashboard slept")
+
+    captured = []
+    monkeypatch.setattr(time, "sleep", no_sleep)
+    monkeypatch.setattr(tmux, "capture", lambda target, **k: captured.append(target) or CLAUDE_BUSY)
+    monkeypatch.setattr(tmux, "window_alive", lambda w: True)
+    db.set_status("boss", "idle")   # every agent idle: nothing to read at all
+    entry = view.autopilot_entry(db, ws.repo_root)
+    assert entry and entry["workers"] == 1   # w2; w1 is stalled
+    view.snapshot(db, ws.repo_root)
+    assert captured == []
+    assert db.get_agent("w1").status == "idle"
+    assert db.get_agent("w2").status == "idle"
+
+
+def test_idle_screen_quoting_the_busy_marker_stays_idle(db, root, monkeypatch):
+    _, ws = root
+    add_agent(db, ws, "w1", status="idle")
+    quoted = ("⏺ The footer shows \"esc to interrupt\" while a turn runs.\n\n"
+              "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ? for shortcuts\n")
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: quoted)
+    assert agents.reconcile(db, db.get_agent("w1"), gap=0).status == "idle"
+    assert db.get_agent("w1").status == "idle"
+
+
+def test_reconciled_to_idle_delivers_queued_message(db, root, monkeypatch):
+    _, ws = root
+    add_agent(db, ws, "w1", status="processing")
+    db.enqueue("w1", "hello", "boss")
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, text: pasted.append(text))
+    agents.reconcile(db, db.get_agent("w1"), gap=0)
+    assert pasted == ["hello"]
+    assert db.pending_count("w1") == 0
+
+
+def test_worker_stopping_unreported_tells_a_hookless_parent(db, root, monkeypatch):
+    # A Codex supervisor has no Stop hook to hand over a queued message, so
+    # it has to be typed in straight away.
+    agent, ws = root
+    db.update_agent("boss", provider="codex", status="unknown")
+    add_agent(db, ws, "w1", status="processing")
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, text: pasted.append(text))
+    agents.handle_hook(db, "w1", "stop", {"stop_hook_active": True})
+    assert len(pasted) == 1
+    assert "w1" in pasted[0] and "won't be reminded again on its own" in pasted[0]
+    assert db.pending_count("boss") == 0

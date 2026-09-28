@@ -531,18 +531,29 @@ def reconcile(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> Agent
 def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> str | None:
     """``reconcile``, returning the status the screen showed consistently
     ('idle', 'processing' or 'waiting'), or None when it can't be read or
-    didn't agree across samples."""
+    didn't agree across samples.
+
+    An 'idle' agent is only read with ``samples`` >= 2, and only moved to
+    'processing' when its provider sees the busy marker in the footer below
+    the input box (not just anywhere on screen, where a transcript can
+    quote it). A single cheap read, as the dashboard does, leaves it alone."""
     provider = get_provider(agent.provider)
     if agent.headless or not provider.uses_hooks or agent.status not in ("idle", "processing", "waiting"):
         return None  # a headless pane shows output, not a TUI to read
+    if agent.status == "idle" and samples < 2:
+        return None
     seen = set()
     for i in range(samples):
         if i:
             time.sleep(gap)
         try:
-            seen.add(provider.screen_state(tmux.capture(agent.tmux_window, lines=40)))
+            screen = tmux.capture(agent.tmux_window, lines=40)
         except tmux.TmuxError:
             return None
+        state = provider.screen_state(screen)
+        if agent.status == "idle" and state == "busy" and not provider.busy_in_footer(screen):
+            state = None
+        seen.add(state)
     if len(seen) != 1:
         return None
     state = seen.pop()
@@ -550,6 +561,11 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
     if new and new != agent.status:
         db.set_status(agent.id, new, only_if=agent.status)
         agent.status = new
+        if new == "idle" and db.pending_count(agent.id):
+            try:
+                flush(db, agent.id)
+            except tmux.TmuxError:
+                pass  # stays queued; its Stop hook hands it over
     return new
 
 
@@ -845,9 +861,9 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
 
 def tell_parent_unreported(db: DB, agent: Agent) -> None:
     """A worker stopped again after being reminded to report, still without a
-    result. It won't be reminded again, and its supervisor has usually gone
-    idle waiting for it with nothing left to wake it, so tell the supervisor
-    (queued if it's busy, typed in now if it's idle)."""
+    result. It won't be reminded again on its own, and its supervisor has
+    usually gone idle waiting for it with nothing left to wake it, so tell the
+    supervisor (queued if it's busy, delivered now if it's idle)."""
     if agent.mode not in FORWARDING_MODES or not agent.parent_id:
         return  # a synchronous handoff's caller is still waiting on it
     if db.get_agent(agent.parent_id) is None:
@@ -857,14 +873,13 @@ def tell_parent_unreported(db: DB, agent: Agent) -> None:
     tool = "submit_review" if agent.mode == "review" else "report_result"
     body = (
         f"Worker {agent.id}{where} stopped without calling {tool}, and won't be reminded "
-        f"again. Check on it: workspace_diff to see what it did, send_message to ask it "
-        f"to finish or report, or remove_workspace if the work is abandoned."
+        f"again on its own. Check on it: workspace_diff to see what it did, send_message to "
+        f"ask it to finish or report, or remove_workspace if the work is abandoned."
     )
-    db.enqueue(agent.parent_id, format_message(db, body, agent.id), agent.id)
     try:
-        flush(db, agent.parent_id)
-    except tmux.TmuxError:
-        pass  # stays queued; its Stop hook hands it over
+        send_message(db, agent.parent_id, body, agent.id)
+    except (AgentError, tmux.TmuxError):
+        pass  # the parent is gone or can't take messages; nothing more to do
 
 
 def hook_main(db: DB, agent_id: str, event: str, stdin_text: str) -> str:
