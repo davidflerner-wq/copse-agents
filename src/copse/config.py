@@ -67,6 +67,7 @@ class RepoConfig:
     # commands (worth pre-building) or 0 otherwise (a bare `worktree add` is
     # already fast). 0 disables the pool.
     pool_size: int | None = None
+    add_dirs: list[str] = field(default_factory=list)
 
 
 def _merge_commands(shared: list[str], local: object) -> list[str]:
@@ -95,7 +96,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
     local = _read_json(base / LOCAL_CONFIG_FILE)
 
     cfg = RepoConfig()
-    for key in ("setup", "teardown", "copy", "checks"):
+    for key in ("setup", "teardown", "copy", "checks", "add_dirs"):
         merged = _merge_commands(list(shared.get(key, [])), local.get(key))
         setattr(cfg, key, merged)
     for key in ("base_branch", "branch_prefix", "default_agent", "fetch", "autopilot", "review",

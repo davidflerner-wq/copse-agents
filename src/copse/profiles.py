@@ -14,6 +14,7 @@ built-in profiles shipped with copse.
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
@@ -110,6 +111,47 @@ def _search_dirs(repo_root: str | None) -> list[Path]:
     return dirs
 
 
+def _with_repo_add_dirs(profile: Profile, repo_root: str | None) -> Profile:
+    """Union the repo's ``add_dirs`` with the profile's, resolved and checked.
+
+    The repo config is the primary home: a shared build cache or a folder of
+    profiles beside the repo is a property of the repository, so every profile
+    launched in it needs the same list and copies would drift. A profile adds to
+    that list for a role that needs more, and never removes from it, which keeps
+    the result easy to reason about.
+
+    Entries are resolved against the repo root rather than passed through, because
+    a worktree is the process's working directory and a relative path would
+    otherwise mean ``~/.copse/worktrees/<repo>/<branch>/<path>``. A missing
+    directory is reported: Claude Code ignores an ``--add-dir`` that does not
+    exist, so the failure would be the one this field exists to prevent, silently.
+    """
+    if repo_root is None:
+        return profile
+
+    from copse.config import load_repo_config
+
+    root = Path(repo_root)
+    merged: list[str] = []
+    for entry in [*load_repo_config(repo_root).add_dirs, *(profile.add_dirs or [])]:
+        entry = str(entry).strip()
+        if not entry:
+            continue
+        resolved = str(Path(entry) if Path(entry).is_absolute() else (root / entry).resolve())
+        if resolved not in merged:
+            merged.append(resolved)
+
+    missing = [d for d in merged if not Path(d).is_dir()]
+    if missing:
+        print(
+            "copse: add_dirs names "
+            + ", ".join(missing)
+            + ", which do not exist; Claude Code will ignore them",
+            file=sys.stderr,
+        )
+    return replace(profile, add_dirs=merged or None)
+
+
 def load_profile(name: str, repo_root: str | None = None) -> Profile:
     """The profile in ``<name>.md``. Its ``name`` is always ``name``, even if
     the file's frontmatter says otherwise (a copied profile whose name wasn't
@@ -118,10 +160,14 @@ def load_profile(name: str, repo_root: str | None = None) -> Profile:
     for d in _search_dirs(repo_root):
         f = d / f"{name}.md"
         if f.is_file():
-            return replace(_parse(f.read_text(encoding="utf-8"), name), name=name)
+            return _with_repo_add_dirs(
+                replace(_parse(f.read_text(encoding="utf-8"), name), name=name), repo_root
+            )
     builtin = resources.files("copse.builtin_agents").joinpath(f"{name}.md")
     if builtin.is_file():
-        return replace(_parse(builtin.read_text(encoding="utf-8"), name), name=name)
+        return _with_repo_add_dirs(
+            replace(_parse(builtin.read_text(encoding="utf-8"), name), name=name), repo_root
+        )
     raise KeyError(f"no agent profile named {name!r}")
 
 

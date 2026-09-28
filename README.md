@@ -427,11 +427,6 @@ Code only, all off by default) trim it:
 | `effort: low` | `--effort` | `low`, `medium`, `high`, `xhigh` or `max`. |
 | `headless: true` | `claude -p` | No interactive TUI; each turn is one `claude -p` run (see below). |
 
-One more Claude Code field, which is not about cost:
-
-| Field | Passes | Effect |
-|---|---|---|
-| `add_dirs: /srv/cache, /srv/refs` | `--add-dir` once per entry | Directories outside the workspace the agent may read. A worktree is the agent's world, so a build cache shared between workspaces, a checked-out reference repo, or a directory of profiles kept outside the repo is otherwise unreadable, and the agent stops for a permission it cannot be granted. |
 
 ```markdown
 ---
@@ -465,6 +460,46 @@ reports the error. Differences from an interactive worker:
 - A `done_when` finish line is added to the task, without `/goal` (an interactive command).
 
 Blank values and anything after ` #` are ignored, so frontmatter can carry comments.
+
+### Directories outside the workspace
+
+A worktree is the agent's world, which is the point. Anything shared between
+workspaces is outside it — a build cache instead of one per worker, a checked-out
+reference repo, a folder of profiles kept beside the repo — and an agent that needs
+it stops for a permission nobody can grant: a headless worker is refused, an
+interactive one waits for a human who may not be watching.
+
+`add_dirs` names those directories. It belongs in `.copse/config.json`, because a
+shared cache is a property of the repository rather than of a role, and every
+profile the repo launches needs the same list:
+
+```json
+{ "add_dirs": ["/srv/cargo-cache", "vendor/reference"] }
+```
+
+A profile may add to that list for a role that needs more, and never removes from
+it:
+
+```markdown
+---
+name: developer
+provider: claude
+add_dirs: /srv/extra
+---
+```
+
+Both are passed as `--add-dir`, once per entry. Three things to know:
+
+- **It is full tool access, not read access.** Claude Code's own help says
+  "directories to allow tool access to": edits and Bash reach them too, so a worker
+  in `acceptEdits` or `auto` can write into a directory you thought of as reference
+  material, and four parallel workers can write into a shared cache with no prompt.
+- **`CLAUDE.md` in those directories is loaded**, which is worth knowing before you
+  add a directory that has one.
+- **Relative entries resolve against the repo root**, not the worktree the agent
+  runs in, and copse says so on stderr when a named directory does not exist —
+  Claude Code ignores a missing `--add-dir` silently, which would be the failure this
+  field exists to prevent.
 
 ### Subagent workers
 

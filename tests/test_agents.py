@@ -602,3 +602,17 @@ def test_claude_agents_are_told_what_vouches_for_a_message():
     argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "hi", mode="assign"))
     prompt = argv[argv.index("--append-system-prompt") + 1]
     assert DELIVERY_NOTE in prompt and load_profile("developer").prompt in prompt
+
+
+def test_add_dir_is_never_the_last_flag():
+    """--add-dir is variadic, so a flag must follow the last one.
+
+    If it were last, Claude Code would read the initial prompt as another
+    directory and the worker would start with no task and no error.
+    """
+    from dataclasses import replace
+
+    profile = replace(load_profile("developer"), add_dirs=["/srv/cache", "/srv/refs"])
+    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
+    last = max(i for i, a in enumerate(argv) if a == "--add-dir")
+    assert argv[last + 2].startswith("--"), argv[last:]
