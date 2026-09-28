@@ -15,6 +15,7 @@ worker's dependencies should stay copse's own.
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -60,6 +61,41 @@ class Reply:
     stop_reason: str  # 'stop' | 'tool_calls' | 'length' | other backend value
     usage: Usage = field(default_factory=Usage)
     model: str | None = None
+    # The text ended in an unfinished tool call the backend didn't parse
+    # (e.g. a bare "<tool_call>" from Qwen): the loop asks for it again.
+    truncated_call: bool = False
+
+
+TOOL_CALL_BLOCK = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
+DANGLING_CALL = re.compile(r"<tool_call>\s*(\{.*)?$", re.S)
+
+
+def recover_text_tool_calls(text: str, calls: list[ToolCall]) -> tuple[str, list[ToolCall], bool]:
+    """Some models write tool calls into their text (Qwen's ``<tool_call>``
+    blocks) when the backend's parser misses them. Complete blocks become
+    ToolCalls; an unfinished one at the end is cut off and flagged."""
+    if "<tool_call>" not in text:
+        return text, calls, False
+    found: list[ToolCall] = []
+
+    def take(m: re.Match) -> str:
+        try:
+            data = json.loads(m.group(1))
+        except ValueError:
+            return m.group(0)  # not JSON: leave it in the text
+        if isinstance(data, dict) and data.get("name"):
+            args = data.get("arguments", data.get("parameters", {}))
+            found.append(_tool_call(f"text_{len(calls) + len(found)}", str(data["name"]), args))
+            return ""
+        return m.group(0)
+
+    text = TOOL_CALL_BLOCK.sub(take, text)
+    truncated = False
+    m = DANGLING_CALL.search(text)
+    if m:
+        text = text[:m.start()]
+        truncated = True
+    return text.strip(), calls + found, truncated
 
 
 @dataclass
@@ -188,6 +224,7 @@ class Client:
         for i, c in enumerate(message.get("tool_calls") or []):
             fn = c.get("function") or {}
             calls.append(_tool_call(c.get("id") or f"call_{i}", fn.get("name") or "", fn.get("arguments")))
+        text, calls, truncated = recover_text_tool_calls(text, calls)
         finish = choice.get("finish_reason") or ("tool_calls" if calls else "stop")
         stop = {"stop": "stop", "tool_calls": "tool_calls", "length": "length"}.get(finish, finish)
         if calls and stop == "stop":
@@ -196,7 +233,7 @@ class Client:
         details = u.get("prompt_tokens_details") or {}
         usage = Usage(int(u.get("prompt_tokens") or 0), int(u.get("completion_tokens") or 0),
                       int(details.get("cached_tokens") or 0))
-        return Reply(text, calls, stop, usage, data.get("model"))
+        return Reply(text, calls, stop, usage, data.get("model"), truncated_call=truncated)
 
     # -- Anthropic messages ---------------------------------------------------
 
@@ -248,6 +285,7 @@ class Client:
             elif kind == "tool_use":
                 calls.append(_tool_call(block.get("id") or f"toolu_{i}", block.get("name") or "",
                                         block.get("input")))
+        text, calls, truncated = recover_text_tool_calls("".join(text_parts), calls)
         reason = data.get("stop_reason") or ("tool_use" if calls else "end_turn")
         stop = {"end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "length",
                 "stop_sequence": "stop"}.get(reason, reason)
@@ -256,7 +294,7 @@ class Client:
         u = data.get("usage") or {}
         usage = Usage(int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0),
                       int(u.get("cache_read_input_tokens") or 0))
-        return Reply("".join(text_parts), calls, stop, usage, data.get("model"))
+        return Reply(text, calls, stop, usage, data.get("model"), truncated_call=truncated)
 
 
 def _tool_call(call_id: str, name: str, arguments) -> ToolCall:

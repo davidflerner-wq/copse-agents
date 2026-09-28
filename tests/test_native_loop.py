@@ -451,6 +451,37 @@ def test_bash_prefix_and_exact_rules():
     assert split_commands("a b&&c  d ||e;f|g") == ["a b", "c d", "e", "f", "g"]
 
 
+def test_each_part_of_a_compound_command_may_match_a_different_rule():
+    p = Permissions("acceptEdits", ["Bash(git add:*)", "Bash(git commit:*)", "Bash(pytest:*)"])
+    assert p.decide("Bash", {"command": "git add -A && git commit -m 'fix add'"}) == "allow"
+    assert p.decide("Bash", {"command": "git add -A && git push"}) == "ask"
+    assert p.reason("Bash", {"command": "git add -A && git push"}) == \
+        "`git push` isn't covered by the allowed commands (each part of a compound command must be)"
+    assert p.reason("Bash", {"command": "rm -rf x"}) == "it isn't covered by the allowed commands"
+    assert "substitution" in p.reason("Bash", {"command": "git add $(ls)"})
+    assert p.reason("Edit", {"path": "x"}) == ""
+
+
+def test_tool_calls_written_as_text_are_recovered(fake, tmp_path):
+    (tmp_path / "a.txt").write_text("x\n")
+    fake.replies = [
+        openai_reply('Let me look.<tool_call>\n{"name": "Read", "arguments": {"path": "a.txt"}}\n</tool_call>'),
+        openai_reply("Now the second.<tool_call>\n{\"name\": \"Bash\", \"arg"),  # cut off mid-call
+        openai_reply(calls=[("c3", "Bash", {"command": "echo ok"})]),
+        openai_reply("done<tool_call>"),  # a bare tag: asked again, once more
+        openai_reply("really done"),
+    ]
+    a = agent(fake, tmp_path)
+    assert a.run("go") == "really done"
+    msgs = fake.requests[1]["messages"]
+    assert msgs[-2]["tool_calls"][0]["function"]["name"] == "Read" and msgs[-2]["content"] == "Let me look."
+    assert "1\tx" in msgs[-1]["content"]
+    nudge = fake.requests[2]["messages"][-1]
+    assert nudge["role"] == "user" and "didn't come through" in nudge["content"]
+    assert fake.requests[2]["messages"][-2]["content"] == "Now the second."
+    assert "didn't come through" in fake.requests[4]["messages"][-1]["content"]
+
+
 def test_modes_and_rules():
     p = Permissions("acceptEdits", ["Bash(uv run:*)", "Bash(pytest)"])
     assert p.decide("Read", {"path": "x"}) == "allow"

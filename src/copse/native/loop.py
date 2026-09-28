@@ -96,6 +96,11 @@ class NativeAgent:
                     cutoffs += 1
                     self._user("Your reply was cut off by the output limit. Continue from where it stopped.")
                     continue
+                if reply.truncated_call and cutoffs < self.config.continue_on_length:
+                    cutoffs += 1
+                    self._user("Your last tool call didn't come through: the reply ended at an unfinished "
+                               "<tool_call>. Make the call again, as a proper tool call.")
+                    continue
                 return reply.text
             self._record({"type": "note", "text": f"stopped after {self.config.max_steps} model calls"})
             last = self.messages[-1]
@@ -120,9 +125,11 @@ class NativeAgent:
                 verdict = "deny"
         if verdict == "deny":
             what = call.arguments.get("command") or call.arguments.get("path") or ""
-            return ToolResult(f"{call.name} {what!s} is not permitted by this worker's permissions "
-                              "(permission_mode and allowed_tools). Use another approach, or report that "
-                              "the task needs it.", True)
+            why = self.permissions.reason(call.name, call.arguments)
+            return ToolResult(f"{call.name} {what!s} is not permitted by this worker's permissions"
+                              + (f": {why}" if why else " (permission_mode and allowed_tools)")
+                              + ". Run allowed commands one at a time, use another approach, or report "
+                              "that the task needs it.", True)
         self._log(f"{call.name} {_brief(call.arguments)}")
         return self.toolbox.call(call.name, call.arguments)
 

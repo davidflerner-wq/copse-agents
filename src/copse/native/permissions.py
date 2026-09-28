@@ -50,19 +50,32 @@ class Permissions:
         return "ask"
 
     def _allowed_by_rule(self, tool: str, args: dict) -> bool:
-        for name, spec in self.rules:
-            if name != tool:
-                continue
-            if spec is None or spec == "" or spec == "*":
-                return True
-            if tool == "Bash":
-                if bash_matches(spec, str(args.get("command", ""))):
-                    return True
-            else:
-                target = str(args.get("path") or args.get("file_path") or args.get("pattern") or "")
-                if fnmatch.fnmatchcase(target, spec) or spec.endswith(":*") and target.startswith(spec[:-2]):
-                    return True
-        return False
+        specs = [spec for name, spec in self.rules if name == tool]
+        if not specs:
+            return False
+        if any(spec in (None, "", "*") for spec in specs):
+            return True
+        if tool == "Bash":
+            return uncovered_part(specs, str(args.get("command", ""))) is None
+        target = str(args.get("path") or args.get("file_path") or args.get("pattern") or "")
+        return any(fnmatch.fnmatchcase(target, spec) or spec.endswith(":*") and target.startswith(spec[:-2])
+                   for spec in specs)
+
+    def reason(self, tool: str, args: dict) -> str:
+        """Why a Bash command isn't allowed, for the model: the part no rule
+        covers. Empty for other tools."""
+        if tool != "Bash":
+            return ""
+        command = str(args.get("command", ""))
+        if "$(" in command or "`" in command:
+            return "command substitution ($(...) or backticks) is never allowed"
+        specs = [spec for name, spec in self.rules if name == "Bash"]
+        part = uncovered_part(specs, command)
+        if part is None:
+            return ""
+        if part != command.strip():
+            return f"`{part}` isn't covered by the allowed commands (each part of a compound command must be)"
+        return "it isn't covered by the allowed commands"
 
 
 def _canonical(mode: str | None) -> str:
@@ -73,22 +86,32 @@ def _canonical(mode: str | None) -> str:
 
 def bash_matches(spec: str, command: str) -> bool:
     """Whether every simple command in ``command`` is covered by ``spec``
-    (``prefix:*`` or an exact command). Command substitution is never
-    covered: what it runs can't be seen from here."""
+    (``prefix:*`` or an exact command)."""
+    return uncovered_part([spec], command) is None
+
+
+def uncovered_part(specs: list[str | None], command: str) -> str | None:
+    """The first simple command in ``command`` (``a && b | c`` has three)
+    that no spec in ``specs`` covers, or None when all are covered. Command
+    substitution is never covered: what it runs can't be seen from here.
+    Unparseable input (an unclosed quote) counts as uncovered."""
     command = command.strip()
     if not command or "$(" in command or "`" in command:
-        return False
+        return command or "(empty)"
     parts = split_commands(command)
     if not parts:
-        return False
+        return command
     for part in parts:
-        if spec.endswith(":*"):
-            prefix = spec[:-2].strip()
-            if not (part == prefix or part.startswith(prefix + " ")):
-                return False
-        elif part != spec.strip():
-            return False
-    return True
+        if not any(_covers(spec, part) for spec in specs if spec):
+            return part
+    return None
+
+
+def _covers(spec: str, part: str) -> bool:
+    if spec.endswith(":*"):
+        prefix = spec[:-2].strip()
+        return part == prefix or part.startswith(prefix + " ")
+    return part == spec.strip()
 
 
 def split_commands(command: str) -> list[str]:
