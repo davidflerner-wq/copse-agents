@@ -1249,6 +1249,14 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
     return None
 
 
+def agent_for_session(db: DB, session_id: object) -> str | None:
+    """The newest agent whose CLI session is ``session_id``, if any."""
+    if not session_id:
+        return None
+    matches = [a for a in db.list_agents() if a.session_ref == str(session_id)]
+    return matches[-1].id if matches else None
+
+
 def tell_parent_unreported(db: DB, agent: Agent) -> None:
     """A worker stopped again after being reminded to report, still without a
     result. It won't be reminded again on its own, and its supervisor has
@@ -1274,10 +1282,15 @@ def tell_parent_unreported(db: DB, agent: Agent) -> None:
         pass
 
 
-def hook_main(db: DB, agent_id: str, event: str, stdin_text: str) -> str:
+def hook_main(db: DB, agent_id: str, event: str, stdin_text: str, trusted: bool = True) -> str:
+    """``trusted`` is False when ``agent_id`` came from the environment,
+    which can be stale (see ClaudeCode._hook): then an agent already known
+    by the payload's session id wins over it."""
     try:
         payload = json.loads(stdin_text) if stdin_text.strip() else {}
     except json.JSONDecodeError:
         payload = {}
+    if not trusted:
+        agent_id = agent_for_session(db, payload.get("session_id")) or agent_id
     out = handle_hook(db, agent_id, event, payload)
     return json.dumps(out) if out else ""

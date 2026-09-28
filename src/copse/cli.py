@@ -779,16 +779,18 @@ def mcp() -> None:
 
 
 @app.command("_hook", hidden=True)
-def hook(event: str) -> None:
+def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent")) -> None:
     if event.startswith("agy-"):
         from copse import antigravity
 
         typer.echo(antigravity.hook_main(DB(), event, sys.stdin.read()))
         return
-    agent_id = os.environ.get("COPSE_AGENT_ID")
+    # --agent is baked into the hook command at launch; the environment is
+    # only a fallback for sessions launched by an older copse (and may be stale).
+    agent_id = agent or os.environ.get("COPSE_AGENT_ID")
     if not agent_id:
         return
-    out = agents.hook_main(DB(), agent_id, event, sys.stdin.read())
+    out = agents.hook_main(DB(), agent_id, event, sys.stdin.read(), trusted=agent is not None)
     if out:
         typer.echo(out)
 

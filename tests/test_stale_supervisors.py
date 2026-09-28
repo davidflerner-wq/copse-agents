@@ -97,3 +97,63 @@ def test_a_reused_pane_id_only_counts_for_the_newest_agent(db, repo, root):
     assert "current" in alive and "stale" not in alive
     got = shown(db, repo)
     assert "current" in got and "stale" not in got
+
+
+# -- hooks must reach the agent that launched them ------------------------------
+#
+# Claude Code can run a session in a process its background daemon started for
+# an earlier launch, so the environment its hooks inherit (COPSE_AGENT_ID) can
+# name an older supervisor: that one was then marked busy and nudged with its
+# old autopilot goal, while the real session looked idle.
+
+
+def _claude_settings(agent_id):
+    import json
+
+    from copse.profiles import load_profile
+    from copse.providers import ClaudeCode, LaunchContext
+
+    argv = ClaudeCode().command(LaunchContext(agent_id, load_profile("supervisor"), None,
+                                              mode="interactive"))
+    return json.loads(argv[argv.index("--settings") + 1])
+
+
+def test_claude_hook_commands_name_their_agent(monkeypatch):
+    monkeypatch.setenv("COPSE_TMUX_SOCKET", "sock")
+    settings = _claude_settings("new12345")
+    for event, entries in settings["hooks"].items():
+        cmd = entries[0]["hooks"][0]["command"]
+        assert "--agent new12345" in cmd, event
+        assert "COPSE_TMUX_SOCKET=sock" in cmd
+
+
+def test_the_hook_command_wins_over_a_stale_environment(db, repo, root, monkeypatch):
+    from typer.testing import CliRunner
+
+    from copse.cli import app
+
+    add(db, root, "old", status="idle", age=LONG_AGO)
+    add(db, root, "new", status="idle")
+    monkeypatch.setenv("COPSE_AGENT_ID", "old")  # what the daemon's process carries
+    res = CliRunner().invoke(app, ["_hook", "prompt-submit", "--agent", "new"],
+                             input='{"session_id": "s-new", "prompt": "hi"}')
+    assert res.exit_code == 0, res.output
+    assert db.get_agent("new").status == "processing"
+    assert db.get_agent("new").session_ref == "s-new"
+    assert db.get_agent("old").status == "idle" and db.get_agent("old").session_ref is None
+
+
+def test_an_env_only_hook_prefers_the_agent_that_owns_the_session(db, repo, root, monkeypatch):
+    from typer.testing import CliRunner
+
+    from copse.cli import app
+
+    add(db, root, "old", status="idle", age=LONG_AGO)
+    add(db, root, "new", status="idle")
+    db.update_agent("new", session_ref="s-new")
+    monkeypatch.setenv("COPSE_AGENT_ID", "old")  # a session launched by an older copse
+    res = CliRunner().invoke(app, ["_hook", "prompt-submit"],
+                             input='{"session_id": "s-new", "prompt": "hi"}')
+    assert res.exit_code == 0, res.output
+    assert db.get_agent("new").status == "processing"
+    assert db.get_agent("old").status == "idle"

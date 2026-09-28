@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 import time
 from dataclasses import dataclass
@@ -121,27 +122,36 @@ class ClaudeCode(Provider):
         return bool(glob.glob(os.path.join(glob.escape(config), "projects", "*", f"{glob.escape(session_id)}.jsonl")))
     YES_SELECTED = re.compile(r"[❯>]\s*(\d+\.\s*)?Yes, I trust", re.I)
 
-    def _hook(self, event: str) -> list[dict]:
-        cmd = " ".join(f"'{a}'" for a in [*copse_invocation(), "_hook", event])
+    @staticmethod
+    def _hook(event: str, agent_id: str) -> list[dict]:
+        # The agent's id (and where copse keeps its state) go in the command
+        # itself, not just the pane's environment: Claude Code may run the
+        # session in a process its background daemon started earlier, whose
+        # environment is some older launch's, so COPSE_AGENT_ID there can
+        # name a different agent (see mcp_server_spec for the MCP side).
+        env = {k: os.environ[k] for k in ("COPSE_HOME", "COPSE_TMUX_SOCKET") if k in os.environ}
+        assigns = "".join(f"{k}={shlex.quote(v)} " for k, v in sorted(env.items()))
+        cmd = assigns + " ".join(shlex.quote(a) for a in
+                                 [*copse_invocation(), "_hook", event, "--agent", agent_id])
         return [{"hooks": [{"type": "command", "command": cmd}]}]
 
     def command(self, ctx: LaunchContext) -> list[str]:
         settings = {
             "hooks": {
-                "SessionStart": self._hook("session-start"),
-                "UserPromptSubmit": self._hook("prompt-submit"),
-                "Stop": self._hook("stop"),
-                "Notification": self._hook("notification"),
+                "SessionStart": self._hook("session-start", ctx.agent_id),
+                "UserPromptSubmit": self._hook("prompt-submit", ctx.agent_id),
+                "Stop": self._hook("stop", ctx.agent_id),
+                "Notification": self._hook("notification", ctx.agent_id),
                 # After a permission prompt is answered, the tool runs; flip
                 # 'waiting' back to 'processing'.
-                "PostToolUse": self._hook("tool-done"),
+                "PostToolUse": self._hook("tool-done", ctx.agent_id),
                 # A turn that ends on an API error (e.g. the usage limit) runs
                 # this instead of Stop.
-                "StopFailure": self._hook("stop-failure"),
+                "StopFailure": self._hook("stop-failure", ctx.agent_id),
                 # The agent's own built-in subagents (its Agent tool), so the
                 # sidebar can nest them under it.
-                "SubagentStart": self._hook("subagent-start"),
-                "SubagentStop": self._hook("subagent-stop"),
+                "SubagentStart": self._hook("subagent-start", ctx.agent_id),
+                "SubagentStop": self._hook("subagent-stop", ctx.agent_id),
             },
             # Claude Code only tells status lines how much of the plan's usage
             # is spent. copse's records that, then runs the person's own
