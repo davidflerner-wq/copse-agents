@@ -313,7 +313,17 @@ def test_incremental_review_falls_back_to_full_review_after_a_merge_commit(db, w
 # -- raw task storage ---------------------------------------------------------------
 
 
-def test_worker_task_is_stored_raw_not_decorated(db, repo):
+@pytest.fixture
+def pasted(monkeypatch):
+    """Record what a real spawn would type into the agent's pane instead of
+    typing it: these tests are about the stored task, and a shell pane on a CI
+    runner can be gone before the paste's Enter arrives."""
+    texts = []
+    monkeypatch.setattr(agents.tmux, "paste", lambda target, text, submit=True: texts.append(text))
+    return texts
+
+
+def test_worker_task_is_stored_raw_not_decorated(db, repo, pasted):
     ws = workspaces.create(db, str(repo), "feat-raw").workspace
     worker = agents.spawn(db, ws, "developer", prompt="Add input validation to the login form.",
                           provider_name="shell", mode="handoff", done_when="tests/test_login.py passes")
@@ -323,6 +333,7 @@ def test_worker_task_is_stored_raw_not_decorated(db, repo):
     assert "Finish line" not in stored.task
     assert "report_result" not in stored.task  # WORKER_FOOTER marker
     assert "/goal" not in stored.task
+    assert pasted and "Add input validation to the login form." in pasted[0]
 
 
 def test_decorate_worker_prompt_adds_the_goal_wrapper_for_claude_workers(worker_ws):
@@ -335,7 +346,7 @@ def test_decorate_worker_prompt_adds_the_goal_wrapper_for_claude_workers(worker_
     assert "report_result" in decorated  # the footer is added back for the real launch
 
 
-def test_review_prompt_uses_the_raw_worker_task_via_real_spawn(db, repo, monkeypatch):
+def test_review_prompt_uses_the_raw_worker_task_via_real_spawn(db, repo, monkeypatch, pasted):
     ws = workspaces.create(db, str(repo), "feat-review").workspace
     agents.spawn(db, ws, "developer", prompt="Add input validation to the login form.",
                 provider_name="shell", mode="handoff", done_when="tests/test_login.py passes")
