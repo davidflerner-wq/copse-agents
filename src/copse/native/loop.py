@@ -56,7 +56,8 @@ class NativeAgent:
                  on_status: Callable[[str], None] | None = None,
                  inbox: Callable[[], list[str]] | None = None,
                  ask: Callable[[str, dict], bool] | None = None,
-                 log: Callable[[str], None] | None = None):
+                 log: Callable[[str], None] | None = None,
+                 on_text: Callable[[str], None] | None = None):
         self.client = client
         self.toolbox = toolbox
         self.permissions = permissions
@@ -67,6 +68,7 @@ class NativeAgent:
         self._inbox = inbox or (lambda: [])
         self._ask = ask  # None: nobody to ask, so 'ask' means refuse
         self._log = log or (lambda s: None)
+        self._on_text = on_text  # streamed text deltas of the model's replies
         self.messages: list[dict] = []
         self.usage = Usage()
         self.model: str | None = None
@@ -87,7 +89,8 @@ class NativeAgent:
             for _ in range(self.config.max_steps):
                 self._drain_inbox()
                 self._fit_context()
-                reply = self.client.complete(self.system_prompt, self.messages, self.toolbox.specs())
+                extra = {"on_text": self._on_text} if self._on_text else {}
+                reply = self.client.complete(self.system_prompt, self.messages, self.toolbox.specs(), **extra)
                 self.steps += 1
                 self.usage = self.usage + reply.usage
                 self.model = reply.model or self.model
