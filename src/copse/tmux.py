@@ -346,6 +346,26 @@ def session_pane_ids(session: str) -> list[str]:
     return proc.stdout.split() if proc.returncode == 0 else []
 
 
+SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu"}
+
+
+def session_idle(session: str) -> bool:
+    """Whether every pane of ``session`` is dead, an idle shell, or a copse
+    sidebar: nothing the person started (a dev server, an editor) runs in it."""
+    proc = _tmux("list-panes", "-s", "-t", f"={session}", "-F",
+                 "#{pane_dead}\t#{pane_current_command}\t#{pane_start_command}", check=False)
+    if proc.returncode != 0:
+        return False
+    for line in proc.stdout.splitlines():
+        dead, _, rest = line.partition("\t")
+        current, _, start = rest.partition("\t")
+        if dead == "1" or "watch --sidebar" in start:
+            continue
+        if current.lstrip("-") not in SHELLS:
+            return False
+    return True
+
+
 def kill_session(session: str) -> None:
     _tmux("kill-session", "-t", f"={session}", check=False)
 

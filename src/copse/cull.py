@@ -171,7 +171,8 @@ def prune_retired(db: DB, now: float | None = None) -> list[str]:
 
 def orphan_sessions(db: DB) -> list[str]:
     """Kill copse tmux sessions (``copse_*``) that no running agent is in,
-    unless someone is attached to them."""
+    unless someone is attached to them or something other than an idle shell
+    runs in them (a dev server in its shell window, say)."""
     from copse import view
 
     panes = tmux.list_panes()
@@ -183,7 +184,7 @@ def orphan_sessions(db: DB) -> list[str]:
     for name, attached in tmux.list_sessions():
         if not name.startswith("copse_") or attached or name in live_sessions:
             continue
-        if live_panes & set(tmux.session_pane_ids(name)):
+        if live_panes & set(tmux.session_pane_ids(name)) or not tmux.session_idle(name):
             continue
         tmux.kill_session(name)
         done.append(f"killed tmux session {name} (no running agent)")

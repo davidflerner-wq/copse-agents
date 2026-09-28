@@ -243,12 +243,16 @@ def test_orphan_copse_sessions_are_killed(db, repo):
     add_agent(db, ws, "live", status="processing", result=None, window=pane)
     tmux.ensure_session("copse_proj_feat-orphan", str(repo), {})
     tmux.ensure_session("not-copse", str(repo), {})
+    tmux.ensure_session("copse_proj_devserver", str(repo), {})
+    tmux.new_window("copse_proj_devserver", "server", str(repo), ["sleep", "60"], {})
+    time.sleep(0.3)  # let the shells start
 
     lines = cull.orphan_sessions(db)
     assert any("copse_proj_feat-orphan" in line for line in lines)
     assert not tmux.has_session("copse_proj_feat-orphan")
     assert tmux.has_session(ws.tmux_session)
     assert tmux.has_session("not-copse")
+    assert tmux.has_session("copse_proj_devserver")  # something the person runs
 
 
 def test_empty_worktree_folders_are_removed(db, repo):
