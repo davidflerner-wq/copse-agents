@@ -102,6 +102,41 @@ def claude_binary() -> str:
     return os.environ.get("COPSE_CLAUDE_BIN") or "claude"
 
 
+def claude_global_config() -> str:
+    """Claude Code's global state file, where it records trusted folders:
+    ``$CLAUDE_CONFIG_DIR/.claude.json``, else ``~/.claude.json``."""
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    return os.path.join(config, ".claude.json") if config else os.path.expanduser("~/.claude.json")
+
+
+def trust_folder(path: str) -> bool:
+    """Mark ``path`` as trusted in Claude Code's own state, so a worker
+    started there never stops on the first-run "trust this folder?" dialog
+    (after_launch still answers it, but only for its first 30 seconds, and a
+    worker nobody watches would otherwise wait on it for good). copse made
+    the folder from the person's own repo, which is the answer after_launch
+    gives anyway. Only adds the one flag; leaves the file alone if it's
+    missing (Claude Code hasn't been set up yet) or unreadable. Returns
+    whether the folder is trusted now."""
+    config = claude_global_config()
+    key = os.path.realpath(path)  # how Claude Code keys it (its cwd, symlinks resolved)
+    try:
+        with open(config, encoding="utf-8") as f:
+            data = json.load(f)
+        projects = data.setdefault("projects", {})
+        entry = projects.setdefault(key, {})
+        if entry.get("hasTrustDialogAccepted") is True:
+            return True
+        entry["hasTrustDialogAccepted"] = True
+        tmp = f"{config}.copse-{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, config)  # atomic: Claude Code never reads half a file
+        return True
+    except (OSError, ValueError, AttributeError, TypeError):
+        return False
+
+
 class ClaudeCode(Provider):
     name = "claude"
     uses_hooks = True
@@ -229,7 +264,8 @@ class ClaudeCode(Provider):
     def screen_state(self, screen: str) -> str | None:
         lines = screen.rstrip().splitlines()
         tail = "\n".join(lines[-25:])
-        if "Do you want to proceed?" in tail or "Enter to confirm" in tail:
+        if ("Do you want to proceed?" in tail or "Enter to confirm" in tail
+                or self.TRUST_DIALOG.search(tail)):
             return "waiting"
         box = [i for i, line in enumerate(lines) if line.lstrip().startswith("❯")]
         footer = lines[box[-1] + 1:] if box else []

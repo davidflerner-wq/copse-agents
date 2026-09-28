@@ -159,14 +159,15 @@ def start(
     """Start a fresh chat with an agent here (default: a supervisor), with the
     dashboard of every agent in this repo beneath it. A session still running
     here is paused first; `copse continue` brings paused sessions back."""
-    from copse import sessions
     from copse.config import load_repo_config
 
     db = DB()
     ws = _here_or_scratch(db, reuse_scratch=False)
-    _pause_running(db, ws)
-    sessions.enforce(db, ws.repo_root)
-    _cull_detached()
+    # Nothing slow before the chat starts: the paused session's leftover
+    # processes, old paused sessions' worktrees and the pool refill are all
+    # handled by the detached cull.
+    _pause_running(db, ws, stop_procs=False)
+    _cull_detached(ws.repo_root)
     if autopilot is None:
         autopilot = agent == "supervisor" and _run(load_repo_config, ws.repo_root).autopilot
     a = _run(agents.spawn, db, ws, agent, prompt=prompt, provider_name=provider,
@@ -178,12 +179,14 @@ def start(
         _attach(ws, a.tmux_window)
 
 
-def _cull_detached() -> None:
-    """Clean up leftover agent processes and stale workers without making
-    the person wait for it (see copse.cull)."""
+def _cull_detached(repo_root: str | None = None) -> None:
+    """Clean up leftover agent processes and stale workers (and, given
+    ``repo_root``, apply its paused-session retention) without making the
+    person wait for it (see copse.cull, copse.sessions.enforce)."""
     from copse.providers import copse_invocation
 
-    subprocess.Popen([*copse_invocation(), "_cull"], start_new_session=True,
+    repo = ["--repo", repo_root] if repo_root else []
+    subprocess.Popen([*copse_invocation(), "_cull", *repo], start_new_session=True,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -199,11 +202,12 @@ def _say_autopilot(db: DB, root_id: str) -> None:
     typer.echo("  `copse autopilot off` hands the wheel back to you.")
 
 
-def _pause_running(db: DB, ws: Workspace) -> None:
-    """At most one live session per checkout: pause any that's still running."""
+def _pause_running(db: DB, ws: Workspace, stop_procs: bool = True) -> None:
+    """At most one live session per checkout: pause any that's still running.
+    ``stop_procs=False`` when a detached cull follows (see agents.pause)."""
     for a in db.list_agents(ws.id):
         if a.mode == "interactive" and a.status not in ("paused", "done") and agents.is_alive(a):
-            agents.pause(db, a.id)
+            agents.pause(db, a.id, stop_procs=stop_procs)
             typer.echo(f"Paused the session that was still running here ({a.id}); "
                        f"`copse continue {a.id}` brings it back.")
 
@@ -870,10 +874,16 @@ def sidebar_follow_cmd(session: str) -> None:
 
 
 @app.command("_cull", hidden=True)
-def cull_cmd() -> None:
-    from copse import cull
+def cull_cmd(repo: Optional[str] = typer.Option(None, "--repo")) -> None:
+    from copse import cull, sessions
 
-    cull.sweep_quietly(DB())
+    db = DB()
+    if repo:
+        try:
+            sessions.enforce(db, repo)
+        except Exception:  # noqa: BLE001 -- detached: nobody to report to
+            pass
+    cull.sweep_quietly(db)
 
 
 @app.command("_flush", hidden=True)

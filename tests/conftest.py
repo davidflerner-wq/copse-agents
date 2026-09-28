@@ -37,6 +37,8 @@ def private_tmux_server():
 def copse_home(tmp_path, monkeypatch):
     home = tmp_path / "copse-home"
     monkeypatch.setenv("COPSE_HOME", str(home))
+    # Never touch the real ~/.claude.json (providers.trust_folder writes there).
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     for k in ("GIT_DIR", "GIT_WORK_TREE", "COPSE_AGENT_ID"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("GIT_AUTHOR_NAME", "t")

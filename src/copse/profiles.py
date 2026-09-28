@@ -14,7 +14,7 @@ built-in profiles shipped with copse.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
 
@@ -100,13 +100,17 @@ def _search_dirs(repo_root: str | None) -> list[Path]:
 
 
 def load_profile(name: str, repo_root: str | None = None) -> Profile:
+    """The profile in ``<name>.md``. Its ``name`` is always ``name``, even if
+    the file's frontmatter says otherwise (a copied profile whose name wasn't
+    changed): agents record it, and a resume or relaunch loads the profile
+    again by that name, so it must find this same file, permissions and all."""
     for d in _search_dirs(repo_root):
         f = d / f"{name}.md"
         if f.is_file():
-            return _parse(f.read_text(encoding="utf-8"), name)
+            return replace(_parse(f.read_text(encoding="utf-8"), name), name=name)
     builtin = resources.files("copse.builtin_agents").joinpath(f"{name}.md")
     if builtin.is_file():
-        return _parse(builtin.read_text(encoding="utf-8"), name)
+        return replace(_parse(builtin.read_text(encoding="utf-8"), name), name=name)
     raise KeyError(f"no agent profile named {name!r}")
 
 

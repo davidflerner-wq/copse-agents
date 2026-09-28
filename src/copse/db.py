@@ -57,7 +57,8 @@ CREATE TABLE IF NOT EXISTS agents (
     headless INTEGER,              -- runs `claude -p` turn by turn (agents.run_headless)
     transcript_path TEXT,          -- Claude Code's own JSONL transcript for session_ref (copse.usage)
     done_when TEXT,                -- the finish line it was given, if any (for review context)
-    dismissed_at REAL              -- closed from the sidebar (`copse close`): hidden there for good
+    dismissed_at REAL,             -- closed from the sidebar (`copse close`): hidden there for good
+    stuck_noted REAL               -- status_since of the 'waiting' spell its supervisor was told about (copse.cull)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -274,6 +275,7 @@ class Agent:
     transcript_path: str | None = None
     done_when: str | None = None
     dismissed_at: float | None = None
+    stuck_noted: float | None = None
 
 
 @dataclass
@@ -420,7 +422,7 @@ class DB:
         for col, kind in (("status_since", "REAL"), ("task", "TEXT"), ("session_ref", "TEXT"),
                           ("stop_blocked", "INTEGER"), ("headless", "INTEGER"),
                           ("transcript_path", "TEXT"), ("done_when", "TEXT"),
-                          ("dismissed_at", "REAL")):
+                          ("dismissed_at", "REAL"), ("stuck_noted", "REAL")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(milestones)")}
