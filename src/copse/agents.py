@@ -1367,12 +1367,30 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None) -> str:
     """The reviewer profile to use when none was asked for explicitly:
     ``cfg.review_profile`` if set, else the built-in Codex reviewer when
     Codex is installed and the worker being reviewed ran on Claude (so the
-    review comes from a different model), else ``cfg.reviewer``."""
+    review comes from a different model), else the built-in local reviewer
+    when the worker ran on Claude, Codex is missing and the local model
+    answers its endpoint probe, else ``cfg.reviewer``."""
     if cfg.review_profile:
         return cfg.review_profile
-    if worker and worker.provider == "claude" and shutil.which("codex"):
-        return "reviewer-codex"
+    if worker and worker.provider == "claude":
+        if shutil.which("codex"):
+            return "reviewer-codex"
+        if _local_reviewer_available():
+            return "reviewer-local"
     return cfg.reviewer
+
+
+def _local_reviewer_available() -> bool:
+    """Whether the built-in ``reviewer-local`` profile's model is served
+    right now. Any failure counts as not available."""
+    try:
+        from copse.native import runner
+
+        endpoint = runner.endpoint_for(load_profile("reviewer-local"))
+        ok, detail = runner.probe(endpoint, timeout=1.0)
+    except Exception:
+        return False
+    return bool(ok) and "is available" in detail
 
 
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,

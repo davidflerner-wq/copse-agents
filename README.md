@@ -170,7 +170,9 @@ or put the goal in `.copse/goals.md`, and it works like a project manager:
    explicit `profile` argument, else `review_profile` in the repo config,
    else the built-in `reviewer-codex` profile (Codex reviewing Claude's
    work, a different model from the worker) when `codex` is on `PATH` and
-   the worker ran on Claude, else `reviewer`.
+   the worker ran on Claude, else the built-in `reviewer-local` profile when
+   the worker ran on Claude and its local model answers a quick probe, else
+   `reviewer`.
 4. **It keeps going.** If the supervisor stops while milestones are still
    unverified and no worker is running, copse tells it to continue. It stops
    when every check passes, when it needs a decision from you, after three
