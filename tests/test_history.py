@@ -265,6 +265,88 @@ def test_check_and_milestone_rows_carry_no_tokens(db, repo, tmp_path, monkeypatc
     assert all(r.tokens is None for r in rows)
 
 
+# -- /clear and other transcript resets ---------------------------------------
+
+
+def test_clear_with_a_larger_new_transcript_starts_a_fresh_baseline(db, repo, tmp_path, monkeypatch):
+    """After /clear, Claude Code writes a brand-new transcript file. Even
+    though it can grow past the size of the old one, its usage has nothing
+    to do with the agent's previous mark: the whole thing is new."""
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    root_ws = workspaces.adopt_root(db, str(repo))
+    add(db, root_ws, "boss")
+    monkeypatch.setenv("COPSE_AGENT_ID", "boss")
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    add(db, ws, "w1", mode="assign", parent="boss")
+
+    old_t = tmp_path / "old.jsonl"
+    old_t.write_text(_usage_line("m1", 1000))
+    db.update_agent("w1", transcript_path=str(old_t))
+    agents.report_result(db, "w1", "first")
+
+    new_t = tmp_path / "new.jsonl"  # /clear: a new, already-larger transcript
+    new_t.write_text(_usage_line("n1", 5000))
+    db.update_agent("w1", transcript_path=str(new_t))
+    agents.report_result(db, "w1", "after /clear")
+
+    rows = [r for r in db.list_history(ws.repo_root) if r.kind == "worker_result"]
+    assert history.tokens_total(rows[0].tokens) == 10000  # not 10000 - 2000
+    assert history.tokens_total(rows[1].tokens) == 2000
+
+
+def test_same_transcript_usage_drop_falls_back_to_a_fresh_baseline(db):
+    """If usage on the *same* transcript somehow drops (a component going
+    down that isn't the transcript changing), that's still not a negative
+    delta to record: start fresh, same as a stale-mark mismatch."""
+    history.record(db, "/r", "worker_result", agent_id="a1", transcript_path="/t/x.jsonl",
+                   usage=Usage(1000, 500, 0, 0))
+    history.record(db, "/r", "worker_result", agent_id="a1", transcript_path="/t/x.jsonl",
+                   usage=Usage(100, 50, 0, 0))
+
+    rows = db.list_history("/r")
+    assert history.tokens_total(rows[0].tokens) == 150
+
+
+# -- stale usage marks are cleaned up, but only once truly orphaned ------------
+
+
+def test_prune_history_drops_a_mark_with_no_agent_and_no_surviving_row(db):
+    history.record(db, "/r", "worker_result", agent_id="ghost", transcript_path="/t.jsonl",
+                   usage=Usage(10, 5, 0, 0))
+    assert db.get_usage_mark("ghost") is not None
+
+    db.prune_history("/r", cap=0)  # drops the one row keeping it alive
+
+    assert db.get_usage_mark("ghost") is None
+
+
+def test_prune_history_keeps_a_mark_whose_agent_still_exists(db, repo):
+    ws = workspaces.adopt_root(db, str(repo))
+    add(db, ws, "boss")
+    history.record(db, ws.repo_root, "worker_result", agent_id="boss", transcript_path="/t.jsonl",
+                   usage=Usage(10, 5, 0, 0))
+
+    db.prune_history(ws.repo_root, cap=0)  # its history row is gone too
+
+    assert db.get_usage_mark("boss") is not None  # but "boss" is still a real agent
+
+
+def test_session_pruning_drops_marks_orphaned_by_forgetting_the_agent(db, repo):
+    root_ws = workspaces.adopt_root(db, str(repo))
+    add(db, root_ws, "boss", status="paused", since=1)
+    history.record(db, root_ws.repo_root, "worker_result", agent_id="boss",
+                   transcript_path="/t.jsonl", usage=Usage(10, 5, 0, 0))
+    db.prune_history(root_ws.repo_root, cap=0)  # drop its history row ahead of time
+    assert db.get_usage_mark("boss") is not None  # kept: "boss" is still a real agent
+
+    for i in range(3):
+        add(db, root_ws, f"new{i}", status="paused", since=100 + i)  # push "boss" past KEEP
+    dropped = sessions.enforce(db, root_ws.repo_root, now=200)
+
+    assert dropped == 1 and db.get_agent("boss") is None
+    assert db.get_usage_mark("boss") is None  # now neither agents nor history has it
+
+
 def test_history_cli_outside_a_repo_says_it_shows_all(db, tmp_path, monkeypatch):
     history.record(db, "/elsewhere", "check", task="t")
     monkeypatch.chdir(tmp_path)

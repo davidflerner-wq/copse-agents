@@ -10,7 +10,10 @@ so it survives that. It's capped per repo instead (see CAP_PER_REPO).
 A row's tokens are what its agent used since that agent's previous row (see
 ``_delta``), so summing any set of rows never double counts. Milestone and
 check rows carry no tokens: the supervisor that ran them is already counted
-by its merge rows and so on.
+by its merge rows and so on. The mark that tracks "since its previous row" is
+keyed to the transcript it was taken from (``db.add_history``'s ``mark``): if
+the agent's current transcript is a different one (e.g. /clear started a new
+one), there's nothing to subtract and the row starts a fresh baseline.
 
 Callers use ``record_safely``: history is a side record and must never fail
 the report, merge or check it describes.
@@ -50,38 +53,44 @@ def _tokens_json(usage: Usage | None) -> str | None:
     })
 
 
-def _delta(db: DB, agent_id: str | None, usage: Usage | None) -> Usage | None:
+def _delta(db: DB, agent_id: str | None, transcript_path: str | None,
+          usage: Usage | None) -> tuple[Usage | None, tuple | None]:
     """``usage`` (an agent's cumulative total) minus what its previous rows
-    already recorded, and move the mark up to ``usage``. If the total went
-    down (a new transcript after /clear, say) it starts a fresh baseline."""
+    already recorded, and the new mark to move up to (for the caller to
+    persist alongside the row it's about to write, atomically). If there's
+    no previous mark, it's for a different transcript (e.g. a new one after
+    /clear), or the total went down in spite of that (some other reset),
+    there's nothing to subtract: start a fresh baseline."""
     if usage is None or agent_id is None:
-        return usage
+        return usage, None
+    new_mark = (transcript_path, usage.input_tokens, usage.output_tokens,
+               usage.cache_read_tokens, usage.cache_creation_tokens)
     mark = db.get_usage_mark(agent_id)
-    db.set_usage_mark(agent_id, usage.input_tokens, usage.output_tokens,
-                      usage.cache_read_tokens, usage.cache_creation_tokens)
-    if mark is None:
-        return usage
+    if mark is None or mark["transcript_path"] != transcript_path:
+        return usage, new_mark
     prev = Usage(mark["input_tokens"], mark["output_tokens"], mark["cache_read_tokens"],
                  mark["cache_creation_tokens"])
     parts = [(usage.input_tokens, prev.input_tokens), (usage.output_tokens, prev.output_tokens),
              (usage.cache_read_tokens, prev.cache_read_tokens),
              (usage.cache_creation_tokens, prev.cache_creation_tokens)]
     if any(now < before for now, before in parts):
-        return usage
-    return Usage(*(now - before for now, before in parts), model=usage.model)
+        return usage, new_mark
+    return Usage(*(now - before for now, before in parts), model=usage.model), new_mark
 
 
 def record(db: DB, repo_root: str, kind: str, *, agent_id: str | None = None,
-          branch: str | None = None, profile: str | None = None,
-          task: str | None = None, result: str | None = None,
+          transcript_path: str | None = None, branch: str | None = None,
+          profile: str | None = None, task: str | None = None, result: str | None = None,
           usage: Usage | None = None) -> None:
     """Append a row. ``usage`` is the agent's cumulative usage so far; the
-    row stores only the part not already in its earlier rows."""
-    usage = _delta(db, agent_id, usage)
+    row stores only the part not already in its earlier rows. The row and
+    the updated mark are written together, so a mark never moves without
+    the row that earned it actually landing."""
+    delta, mark = _delta(db, agent_id, transcript_path, usage)
     db.add_history(
         repo_root, kind, agent_id=agent_id, branch=branch, profile=profile,
         task=_trim(task, TASK_CHARS), result=_trim(result, RESULT_CHARS),
-        tokens=_tokens_json(usage),
+        tokens=_tokens_json(delta), mark=mark,
     )
     db.prune_history(repo_root, CAP_PER_REPO)
 
@@ -94,8 +103,9 @@ def record_safely(db: DB, repo_root: str, kind: str, *, agent=None, usage: Usage
     swallows any failure."""
     try:
         u = agent_usage(db, agent) if with_usage and agent else usage
-        record(db, repo_root, kind, agent_id=agent.id if agent else None, branch=branch,
-               profile=agent.profile if agent else None, task=task, result=result, usage=u)
+        record(db, repo_root, kind, agent_id=agent.id if agent else None,
+              transcript_path=agent.transcript_path if agent else None, branch=branch,
+              profile=agent.profile if agent else None, task=task, result=result, usage=u)
     except Exception:
         log.exception("copse: couldn't record %s history", kind)
 

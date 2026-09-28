@@ -301,6 +301,23 @@ def test_no_summary_line_when_usage_is_empty(db, repo, monkeypatch):
     assert "tokens:" not in db.pop_pending("boss").body
 
 
+def test_agent_entry_survives_a_broken_usage_read(db, repo, monkeypatch):
+    from copse import workspaces
+
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    a = Agent("a1", ws.id, "developer", "claude", None, "assign", "idle", "", "done", time.time(),
+             transcript_path="/wherever.jsonl")
+    db.add_agent(a)
+
+    def boom(db, agent):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(view.usage_mod, "agent_usage", boom)
+
+    entry = view.agent_entry(db, db.get_agent("a1"))
+    assert "tokens" not in entry
+
+
 def test_hook_ignores_transcript_path_for_non_claude_providers(db, repo):
     from copse import workspaces
 

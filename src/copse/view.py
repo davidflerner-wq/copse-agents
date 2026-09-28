@@ -3,12 +3,15 @@ agents. Git fields are None when they can't be computed."""
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 
 from copse import agents, git
 from copse import usage as usage_mod
 from copse.db import DB, NATIVE_SUBAGENT_STALE, Agent, NativeSubagent, Workspace
+
+log = logging.getLogger(__name__)
 
 # How long a *finished* native subagent still shows "done" in the sidebar
 # before disappearing entirely. Display-only, so it lives here rather than
@@ -66,7 +69,12 @@ def _visible_native_subagents(subs: list[NativeSubagent], now: float) -> list[di
 def agent_entry(db: DB, a: Agent, *, detail: bool = False,
                 native_subagents: list[NativeSubagent] | None = None,
                 now: float | None = None) -> dict:
-    u = usage_mod.agent_usage(db, a)
+    # Usage is a display extra: a bad transcript must never break the sidebar.
+    try:
+        u = usage_mod.agent_usage(db, a)
+    except Exception:
+        log.exception("copse: couldn't read usage for %s", a.id)
+        u = None
     if not agents.runs_process(a):
         status = a.status  # a supervisor's own subagent: no terminal to check
     elif agents.is_alive(a):

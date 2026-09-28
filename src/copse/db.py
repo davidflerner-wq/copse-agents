@@ -162,9 +162,13 @@ CREATE TABLE IF NOT EXISTS history (
 CREATE INDEX IF NOT EXISTS history_repo_root_id ON history(repo_root, id);
 -- Each agent's cumulative usage as of its latest history row, so the next row
 -- stores only the difference and summing rows never double counts. Separate
--- from history so capping history doesn't lose it.
+-- from history so capping history doesn't lose it. transcript_path is the
+-- transcript the mark was taken from: a different one now (e.g. after
+-- /clear starts a new transcript) means the mark doesn't apply any more, so
+-- the next row starts a fresh baseline instead of computing a bogus delta.
 CREATE TABLE IF NOT EXISTS history_usage_mark (
     agent_id TEXT PRIMARY KEY,
+    transcript_path TEXT,
     input_tokens INTEGER NOT NULL,
     output_tokens INTEGER NOT NULL,
     cache_read_tokens INTEGER NOT NULL,
@@ -322,6 +326,9 @@ class DB:
         cache_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(usage_cache)")}
         if "inode" not in cache_cols:
             self.conn.execute("ALTER TABLE usage_cache ADD COLUMN inode INTEGER")
+        mark_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(history_usage_mark)")}
+        if "transcript_path" not in mark_cols:
+            self.conn.execute("ALTER TABLE history_usage_mark ADD COLUMN transcript_path TEXT")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -669,27 +676,32 @@ class DB:
     def add_history(self, repo_root: str, kind: str, *, agent_id: str | None = None,
                     branch: str | None = None, profile: str | None = None,
                     task: str | None = None, result: str | None = None,
-                    tokens: str | None = None) -> None:
+                    tokens: str | None = None,
+                    mark: tuple[str | None, int, int, int, int] | None = None) -> None:
+        """Append a row, and (in the same transaction, so one never happens
+        without the other) advance ``agent_id``'s usage mark to ``mark`` —
+        ``(transcript_path, input_tokens, output_tokens, cache_read_tokens,
+        cache_creation_tokens)`` — if given."""
         with self.tx() as c:
             c.execute(
                 "INSERT INTO history (repo_root, ts, kind, agent_id, branch, profile, task, "
                 "result, tokens) VALUES (?,?,?,?,?,?,?,?,?)",
                 (repo_root, time.time(), kind, agent_id, branch, profile, task, result, tokens),
             )
+            if mark is not None:
+                transcript_path, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens = mark
+                c.execute(
+                    "INSERT OR REPLACE INTO history_usage_mark (agent_id, transcript_path, "
+                    "input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (agent_id, transcript_path, input_tokens, output_tokens, cache_read_tokens,
+                     cache_creation_tokens),
+                )
 
     def get_usage_mark(self, agent_id: str) -> sqlite3.Row | None:
         return self.conn.execute(
             "SELECT * FROM history_usage_mark WHERE agent_id=?", (agent_id,)
         ).fetchone()
-
-    def set_usage_mark(self, agent_id: str, input_tokens: int, output_tokens: int,
-                       cache_read_tokens: int, cache_creation_tokens: int) -> None:
-        with self.tx() as c:
-            c.execute(
-                "INSERT OR REPLACE INTO history_usage_mark (agent_id, input_tokens, output_tokens, "
-                "cache_read_tokens, cache_creation_tokens) VALUES (?,?,?,?,?)",
-                (agent_id, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens),
-            )
 
     def list_history(self, repo_root: str | None = None, kind: str | None = None,
                      limit: int = 50) -> list[HistoryEntry]:
@@ -706,6 +718,15 @@ class DB:
         )
         return [_load(HistoryEntry, r) for r in rows]
 
+    @staticmethod
+    def _prune_usage_marks(c: sqlite3.Connection) -> None:
+        """Drop marks for agents that are gone from ``agents`` *and* have no
+        surviving ``history`` row either: nothing will ever read them again."""
+        c.execute(
+            "DELETE FROM history_usage_mark WHERE agent_id NOT IN (SELECT id FROM agents) "
+            "AND agent_id NOT IN (SELECT agent_id FROM history WHERE agent_id IS NOT NULL)"
+        )
+
     def prune_history(self, repo_root: str, cap: int) -> int:
         """Keep only the ``cap`` newest rows for ``repo_root``. Returns how many
         were dropped."""
@@ -715,4 +736,14 @@ class DB:
                 "(SELECT id FROM history WHERE repo_root=? ORDER BY id DESC LIMIT ?)",
                 (repo_root, repo_root, cap),
             )
+            self._prune_usage_marks(c)
             return cur.rowcount
+
+    def prune_usage_marks(self) -> int:
+        """Same cleanup as `prune_history`, for callers (like session pruning)
+        that delete agents without touching history."""
+        with self.tx() as c:
+            before = c.execute("SELECT COUNT(*) FROM history_usage_mark").fetchone()[0]
+            self._prune_usage_marks(c)
+            after = c.execute("SELECT COUNT(*) FROM history_usage_mark").fetchone()[0]
+            return before - after
