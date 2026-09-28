@@ -104,6 +104,8 @@ CREATE TABLE IF NOT EXISTS reviews (
     summary TEXT,
     created_at REAL NOT NULL
 );
+-- The sidebar reads each workspace's latest review on every refresh (last_review).
+CREATE INDEX IF NOT EXISTS reviews_workspace_id ON reviews(workspace_id, id);
 -- A check command's PASSING result at one commit, so gates.run and
 -- request_review don't re-run the same command against the same tree. Only
 -- written when the tree was clean before and after the run (see

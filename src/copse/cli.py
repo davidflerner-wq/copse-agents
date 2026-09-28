@@ -156,9 +156,10 @@ def start(
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the copse watch dashboard in a pane under the agent."),
     autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="The supervisor drives toward a goal until it's verified (default: on, or `autopilot` in .copse/config.json)."),
 ) -> None:
-    """Start a fresh chat with an agent here (default: a supervisor), with the
-    dashboard of every agent in this repo beneath it. A session still running
-    here is paused first; `copse continue` brings paused sessions back."""
+    """Start a fresh chat with an agent here (default: a supervisor), with the dashboard alongside.
+
+    A session still running here is paused first; `copse continue` brings
+    paused sessions back."""
     from copse import sessions
     from copse.config import load_repo_config
 
@@ -290,12 +291,14 @@ def sessions_cmd() -> None:
 
 @app.command()
 def prune() -> None:
-    """Apply the retention rules now: drop paused sessions beyond the newest few or
-    older than a week, and old scratch sessions with nothing left to transfer.
-    Also removes the worktrees of finished workers whose branch is already
-    merged, copse tmux sessions and servers nothing runs in any more, stale
-    locks and empty worktree folders.
-    Never merges or deletes branches; worktrees with uncommitted changes stay."""
+    """Clean up now: old paused sessions, merged worktrees and leftover tmux sessions.
+
+    Drops paused sessions beyond the newest few or older than a week, and old
+    scratch sessions with nothing left to transfer. Removes the worktrees of
+    finished workers whose branch is already merged, copse tmux sessions that
+    only hold idle shells and no running agent, leftover copse tmux servers,
+    stale locks and empty worktree folders. Never merges or deletes branches;
+    worktrees with uncommitted changes stay."""
     from copse import sessions
 
     db = DB()
