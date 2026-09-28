@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 
 from mcp.server.mcpserver import MCPServer
 
@@ -12,18 +13,9 @@ from copse import agents, autopilot, gates, git, workspaces
 from copse.config import RepoConfig, load_repo_config
 from copse.db import DB, Agent, Workspace
 from copse.profiles import list_profiles
+from copse.providers import copse_invocation
 
 MAX_DIFF_CHARS = 60_000
-
-# Background tasks (e.g. a reviewer's check summary) need a strong reference
-# kept somewhere, or asyncio may garbage-collect them mid-flight.
-_background_tasks: set[asyncio.Task] = set()
-
-
-def _run_in_background(coro) -> None:
-    task = asyncio.ensure_future(coro)
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
 
 mcp = MCPServer(
     "copse",
@@ -295,23 +287,15 @@ async def merge_workspace(workspace: str, squash: bool = False) -> str:
     return await asyncio.to_thread(run)
 
 
-def _deliver_checks(reviewer_id: str, ws_id: str, cfg: RepoConfig) -> None:
-    """Run in a background thread (see request_review): reopens its own DB
-    connection, since sqlite3 connections aren't shared across threads."""
-    db = DB()
-    ws = db.get_workspace(ws_id)
-    if ws is not None:
-        agents.deliver_check_summary(db, reviewer_id, ws, cfg)
-
-
 @mcp.tool()
 async def request_review(workspace: str, focus: str | None = None) -> str:
     """Start a reviewer agent on a worker's branch. It doesn't edit code; its
     verdict arrives as a message and is recorded for merge_workspace, which
     only accepts an approval of the branch's current commit. The repo's
-    checks run in the background and are delivered to the reviewer as a
+    checks run in a detached process and are delivered to the reviewer as a
     message once they finish (so this returns right away instead of blocking
-    on the full suite). focus: anything the reviewer should look at especially.
+    on the full suite, and the delivery survives even if this MCP server
+    exits first). focus: anything the reviewer should look at especially.
     """
     def start() -> tuple[Agent, Workspace, RepoConfig] | str:
         db = DB()
@@ -328,7 +312,13 @@ async def request_review(workspace: str, focus: str | None = None) -> str:
         return result
     reviewer, ws, cfg = result
     if cfg.checks:
-        _run_in_background(asyncio.to_thread(_deliver_checks, reviewer.id, ws.id, cfg))
+        # Detached (like the existing _flush/_after-launch/_close calls): it
+        # must outlive this call and this MCP server process, since the
+        # reviewer was told a summary is coming.
+        subprocess.Popen(
+            [*copse_invocation(), "_deliver-checks", reviewer.id, ws.id],
+            start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
     return (f"Reviewer {reviewer.id} ({reviewer.profile}/{reviewer.provider}) is reviewing "
             f"{ws.branch}. Its verdict will arrive as a message.")
 

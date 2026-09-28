@@ -453,7 +453,9 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True) -> list[Agent]:
             prompt = None
         elif a.task and a.mode in ("handoff", "assign") and provider.launches_process:
             # a.task is the raw task now (see decorate_worker_prompt); a fresh
-            # start needs the same decoration it got the first time.
+            # start needs the same decoration it got the first time. A row
+            # from before this change stored the already-decorated text, so
+            # it gets decorated a second time here; harmless, if redundant.
             prompt = decorate_worker_prompt(a.task, a.id, ws, a.done_when, provider,
                                             bool(a.headless)) + RESUME_NOTE
         else:
@@ -814,7 +816,9 @@ def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str,
     if cfg and cfg.checks:
         task += ("\n\nThe repo's checks are running now; a pass/fail summary will arrive as a "
                  "message shortly. Review the diff meanwhile, and don't call submit_review "
-                 "until you've received it.")
+                 "until you've received it. If about 10 minutes pass with no such message, "
+                 "submit anyway and say in your summary that the check results never arrived; "
+                 "don't run the whole suite yourself to compensate.")
 
     prev = db.last_review(ws.id)
     sha = gates.head(ws)
@@ -839,10 +843,11 @@ def deliver_check_summary(db: DB, reviewer_id: str, ws: Workspace, cfg: RepoConf
     """Run ``cfg.checks`` for ``ws`` and deliver a pass/fail summary to the
     reviewer's inbox: delivered right away if it's idle, or handed over at its
     next Stop, exactly like any other queued message (see ``send_message``).
-    Meant to run in a background thread from the MCP server, after
-    ``request_review`` has already spawned the reviewer. Always delivers
+    Meant to run from a detached process started by request_review, so it
+    outlives the MCP server call that kicked it off. Always delivers
     something, even if a check crashes, since the reviewer was told to wait
-    for this before approving."""
+    for this before approving -- unless the reviewer is no longer there to
+    receive it by the time the checks finish."""
     from copse import gates
 
     if db.get_agent(reviewer_id) is None:
@@ -851,6 +856,11 @@ def deliver_check_summary(db: DB, reviewer_id: str, ws: Workspace, cfg: RepoConf
         summary = gates.check_summary(db, ws, cfg)
     except Exception as e:
         summary = f"(running the checks crashed: {e})"
+
+    reviewer = db.get_agent(reviewer_id)
+    if reviewer is None or reviewer.result is not None or reviewer.status == "done":
+        return  # it submitted its review, was closed, or was removed while the checks ran
+
     text = (f"Checks for {ws.branch} at {gates.head(ws)[:8]}:\n\n{summary}" if summary
             else "No checks are configured for this repo.")
     db.enqueue(reviewer_id, text, None)

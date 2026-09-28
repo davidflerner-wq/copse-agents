@@ -83,7 +83,9 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig) -> str:
         if budget <= 0:
             lines.append(f"FAIL `{cmd}` (output omitted; failure budget spent)")
             continue
-        shown = out if len(out) <= budget else out[:budget] + "\n... (truncated)"
+        # Keep the tail, not the head: run_check's own exit-code marker is the
+        # last line, and that's the part a reviewer needs most.
+        shown = out if len(out) <= budget else "... (truncated)\n" + out[-budget:]
         budget -= len(shown)
         lines.append(f"FAIL `{cmd}`\n{shown}")
     return "\n".join(lines)

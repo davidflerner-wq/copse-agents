@@ -2,6 +2,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,8 +33,9 @@ def boss(db, repo, monkeypatch):
     return ws
 
 
-def add_worker(db, ws, agent_id, task=None, done_when=None, mode="handoff"):
-    a = Agent(agent_id, ws.id, "developer", "claude", None, mode, "done", "@0", "did stuff",
+def add_worker(db, ws, agent_id, task=None, done_when=None, mode="handoff",
+              status="done", result="did stuff"):
+    a = Agent(agent_id, ws.id, "developer", "claude", None, mode, status, "@0", result,
               time.time(), task=task, done_when=done_when)
     db.add_agent(a)
     return a
@@ -144,11 +146,22 @@ def test_check_summary_caps_total_failure_output(worker_ws, monkeypatch):
     assert len(summary) < 3 * len(big)
 
 
+def test_check_summary_truncation_keeps_the_tail_not_the_head(worker_ws, monkeypatch):
+    # run_check's own exit-code marker is the last line; a reviewer needs
+    # that more than the first line of a long failure.
+    out = "noise\n" * 1000 + "(exit 1)"
+    monkeypatch.setattr(gates, "run_checked", lambda db, ws, cmd, env, timeout: (False, out))
+    cfg = RepoConfig(checks=["a"])
+    summary = gates.check_summary(None, worker_ws, cfg)
+    assert "(exit" in summary
+    assert summary.startswith("FAIL `a`\n... (truncated)\n") or "... (truncated)" in summary
+
+
 # -- delivering the check summary to a reviewer ---------------------------------
 
 
 def test_deliver_check_summary_queues_a_pass_fail_message(db, worker_ws):
-    add_worker(db, worker_ws, "rev1", task="Review", mode="review")
+    add_worker(db, worker_ws, "rev1", task="Review", mode="review", status="processing", result=None)
     cfg = RepoConfig(checks=["true", "false"])
     agents.deliver_check_summary(db, "rev1", worker_ws, cfg)
     msg = db.pop_pending("rev1")
@@ -157,40 +170,77 @@ def test_deliver_check_summary_queues_a_pass_fail_message(db, worker_ws):
 
 
 def test_deliver_check_summary_delivers_even_if_checks_crash(db, worker_ws, monkeypatch):
-    add_worker(db, worker_ws, "rev2", task="Review", mode="review")
+    add_worker(db, worker_ws, "rev2", task="Review", mode="review", status="processing", result=None)
     monkeypatch.setattr(gates, "check_summary", lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
     agents.deliver_check_summary(db, "rev2", worker_ws, RepoConfig(checks=["true"]))
     msg = db.pop_pending("rev2")
     assert msg is not None and "crashed" in msg.body
 
 
-def test_request_review_tool_returns_before_checks_finish(db, boss, worker_ws):
-    """The MCP tool must not block on the check suite: it spawns the reviewer
-    and returns immediately, delivering the check summary later in the
-    background."""
-    agents_dir = Path(worker_ws.repo_root) / ".copse" / "agents"
-    agents_dir.mkdir(parents=True, exist_ok=True)
-    (agents_dir / "reviewer.md").write_text("---\nname: reviewer\nprovider: shell\n---\nReview it.\n")
+def test_deliver_check_summary_skips_a_reviewer_that_already_finished(db, worker_ws):
+    # add_worker's defaults (status="done", result set) simulate a reviewer
+    # that already submitted its review and was closed by the time the
+    # checks (which take a while) finish.
+    add_worker(db, worker_ws, "rev3", task="Review", mode="review")
+    agents.deliver_check_summary(db, "rev3", worker_ws, RepoConfig(checks=["true"]))
+    assert db.pending_count("rev3") == 0
+
+
+def test_deliver_check_summary_skips_a_reviewer_removed_mid_run(db, worker_ws, monkeypatch):
+    add_worker(db, worker_ws, "rev4", task="Review", mode="review", status="processing", result=None)
+
+    def vanish(*a, **kw):
+        db.delete_agent("rev4")  # e.g. its workspace was removed while checks ran
+        return "PASS `true`"
+
+    monkeypatch.setattr(gates, "check_summary", vanish)
+    agents.deliver_check_summary(db, "rev4", worker_ws, RepoConfig(checks=["true"]))
+    assert db.pending_count("rev4") == 0
+
+
+def test_request_review_launches_the_detached_deliver_checks_command(db, boss, worker_ws, monkeypatch):
+    """request_review must not run checks itself or wait on them in-process:
+    it hands off to a detached `copse _deliver-checks` process (like the
+    existing _flush/_after-launch/_close calls) that survives even if this
+    MCP server exits."""
     config_dir = Path(worker_ws.repo_root) / ".copse"
     config_dir.mkdir(exist_ok=True)
-    (config_dir / "config.json").write_text(json.dumps({"checks": ["sleep 1"]}))
+    (config_dir / "config.json").write_text(json.dumps({"checks": ["true"]}))
 
-    async def run():
-        t0 = time.time()
-        out = await mcp_server.request_review(worker_ws.id)
-        tool_elapsed = time.time() - t0
-        await asyncio.gather(*list(mcp_server._background_tasks))
-        total_elapsed = time.time() - t0
-        return out, tool_elapsed, total_elapsed
+    import subprocess as subprocess_module
 
-    out, tool_elapsed, total_elapsed = asyncio.run(run())
+    real_popen = subprocess_module.Popen
+    calls = []
+
+    def fake_popen(argv, **kw):
+        # subprocess.Popen is also how git.py shells out; only intercept our
+        # own detached call and let everything else run for real.
+        if isinstance(argv, list) and "_deliver-checks" in argv:
+            calls.append((argv, kw))
+            return SimpleNamespace(pid=1234)
+        return real_popen(argv, **kw)
+
+    monkeypatch.setattr(mcp_server.subprocess, "Popen", fake_popen)
+    out = asyncio.run(mcp_server.request_review(worker_ws.id))
     assert "is reviewing" in out
-    assert tool_elapsed < 1.0  # didn't wait for `sleep 1`
-    assert total_elapsed - tool_elapsed >= 0.9  # the background delivery did run it, afterwards
 
     [reviewer] = [a for a in db.list_agents(worker_ws.id) if a.mode == "review"]
-    msg = db.pop_pending(reviewer.id)
-    assert msg is not None and "PASS `sleep 1`" in msg.body
+    assert len(calls) == 1
+    argv, kw = calls[0]
+    assert argv[-3:] == ["_deliver-checks", reviewer.id, worker_ws.id]
+    assert kw.get("start_new_session") is True
+
+
+def test_deliver_checks_cli_command_delivers_to_reviewer(db, worker_ws):
+    from typer.testing import CliRunner
+
+    from copse.cli import app
+
+    add_worker(db, worker_ws, "rev5", task="Review", mode="review", status="processing", result=None)
+    res = CliRunner().invoke(app, ["_deliver-checks", "rev5", worker_ws.id])
+    assert res.exit_code == 0
+    msg = db.pop_pending("rev5")
+    assert msg is not None and "No checks are configured" in msg.body
 
 
 # -- review prompt ---------------------------------------------------------------
