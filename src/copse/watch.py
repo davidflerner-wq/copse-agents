@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import textwrap
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from copse import agents, tmux, view
 from copse.db import DB
@@ -60,6 +60,55 @@ class Line:
     style: str = "normal"          # normal | dim | bold | busy | ok | alert | bad
     agent: dict | None = None      # set on agent rows; these are selectable
     workspace: dict | None = None
+    group: str | None = None       # set on workspace headers (the workspace id); selectable too
+    needs: int = 0                 # rows here that need you (1 on such an agent row)
+
+
+@dataclass
+class NavState:
+    """What the person has done to the sidebar, kept between refreshes."""
+    selected: str | None = None    # row_key of the selected row
+    pos: int = 0                   # its position among selectable rows, for when it goes away
+    group: str | None = None       # the selected row's workspace id
+    collapsed: set[str] = field(default_factory=set)  # workspace ids folded away
+    filter: str = ""
+    filtering: bool = False        # typing into the filter
+    help: bool = False
+    offset: int = 0
+    follow: bool = True            # scroll the selection into view on the next draw
+    notice: str = ""               # a message for the loop to show briefly
+
+
+def fit(text: str, width: int) -> str:
+    """``text`` cut to ``width`` columns, ending in "…" when it was cut."""
+    if len(text) <= width:
+        return text
+    return text[:width - 1] + "…" if width > 0 else ""
+
+
+def elide_middle(text: str, width: int) -> str:
+    """``text`` cut to ``width`` by dropping its middle, so a long branch keeps
+    both its prefix and the distinctive end."""
+    if len(text) <= width:
+        return text
+    if width <= 1:
+        return text[:max(width, 0)]
+    tail = (width - 1) // 2
+    return text[:width - 1 - tail] + "…" + (text[-tail:] if tail else "")
+
+
+WORKERS = ("assign", "handoff")
+
+
+def needs_you(agent: dict, ws: dict) -> str | None:
+    """Why ``agent``'s row needs the person, or None: it asked for input, or
+    it is a worker that reported and hasn't been approved yet."""
+    if agent["status"] == "waiting":
+        return "needs you"
+    if (agent.get("mode") in WORKERS and agent.get("reported")
+            and agent["status"] not in ("processing", "starting")):
+        return {"approved": None, "changes": "changes requested"}.get(ws.get("review"), "to review")
+    return None
 
 
 def ago(seconds: float | None) -> str:
@@ -80,7 +129,7 @@ def plural(n: int, word: str) -> str:
 
 def summary(snap: list[dict]) -> str:
     agents_ = [a for ws in snap for a in ws["agents"]]
-    waiting = sum(a["status"] == "waiting" for a in agents_)
+    waiting = sum(bool(needs_you(a, ws)) for ws in snap for a in ws["agents"])
     busy = sum(a["status"] in ("processing", "starting") for a in agents_)
     parts = []
     if waiting:
@@ -107,8 +156,12 @@ def git_summary(ws: dict) -> str:
 
 
 def _wrap(text: str, width: int, indent: str) -> list[str]:
-    return textwrap.wrap(text, max(width, len(indent) + 8), initial_indent=indent,
-                         subsequent_indent=indent) or [indent]
+    """Wrap at spaces only; a word too long for a line of its own is elided
+    rather than split across two."""
+    wrapped = textwrap.wrap(text, max(width, len(indent) + 8), initial_indent=indent,
+                            subsequent_indent=indent, break_long_words=False,
+                            break_on_hyphens=False) or [indent]
+    return [fit(t, width) for t in wrapped]
 
 
 MILESTONE_MARK = {"passed": ("✓", "ok"), "failed": ("✗", "bad"), "pending": ("○", "dim")}
@@ -148,11 +201,88 @@ def render_autopilot(pilot: dict, width: int) -> list[Line]:
     return lines + [Line("")]
 
 
-def render(snap: list[dict], now: float, width: int = 80, pilot: dict | None = None) -> list[Line]:
+def matching_agents(ws: dict, text: str) -> list[dict] | None:
+    """The agents of ``ws`` the filter ``text`` keeps, or None to hide the
+    whole workspace. A match on the branch keeps all of them."""
+    text = text.strip().lower()
+    if not text or text in ws["branch"].lower() or text in (ws.get("name") or "").lower():
+        return ws["agents"]
+    kept = [a for a in ws["agents"]
+            if any(text in (a.get(k) or "").lower() for k in ("id", "profile", "provider"))]
+    return kept or None
+
+
+def group_title(ws: dict, count: int, needing: int, width: int, collapsed: bool) -> str:
+    """A workspace's header: its branch, elided in the middle to fit, and on a
+    folded group how many agents (and how many needing you) it hides."""
+    arrow = "▸ " if collapsed else "▾ "
+    suffix = f" ({count})" + (f" {needing}◆" if needing else "") if collapsed else ""
+    room = width - len(arrow) - len(suffix)
+    tags = ("  (your checkout)", " (yours)") if ws.get("name") == "root" else ()
+    tag = next((t for t in tags if len(ws["branch"]) + len(t) <= room), "")
+    return fit(arrow + elide_middle(ws["branch"], max(room - len(tag), 1)) + tag + suffix, width)
+
+
+def render_agent(a: dict, ws: dict, now: float, width: int) -> list[Line]:
+    icon, label = STATUS_LABEL.get(a["status"], ("·", a["status"]))
+    style = STATUS_STYLE.get(a["status"], "normal")
+    if a["status"] == "idle" and a.get("reported"):
+        icon, label = "✓", "done"
+    if (reason := needs_you(a, ws)):
+        icon, label, style = "◆", reason, "alert"
+    name = a["profile"].replace("-", " ").capitalize()
+    if a["provider"] != "claude":
+        name += f" ({a['provider']})"
+    elif a.get("headless"):
+        name += " (headless)"
+    lines = [Line(fit(f"  {icon} {name}", width), style, agent=a, workspace=ws,
+                  needs=1 if reason else 0)]
+    since = a.get("status_since")
+    detail = [label + (f" for {ago(now - since)}" if since else "")]
+    if a.get("pending"):
+        detail.append(f"{plural(a['pending'], 'message')} queued")
+    if a.get("tokens"):
+        detail.append(a["tokens"])
+    detail.append(a["id"][:6])
+    lines += [Line(t, "dim", workspace=ws) for t in _wrap(" · ".join(detail), width, "    ")]
+    for sub in a.get("subagents") or []:
+        sub_name = sub.get("agent_type") or "subagent"
+        if sub["ended_at"] is None:
+            text, style = f"↳ {sub_name} · running {ago(now - sub['started_at'])}", "busy"
+        else:
+            text, style = f"↳ {sub_name} · ✓ done", "dim"
+        # Not selectable: no `agent=`, so it can't be attached to or peeked.
+        lines += [Line(t, style, workspace=ws) for t in _wrap(text, width, "    ")]
+    return lines
+
+
+def render_group(ws: dict, ags: list[dict], now: float, width: int, collapsed: bool) -> list[Line]:
+    """A workspace header and, unless folded, its agents: the ones needing
+    you first, otherwise in their usual order."""
+    needing = sum(bool(needs_you(a, ws)) for a in ags)
+    lines = [Line(group_title(ws, len(ags), needing, width, collapsed),
+                  "alert" if collapsed and needing else "bold", workspace=ws, group=ws["id"],
+                  needs=needing if collapsed else 0)]
+    if collapsed:
+        return lines
+    if (info := git_summary(ws)):
+        lines += [Line(t, "dim", workspace=ws) for t in _wrap(info, width, "  ")]
+    if not ags:
+        lines.append(Line("  no agents", "dim", workspace=ws))
+    for a in sorted(ags, key=lambda a: not needs_you(a, ws)):
+        lines += render_agent(a, ws, now, width)
+    return lines
+
+
+def render(snap: list[dict], now: float, width: int = 80, pilot: dict | None = None,
+           state: NavState | None = None) -> list[Line]:
+    state = state or NavState()
     agents_ = [a for ws in snap for a in ws["agents"]]
-    lines = [Line(summary(snap), "alert" if any(a["status"] == "waiting" for a in agents_) else "bold")]
+    needing = any(needs_you(a, ws) for ws in snap for a in ws["agents"])
+    lines = [Line(fit(summary(snap), width), "alert" if needing else "bold")]
     if snap:
-        lines.append(Line(f"{plural(len(agents_), 'agent')} in {plural(len(snap), 'workspace')}", "dim"))
+        lines.append(Line(fit(f"{plural(len(agents_), 'agent')} in {plural(len(snap), 'workspace')}",
+                              width), "dim"))
     lines.append(Line(""))
     if pilot:
         lines += render_autopilot(pilot, width)
@@ -160,40 +290,12 @@ def render(snap: list[dict], now: float, width: int = 80, pilot: dict | None = N
         for t in _wrap("Nothing running yet. Start an agent with `copse new <branch>`.", width, ""):
             lines.append(Line(t, "dim"))
         return lines
-    for ws in snap:
-        title = ws["branch"] + ("  (your checkout)" if ws.get("name") == "root" else "")
-        lines.append(Line(title, "bold", workspace=ws))
-        if (info := git_summary(ws)):
-            lines += [Line(t, "dim", workspace=ws) for t in _wrap(info, width, "  ")]
-        if not ws["agents"]:
-            lines.append(Line("  no agents", "dim", workspace=ws))
-        for a in ws["agents"]:
-            icon, label = STATUS_LABEL.get(a["status"], ("·", a["status"]))
-            if a["status"] == "idle" and a.get("reported"):
-                icon, label = "✓", "done"
-            name = a["profile"].replace("-", " ").capitalize()
-            if a["provider"] != "claude":
-                name += f" ({a['provider']})"
-            elif a.get("headless"):
-                name += " (headless)"
-            lines.append(Line(f"  {icon} {name}", STATUS_STYLE.get(a["status"], "normal"),
-                              agent=a, workspace=ws))
-            since = a.get("status_since")
-            detail = [label + (f" for {ago(now - since)}" if since else "")]
-            if a.get("pending"):
-                detail.append(f"{plural(a['pending'], 'message')} queued")
-            if a.get("tokens"):
-                detail.append(a["tokens"])
-            detail.append(a["id"][:6])
-            lines += [Line(t, "dim", workspace=ws) for t in _wrap(" · ".join(detail), width, "    ")]
-            for sub in a.get("subagents") or []:
-                sub_name = sub.get("agent_type") or "subagent"
-                if sub["ended_at"] is None:
-                    text, style = f"↳ {sub_name} · running {ago(now - sub['started_at'])}", "busy"
-                else:
-                    text, style = f"↳ {sub_name} · ✓ done", "dim"
-                # Not selectable: no `agent=`, so it can't be attached to or peeked.
-                lines += [Line(t, style, workspace=ws) for t in _wrap(text, width, "    ")]
+    shown = [(ws, ags) for ws in snap if (ags := matching_agents(ws, state.filter)) is not None]
+    if not shown:
+        lines += [Line(t, "dim") for t in _wrap(f"Nothing matches “{state.filter}”.", width, "")]
+        return lines
+    for ws, ags in shown:
+        lines += render_group(ws, ags, now, width, ws["id"] in state.collapsed)
         lines.append(Line(""))
     return lines
 
@@ -217,8 +319,47 @@ def print_once(db: DB, repo_root: str | None, color: bool) -> str:
 
 # -- interactive ---------------------------------------------------------------
 
-HELP = ["↑↓ ⏎ open  p peek  x close  q quit"]
-HELP_IN_TMUX = [*HELP, "prefix L: back from agent"]
+# The footer: the first of these that fits, when there's room for one.
+HELP = ["↑↓ ⏎ open  x close  ? keys", "? keys"]
+
+# What `?` lists: (keys, what they do). Kept short enough for a 30-column
+# sidebar: the keys in a 9-column field, then at most 19 columns of text.
+KEYS = [
+    ("↑↓ j k", "move"),
+    ("PgUp/Dn", "page"),
+    ("Home/End", "top / bottom"),
+    ("⏎ a", "open the agent"),
+    ("p", "peek at its screen"),
+    ("x", "close (2× if busy)"),
+    ("n", "next needing you"),
+    ("Spc Tab", "fold group"),
+    ("/", "filter, Esc clears"),
+    ("r", "refresh"),
+    ("?", "this help"),
+    ("q", "quit"),
+]
+KEY_COLUMN = 9
+
+
+def help_lines(width: int, in_tmux: bool = False) -> list[Line]:
+    """The `?` overlay, drawn in place of the list."""
+    lines = [Line("Keys", "bold")]
+    lines += [Line(fit(f"{k:<{KEY_COLUMN}}{what}", width)) for k, what in KEYS]
+    lines += [Line(""), Line(fit("◆ needs you", width), "alert")]
+    if in_tmux:
+        lines += [Line(t, "dim") for t in _wrap("prefix L: back from an agent", width, "")]
+    lines += [Line(t, "dim") for t in _wrap("any key to go back", width, "")]
+    return lines
+
+
+def footer(state: NavState, width: int) -> Line | None:
+    """The bottom line: the filter while there is one, else a key hint."""
+    if state.filtering or state.filter:
+        text = "/" + state.filter + ("▏" if state.filtering else "  Esc clears")
+        if len(text) > width:  # keep the end, where the typing happens
+            text = "…" + text[len(text) - width + 1:] if width > 1 else ""
+        return Line(text, "accent" if state.filtering else "dim")
+    return next((Line(h, "dim") for h in HELP if len(h) <= width), None)
 
 # Closing a running agent stops it, so it takes a second `x` on the same row
 # within this many seconds. A stopped one closes on the first press.
@@ -282,6 +423,147 @@ def nearest_visible_row(rows: list[int], offset: int, visible: int) -> int:
     if in_view:
         return in_view[0]
     return min(range(len(rows)), key=lambda i: abs(rows[i] - offset))
+
+
+# -- navigation ----------------------------------------------------------------
+
+ESC = 27
+ENTER_KEYS = (curses.KEY_ENTER, 10, 13)
+BACKSPACE_KEYS = (curses.KEY_BACKSPACE, 127, 8)
+
+
+def selectable(lines: list[Line]) -> list[int]:
+    """Indices of the rows the cursor can sit on: agents and workspace headers."""
+    return [i for i, ln in enumerate(lines) if ln.agent or ln.group]
+
+
+def row_key(ln: Line) -> str:
+    """What identifies a row across refreshes, however the rows reorder."""
+    return f"a:{ln.agent['id']}" if ln.agent else f"g:{ln.group}"
+
+
+def _select(state: NavState, lines: list[Line], rows: list[int], pos: int) -> int:
+    i = rows[pos]
+    state.selected, state.pos = row_key(lines[i]), pos
+    state.group = lines[i].workspace["id"] if lines[i].workspace else None
+    return i
+
+
+def selection(state: NavState, lines: list[Line]) -> int | None:
+    """The index in ``lines`` of the selected row, or None if nothing can be
+    selected. It stays on the same agent (or header) when rows move. If that
+    row is gone: its group's header when the group was folded, else whatever
+    now sits where it was. With nothing chosen yet, the first agent."""
+    rows = selectable(lines)
+    if not rows:
+        return None
+    keys = [row_key(lines[i]) for i in rows]
+    if state.selected in keys:
+        return _select(state, lines, rows, keys.index(state.selected))
+    if state.selected is None:
+        first = next((p for p, i in enumerate(rows) if lines[i].agent), 0)
+        return _select(state, lines, rows, first)
+    if state.group in state.collapsed and f"g:{state.group}" in keys:
+        return _select(state, lines, rows, keys.index(f"g:{state.group}"))
+    return _select(state, lines, rows, min(state.pos, len(rows) - 1))
+
+
+def _toggle_group(state: NavState, lines: list[Line], i: int) -> None:
+    ws = lines[i].workspace
+    if not ws:
+        return
+    state.collapsed ^= {ws["id"]}
+    state.selected, state.group, state.follow = f"g:{ws['id']}", ws["id"], True
+
+
+def handle_key(state: NavState, key: int, lines: list[Line], visible: int,
+               sidebar: bool = True) -> str | None:
+    """Apply ``key`` to ``state``. Returns what the loop has to do beyond
+    redrawing: "quit", "refresh", or "attach"/"peek"/"close" on the selected
+    agent. ``visible`` is how many rows of ``lines`` fit on screen."""
+    if key in (-1, curses.KEY_RESIZE):
+        return "refresh"
+    if state.help:  # any key closes it, and does nothing else
+        state.help = False
+        return None
+    if state.filtering:
+        if key == ESC:
+            state.filter, state.filtering = "", False
+        elif key in ENTER_KEYS:
+            state.filtering = False
+        elif key in BACKSPACE_KEYS:
+            state.filter = state.filter[:-1]
+        elif 32 <= key < 127:
+            state.filter += chr(key)
+        elif key in (curses.KEY_UP, curses.KEY_DOWN):  # move through the matches meanwhile
+            _move(state, lines, -1 if key == curses.KEY_UP else 1)
+        state.follow = True
+        return None
+    i = selection(state, lines)
+    agent = lines[i].agent if i is not None else None
+    if key == ESC and state.filter:
+        state.filter, state.follow = "", True
+        return None
+    if key in quit_keys(sidebar):
+        return "quit"
+    if key == ord("r"):
+        return "refresh"
+    if key == ord("?"):
+        state.help = True
+    elif key == ord("/"):
+        state.filtering = True
+    elif key in (curses.KEY_UP, ord("k")):
+        _move(state, lines, -1)
+    elif key in (curses.KEY_DOWN, ord("j")):
+        _move(state, lines, 1)
+    elif key == ord("n"):
+        _next_needing(state, lines)
+    elif key in (ord(" "), ord("\t")) and i is not None:
+        _toggle_group(state, lines, i)
+    elif key in (*ENTER_KEYS, ord("a")) and i is not None:
+        if agent:
+            return "attach"
+        _toggle_group(state, lines, i)
+    elif key == ord("p") and agent:
+        return "peek"
+    elif key == ord("x") and agent:
+        return "close"
+    elif key in (curses.KEY_NPAGE, curses.KEY_PPAGE, curses.KEY_HOME, curses.KEY_END):
+        step = max(1, visible)
+        state.offset = clamp_scroll({curses.KEY_NPAGE: state.offset + step,
+                                     curses.KEY_PPAGE: state.offset - step,
+                                     curses.KEY_HOME: 0,
+                                     curses.KEY_END: len(lines)}[key], len(lines), visible)
+        rows = selectable(lines)
+        if rows:
+            _select(state, lines, rows, nearest_visible_row(rows, state.offset, visible))
+    return None
+
+
+def _move(state: NavState, lines: list[Line], step: int) -> None:
+    i = selection(state, lines)
+    if i is None:
+        return
+    rows = selectable(lines)
+    _select(state, lines, rows, max(0, min(len(rows) - 1, rows.index(i) + step)))
+    state.follow = True
+
+
+def _next_needing(state: NavState, lines: list[Line]) -> None:
+    """Select the next row needing you after the current one, wrapping
+    round; a folded group hiding some counts as one."""
+    i = selection(state, lines)
+    rows = selectable(lines)
+    if i is None:
+        return
+    start = rows.index(i)
+    order = rows[start + 1:] + rows[:start + 1]
+    target = next((r for r in order if lines[r].needs), None)
+    if target is None:
+        state.notice = "nothing needs you"
+        return
+    _select(state, lines, rows, rows.index(target))
+    state.follow = True
 
 
 # PawDelta palette as xterm-256 colours (closest matches): indigo accent,
@@ -409,9 +691,9 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
     except curses.error:
         pass
     db = DB()
-    selected = 0
-    offset = 0
-    lines: list[Line] = []
+    state = NavState()
+    snap: list[dict] = []
+    pilot: dict | None = None
     stale = True
     armed: tuple[str, float] | None = None
     notice, notice_until = "", 0.0
@@ -421,29 +703,44 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
             culled_at = time.time()
             _cull_in_background()
         h, w = stdscr.getmaxyx()
+        width = max(1, w - 2)  # text starts at column 1, after the selection bar
         if stale:
             panes = tmux.list_panes()
-            lines = render(view.snapshot(db, repo_root, panes=panes), time.time(), w - 1,
-                           view.autopilot_entry(db, repo_root, panes=panes))
+            snap = view.snapshot(db, repo_root, panes=panes)
+            pilot = view.autopilot_entry(db, repo_root, panes=panes)
             stale = False
-        rows = [i for i, ln in enumerate(lines) if ln.agent]
-        selected = max(0, min(selected, len(rows) - 1))
+        # Re-rendered every pass: folding, filtering and `?` change it between refreshes.
+        if state.help:
+            lines = help_lines(width, bool(os.environ.get("TMUX")))
+            selected = None
+        else:
+            lines = render(snap, time.time(), width, pilot, state)
+            selected = selection(state, lines)
+        if state.notice:
+            notice, notice_until, state.notice = state.notice, time.time() + CLOSE_CONFIRM_SECONDS, ""
 
-        texts = HELP_IN_TMUX if os.environ.get("TMUX") else HELP
-        if notice and time.time() < notice_until:
-            texts = [notice, *texts]
-        help_ = [t for text in texts for t in _wrap(text, w - 1, "")]
         top = (len(LOGO) + 1) if h >= 18 else 2
-        raw_visible = max(0, h - top - 1 - len(help_))
-        offset = clamp_scroll(offset, len(lines), raw_visible)
-        visible, show_above, show_below = content_layout(len(lines), raw_visible, offset)
+        bottom = [Line(t, "dim") for t in _wrap(notice, width, "")] \
+            if notice and time.time() < notice_until else []
+        # The key hint only when it leaves room for a few rows; the filter always.
+        if (last := footer(state, width)) and (h - top - len(bottom) >= 8 or state.filter
+                                               or state.filtering):
+            bottom.append(last)
+        raw_visible = max(0, h - top - 1 - len(bottom))
+        state.offset = clamp_scroll(state.offset, len(lines), raw_visible)
+        visible, show_above, show_below = content_layout(len(lines), raw_visible, state.offset)
+        if state.follow and selected is not None:
+            state.offset = scroll_into_view(state.offset, selected, visible, len(lines))
+            visible, show_above, show_below = content_layout(len(lines), raw_visible, state.offset)
+            state.follow = False
+        offset = state.offset
         content_top = top + (1 if show_above else 0)
         stdscr.erase()
         _draw_logo(stdscr, w, styles) if h >= 18 else _draw_compact_logo(stdscr, w, styles)
         page = lines[offset:offset + visible]
         for y, (i, ln) in enumerate(enumerate(page, start=offset), start=content_top):
             attr = styles.get(ln.style, curses.A_NORMAL)
-            if rows and i == rows[selected]:
+            if i == selected:
                 # A purple bar and a subtle highlight, not inverted colours.
                 stdscr.addnstr(y, 0, "▌", 1, styles["bar"])
                 stdscr.addnstr(y, 1, ln.text.ljust(w - 2), w - 2,
@@ -456,8 +753,8 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
         if show_below:
             text = "↓ more"
             stdscr.addnstr(content_top + visible, max(0, w - 1 - len(text)), text, w - 1, styles["dim"])
-        for y, text in enumerate(help_, start=h - len(help_)):
-            stdscr.addnstr(y, 1, text, w - 2, styles["dim"])
+        for y, ln in enumerate(bottom, start=h - len(bottom)):
+            stdscr.addnstr(y, 1, ln.text, w - 2, styles.get(ln.style, curses.A_NORMAL))
         stdscr.refresh()
 
         key = stdscr.getch()
@@ -467,48 +764,29 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
             except curses.error:
                 bstate = 0
             if bstate & curses.BUTTON4_PRESSED:
-                offset = clamp_scroll(offset - 3, len(lines), visible)
+                state.offset = clamp_scroll(offset - 3, len(lines), visible)
             elif bstate & BUTTON5_PRESSED:
-                offset = clamp_scroll(offset + 3, len(lines), visible)
-            elif bstate & curses.BUTTON1_CLICKED and rows:
+                state.offset = clamp_scroll(offset + 3, len(lines), visible)
+            elif bstate & curses.BUTTON1_CLICKED and not state.help:
                 clicked = my - content_top + offset
-                if clicked in rows:
-                    selected = rows.index(clicked)
-                    offset = scroll_into_view(offset, rows[selected], visible, len(lines))
-        elif key == -1 or key in (ord("r"), curses.KEY_RESIZE):
+                if clicked in (rows := selectable(lines)):
+                    _select(state, lines, rows, rows.index(clicked))
+                    state.follow = True
+            continue
+        action = handle_key(state, key, lines, visible, sidebar)
+        if action == "refresh":
             stale = True
-        elif key in quit_keys(sidebar):
+        elif action == "quit":
             return
-        elif key in (curses.KEY_UP, ord("k")):
-            selected = max(0, selected - 1)
-            if rows:
-                offset = scroll_into_view(offset, rows[selected], visible, len(lines))
-        elif key in (curses.KEY_DOWN, ord("j")):
-            selected = min(len(rows) - 1, selected + 1) if rows else selected
-            if rows:
-                offset = scroll_into_view(offset, rows[selected], visible, len(lines))
-        elif key == curses.KEY_NPAGE:
-            offset = clamp_scroll(offset + max(1, visible), len(lines), visible)
-            selected = nearest_visible_row(rows, offset, visible)
-        elif key == curses.KEY_PPAGE:
-            offset = clamp_scroll(offset - max(1, visible), len(lines), visible)
-            selected = nearest_visible_row(rows, offset, visible)
-        elif key == curses.KEY_HOME:
-            offset = 0
-            selected = nearest_visible_row(rows, offset, visible)
-        elif key == curses.KEY_END:
-            offset = clamp_scroll(len(lines), len(lines), visible)
-            selected = nearest_visible_row(rows, offset, visible)
-        elif rows and key in (curses.KEY_ENTER, 10, 13, ord("a")):
-            ln = lines[rows[selected]]
-            _attach(ln.agent, ln.workspace, db)
+        elif action == "attach" and selected is not None:
+            _attach(lines[selected].agent, lines[selected].workspace, db)
             stdscr.clear()
             stale = True
-        elif rows and key == ord("p"):
-            _peek(stdscr, lines[rows[selected]].agent, styles)
+        elif action == "peek" and selected is not None:
+            _peek(stdscr, lines[selected].agent, styles)
             stale = True
-        elif rows and key == ord("x"):
-            agent = lines[rows[selected]].agent
+        elif action == "close" and selected is not None:
+            agent = lines[selected].agent
             now = time.time()
             close_now, armed, notice = close_request(agent, armed, now)
             notice_until = now + CLOSE_CONFIRM_SECONDS
@@ -525,4 +803,7 @@ SIDEBAR = False
 
 
 def run(repo_root: str | None, sidebar: bool | None = None) -> None:
+    # Esc clears the filter; don't make it wait curses' default second to
+    # tell a lone Esc from the start of an arrow key's escape sequence.
+    os.environ.setdefault("ESCDELAY", "25")
     curses.wrapper(_loop, repo_root, SIDEBAR if sidebar is None else sidebar)

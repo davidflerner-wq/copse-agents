@@ -168,8 +168,12 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
                  if a.dismissed_at is None and not _stopped_root(db, a, alive, now)]
         if everyone and not shown and ws.kind != "main":
             continue
-        out.append(workspace_entry(db, ws, detail=True, native_subagents=by_parent, now=now,
-                                   panes=panes, agent_list=shown, alive=alive))
+        entry = workspace_entry(db, ws, detail=True, native_subagents=by_parent, now=now,
+                                panes=panes, agent_list=shown, alive=alive)
+        review = db.last_review(ws.id)
+        # The latest reviewer verdict, so the sidebar can flag rows that need you.
+        entry["review"] = None if review is None else ("approved" if review.approved else "changes")
+        out.append(entry)
     return out
 
 

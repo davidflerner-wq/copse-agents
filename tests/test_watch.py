@@ -32,10 +32,15 @@ def test_lines_fit_a_narrow_sidebar():
 
 
 def test_queued_messages_and_reports_are_shown():
-    lines = watch.render([ws([agent("idle", pending=2, reported=True)])], now=1005)
+    lines = watch.render([ws([agent("idle", pending=2, reported=True)], review="approved")], now=1005)
     i = next(i for i, ln in enumerate(lines) if ln.agent)
     assert lines[i].style == "ok" and "✓ Developer" in lines[i].text
     assert "done" in lines[i + 1].text and "2 messages queued" in lines[i + 1].text
+    # Until it's approved, a worker's report waits on you.
+    lines = watch.render([ws([agent("idle", reported=True)])], now=1005)
+    i = next(i for i, ln in enumerate(lines) if ln.agent)
+    assert lines[i].style == "alert" and "◆ Developer" in lines[i].text
+    assert "to review" in lines[i + 1].text
 
 
 def test_empty_state():
