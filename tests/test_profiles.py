@@ -39,8 +39,10 @@ def test_lightweight_fields_parse_and_default_off():
 
 
 def test_builtin_profiles_keep_their_defaults():
+    # reviewer is deliberately a cheap profile: strict MCP, lean settings, a
+    # moderate effort (see tests/test_review_efficiency.py).
     for p in list_profiles():
-        if p.provider == "claude":
+        if p.provider == "claude" and p.name != "reviewer":
             assert not p.strict_mcp and not p.headless
             assert p.setting_sources is None and p.effort is None
     assert load_profile("developer").permission_mode == "acceptEdits"
