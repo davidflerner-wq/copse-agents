@@ -87,3 +87,21 @@ def test_resume_starts_fresh_when_claude_never_saved_the_chat(db, root, monkeypa
     db.set_status("boss", "paused")
     agents.resume(db, "boss")
     assert launched[1]["resume"] == "sess-boss"
+
+
+def test_resume_rebuilds_worker_decoration_when_the_session_cant_be_resumed(db, root, monkeypatch, tmp_path):
+    """a.task is stored raw (see agents.decorate_worker_prompt); a fresh
+    restart needs the finish line, WORKER_FOOTER and /goal wrapper rebuilt,
+    same as at the first launch."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))  # no saved session
+    w1 = Agent("w1", root.id, "developer", "claude", "boss", "assign", "paused", "", None,
+              time.time(), time.time(), "Add input validation.", "sess-w1",
+              done_when="tests/test_x.py passes")
+    db.add_agent(w1)
+    launched = []
+    monkeypatch.setattr(agents, "_launch", lambda db, a, ws, **kw: launched.append(kw))
+    agents.resume(db, "w1")
+    prompt = launched[0]["prompt"]
+    assert prompt.startswith("/goal Finish line: tests/test_x.py passes")
+    assert "report_result" in prompt  # WORKER_FOOTER
+    assert prompt.endswith(agents.RESUME_NOTE)
