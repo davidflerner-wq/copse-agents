@@ -1504,6 +1504,38 @@ def deliver_check_summary(db: DB, reviewer_id: str, ws: Workspace, cfg: RepoConf
 # -- hook entry point --------------------------------------------------------
 
 
+def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
+    """Claude Code's PreToolUse hook: approve a Bash command when every
+    simple command in it matches one of the profile's ``allowed_tools``
+    rules (``cd`` into the worker's own worktree counts), the same reading
+    the native loop gives those rules. Claude Code matches a rule against a
+    compound command as a whole, so ``cd sub && git status`` would prompt
+    even with ``Bash(git status:*)`` allowed. None leaves the decision to
+    Claude Code as usual: this never denies."""
+    if payload.get("tool_name") != "Bash":
+        return None
+    command = str((payload.get("tool_input") or {}).get("command", ""))
+    ws = db.get_workspace(agent.workspace_id)
+    try:
+        profile = load_profile(agent.profile, ws.repo_root if ws else None)
+    except Exception:
+        return None
+    from copse.native.permissions import Permissions, uncovered_part
+
+    specs = [spec for name, spec in Permissions(profile.permission_mode, profile.allowed_tools).rules
+             if name == "Bash"]
+    if not specs:
+        return None
+    if not any(spec in (None, "", "*") for spec in specs):
+        if uncovered_part(specs, command, cd_root=ws.path if ws else None) is not None:
+            return None
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "allow",
+        "permissionDecisionReason": "copse: every part of the command matches the profile's allowed_tools",
+    }}
+
+
 def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None:
     """Called from ``copse _hook <event>`` inside the agent's own process tree.
     Returns JSON for Claude Code to read on stdout, or None."""
@@ -1551,6 +1583,8 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         text = str(payload.get("message", "")).lower()
         if "permission" in text or "approval" in text:
             db.set_status(agent_id, "waiting")
+    elif event == "pre-tool":
+        return pre_tool_decision(db, agent, payload)
     elif event == "tool-done":
         db.set_status(agent_id, "processing", only_if="waiting")
     elif event == "stop":

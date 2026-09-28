@@ -90,21 +90,40 @@ def bash_matches(spec: str, command: str) -> bool:
     return uncovered_part([spec], command) is None
 
 
-def uncovered_part(specs: list[str | None], command: str) -> str | None:
+def uncovered_part(specs: list[str | None], command: str, cd_root: str | None = None) -> str | None:
     """The first simple command in ``command`` (``a && b | c`` has three)
     that no spec in ``specs`` covers, or None when all are covered. Command
     substitution is never covered: what it runs can't be seen from here.
-    Unparseable input (an unclosed quote) counts as uncovered."""
+    Unparseable input (an unclosed quote) counts as uncovered. With
+    ``cd_root``, a ``cd`` whose target is inside that directory is covered
+    too (``cd sub && pytest`` from a worker's own worktree)."""
     command = command.strip()
     if not command or "$(" in command or "`" in command:
         return command or "(empty)"
     parts = split_commands(command)
     if not parts:
         return command
+    cwd = cd_root
     for part in parts:
+        if cd_root and _cd_inside(part, cwd, cd_root) is not None:
+            cwd = _cd_inside(part, cwd, cd_root)
+            continue
         if not any(_covers(spec, part) for spec in specs if spec):
             return part
     return None
+
+
+def _cd_inside(part: str, cwd: str | None, root: str) -> str | None:
+    """The directory ``part`` (a ``cd`` command) would land in, if that is
+    ``root`` or below it; None for any other command or target."""
+    tokens = part.split()
+    if len(tokens) != 2 or tokens[0] != "cd" or tokens[1].startswith("-"):
+        return None
+    import os
+
+    target = os.path.normpath(os.path.join(cwd or root, os.path.expanduser(tokens[1])))
+    root = os.path.normpath(root)
+    return target if target == root or target.startswith(root + os.sep) else None
 
 
 def _covers(spec: str, part: str) -> bool:

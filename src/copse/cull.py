@@ -150,7 +150,8 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         attach = f" Attach with `copse attach {ws.name}` to answer it," if ws else " Answer it in its pane,"
         body = (f"Worker {a.id} ({a.profile}){where} has been waiting on a prompt for "
                 f"{int(now - since)}s and can't continue until someone answers it.{attach} "
-                f"or remove the workspace if it's no longer needed.\n\nIts screen:\n{tail}")
+                f"or remove the workspace if it's no longer needed.{auto_mode_note(a, ws)}"
+                f"\n\nIts screen:\n{tail}")
         try:
             agents.send_message(db, a.parent_id, body, sender_id=a.id)
         except agents.AgentError:
@@ -158,6 +159,28 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         db.update_agent(a.id, stuck_noted=since)
         done.append(f"told {a.parent_id} that worker {a.id} is stuck on a prompt")
     return done
+
+
+def auto_mode_note(a, ws) -> str:
+    """A sentence for the stuck-worker message when the worker's profile
+    asked Claude Code for auto mode, which should have answered ordinary
+    prompts itself: Claude Code switches auto mode off for a session when
+    it has a notice to acknowledge, a policy setting forbids it, or its
+    classifier keeps failing, and says nothing to copse when it does."""
+    if a.provider != "claude":
+        return ""
+    try:
+        from copse.profiles import load_profile
+
+        mode = load_profile(a.profile, ws.repo_root if ws else None).permission_mode
+    except Exception:
+        return ""
+    if (mode or "").lower() != "auto":
+        return ""
+    return (" Its profile runs in Claude Code's auto mode, which should have handled an ordinary "
+            "command itself, so auto mode is probably switched off in that session: run "
+            "`claude --permission-mode auto` once yourself to see whether Claude Code has a notice "
+            "to acknowledge, and check your Claude Code settings and usage limit.")
 
 
 def clean_locks(db: DB, now: float | None = None) -> int:

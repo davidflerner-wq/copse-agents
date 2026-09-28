@@ -404,7 +404,8 @@ the main checkout, and to write files with its tools rather than shell heredocs;
 those were the commands that stalled on prompts most. Workers run with Claude Code's normal permission prompts. When a
 worker is waiting on one, `copse ls` shows it as `waiting`, and you attach to
 approve it; if it's still waiting after 90 seconds, its supervisor gets a message
-saying so (once). copse marks each worktree it starts Claude Code in as trusted,
+saying so (once); if the profile asked for auto mode, the message says so too, since a
+prompt then means Claude Code switched auto mode off for that session. copse marks each worktree it starts Claude Code in as trusted,
 so a worker never stops on the first-run "trust this folder?" dialog. The
 built-in `reviewer` runs with `dontAsk`: anything outside its `allowed_tools` is
 refused rather than waiting for an answer. The built-in `developer` profile edits files without asking

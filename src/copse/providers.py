@@ -251,6 +251,12 @@ class ClaudeCode(Provider):
                 # sidebar can nest them under it.
                 "SubagentStart": self._hook("subagent-start", ctx.agent_id),
                 "SubagentStop": self._hook("subagent-stop", ctx.agent_id),
+                # A shell command whose every part matches the profile's
+                # allowed_tools is approved here, so `cd sub && pytest`
+                # doesn't prompt (Claude Code's own rules match a compound
+                # command only as a whole). Anything else is left to Claude
+                # Code's permission system; copse never denies.
+                "PreToolUse": [{"matcher": "Bash", **self._hook("pre-tool", ctx.agent_id)[0]}],
             },
             # Claude Code only tells status lines how much of the plan's usage
             # is spent. copse's records that, then runs the person's own
