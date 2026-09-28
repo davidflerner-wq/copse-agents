@@ -79,8 +79,9 @@ def test_plain_tmux_session_is_never_hooked():
 
 
 def test_sidebar_follow_never_creates_one(db, tmp_path, session):
-    """Only _open_window (via _ensure_sidebar) creates a sidebar; follow only
-    relocates an existing one, so quitting it with `q` keeps it gone."""
+    """Only _open_window (via _ensure_sidebar) creates a root's first
+    sidebar; follow only restores one a root already had (see
+    test_sidebar_persist.py), so a `--no-watch` root never gets one."""
     win_a = make_window(session, "winA")
     ws = make_workspace(db, tmp_path, "winA", session)
     fake_agent(db, ws, win_a, "root1")
@@ -201,7 +202,9 @@ def test_sidebar_follow_does_not_recreate_a_sidebar_the_user_quit(db, tmp_path, 
     agents._ensure_sidebar(db, "root1", ws, win_a)
     sidebar = db.get_sidebar_pane("root1")
 
-    tmux.kill_pane(sidebar)  # as if the user pressed q
+    # What `copse watch --sidebar` does when the user presses q.
+    agents.dismiss_sidebar(db, sidebar)
+    tmux.kill_pane(sidebar)
     deadline = time.time() + 5
     while time.time() < deadline and tmux.window_alive(sidebar):
         time.sleep(0.1)
@@ -215,7 +218,8 @@ def test_sidebar_follow_does_not_recreate_a_sidebar_the_user_quit(db, tmp_path, 
 def test_stale_pane_id_after_reuse_is_not_trusted(db, tmp_path, session):
     """Pane ids restart after a tmux server restart, so a DB row can point at
     a totally unrelated, untagged pane. Both _ensure_sidebar and
-    sidebar_follow must treat that as if there were no sidebar at all."""
+    sidebar_follow must treat that as a dead sidebar: start a real one, and
+    never move the imposter."""
     win_a = make_window(session, "winA")
     ws = make_workspace(db, tmp_path, "winA", session)
     fake_agent(db, ws, win_a, "root1")
@@ -227,15 +231,17 @@ def test_stale_pane_id_after_reuse_is_not_trusted(db, tmp_path, session):
 
     tmux._tmux("select-window", "-t", f"{session}:winA")
     agents.sidebar_follow(db, session)
-    assert len(window_panes(session, "winA")) == 1  # follow never creates
-
-    agents._ensure_sidebar(db, "root1", ws, win_a)
     real_sidebar = db.get_sidebar_pane("root1")
     assert real_sidebar != imposter
     assert tmux.get_pane_tag(real_sidebar, agents.SIDEBAR_TAG) == "root1"
     assert len(window_panes(session, "winA")) == 2
+
+    agents._ensure_sidebar(db, "root1", ws, win_a)
+    assert db.get_sidebar_pane("root1") == real_sidebar  # reused, not a second one
+    assert len(window_panes(session, "winA")) == 2
     # The imposter pane was never touched.
     assert tmux.window_alive(imposter)
+    assert window_panes(session, "imposter") == [imposter]
 
 
 def test_plain_shell_window_gets_the_sidebar_too(db, tmp_path):
@@ -348,9 +354,10 @@ def test_follow_skips_a_paused_root(db, tmp_path, session):
     assert len(window_panes(session, "winB")) == 1
 
 
-def test_move_pane_refuses_to_strand_a_lone_pane(db, tmp_path, session):
-    """Never join-pane out of a window where the sidebar is the only pane:
-    that would leave it empty and tmux would kill it."""
+def test_move_pane_takes_a_lone_pane_along(db, tmp_path, session):
+    """A sidebar left alone in its window (whatever it sat beside exited)
+    still moves: the pane keeps running, and only the now-empty window
+    closes. Refusing would strand it out of sight."""
     win_a = make_window(session, "winA")
     win_b = make_window(session, "winB")
     ws = make_workspace(db, tmp_path, "winA", session)
@@ -368,9 +375,10 @@ def test_move_pane_refuses_to_strand_a_lone_pane(db, tmp_path, session):
     tmux.move_pane(sidebar, win_b, 30)
 
     assert tmux.has_session(session)
-    assert "winA" in tmux.windows(session)
-    assert window_panes(session, "winA") == [sidebar]  # untouched
-    assert len(window_panes(session, "winB")) == 1  # untouched too
+    assert "winA" not in tmux.windows(session)
+    assert sorted(window_panes(session, "winB")) == sorted([sidebar, win_b])
+    assert tmux.window_alive(sidebar)
+    assert tmux._tmux("display-message", "-p", "-t", sidebar, "#{pane_left}").stdout.strip() == "0"
 
 
 def test_sidebar_follow_hook_command_exits_zero_on_a_bogus_session(copse_home):

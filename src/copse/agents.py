@@ -247,9 +247,9 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     db.update_agent(agent.id, tmux_window=target)
     agent.tmux_window = target
     if watch_pane:
-        # Best effort: a failed split (or a lock some other process holds,
-        # see _sidebar_lock's nonblocking mode) must not fail the agent it
-        # sits beside or the hook that triggered this launch.
+        # Best effort: a failed split (or a lock some other process held
+        # past _sidebar_lock's timeout) must not fail the agent it sits
+        # beside or the hook that triggered this launch.
         try:
             _ensure_sidebar(db, root_of(db, agent.id), ws, target)
         except Exception:
@@ -276,24 +276,44 @@ def root_of(db: DB, agent_id: str) -> str:
     return current  # a parent_id cycle would be a bug elsewhere; don't loop forever
 
 
+# Stored in place of a pane id once the person quits the sidebar themselves
+# (see dismiss_sidebar): sidebar_follow then leaves it gone, where a sidebar
+# that died any other way (its session closed under it, a crash) comes back.
+SIDEBAR_DISMISSED = "dismissed"
+# How long _ensure_sidebar waits for another process's sidebar work.
+SIDEBAR_LOCK_TIMEOUT = 5.0
+
+
 @contextlib.contextmanager
-def _sidebar_lock(root_id: str, nonblocking: bool = False):
+def _sidebar_lock(root_id: str, timeout: float | None = None):
     """Serialize sidebar operations for one session root: _ensure_sidebar,
     sidebar_follow and pause's cleanup can all run from different, concurrent
     processes (background hook invocations, a resume, a pause), and without
     this a relocate can interleave with a create or a kill.
 
-    ``nonblocking`` (for _ensure_sidebar, called from the launch path a hook
-    can trigger) raises BlockingIOError instead of waiting for a lock some
-    other process holds, so a hook is never stuck behind another's sidebar
-    work; the caller treats a failed _ensure_sidebar as best-effort."""
+    ``timeout`` (for _ensure_sidebar, called from the launch path a hook
+    can trigger) bounds the wait, raising BlockingIOError after it, so a hook
+    is never stuck for long behind another's sidebar work. It waits rather
+    than giving up at once: the other holder is almost always a quick
+    sidebar_follow, and a launch that skipped its sidebar over that would
+    leave the session without one."""
     from copse.config import copse_home
 
     lock_dir = copse_home() / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     with open(lock_dir / f"sidebar-{root_id}.lock", "w") as f:
-        flags = fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblocking else 0)
-        fcntl.flock(f.fileno(), flags)
+        if timeout is None:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.05)
         try:
             yield
         finally:
@@ -306,7 +326,8 @@ def _valid_sidebar(pane: str | None, root_id: str) -> bool:
     restarts at 0 after a tmux server restart, so a stale DB row's pane id
     can silently now refer to a completely different, unrelated pane; the
     tag (set once, at creation) is what tells the two apart."""
-    return bool(pane) and tmux.window_alive(pane) and tmux.get_pane_tag(pane, SIDEBAR_TAG) == root_id
+    return (bool(pane) and pane != SIDEBAR_DISMISSED and tmux.window_alive(pane)
+            and tmux.get_pane_tag(pane, SIDEBAR_TAG) == root_id)
 
 
 def _agent_for_window(db: DB, ws: Workspace, window: str) -> Agent | None:
@@ -325,31 +346,58 @@ def _ensure_sidebar(db: DB, root_id: str, ws: Workspace, target_pane: str) -> No
     """Make sure ``root_id``'s one `copse watch --sidebar` pane is beside
     ``target_pane``: move it there if it already exists elsewhere (never
     start a second one -- that would double the dashboard's 2s polling), or
-    create it fresh if it's dead, stale (see _valid_sidebar) or has never
-    run. The only place that creates a sidebar: sidebar_follow only ever
-    relocates one, so quitting it with `q` keeps it gone."""
-    with _sidebar_lock(root_id, nonblocking=True):
+    create it fresh if it's dead, stale (see _valid_sidebar), was dismissed
+    (a launch or relaunch brings it back) or has never run."""
+    with _sidebar_lock(root_id, timeout=SIDEBAR_LOCK_TIMEOUT):
         existing = db.get_sidebar_pane(root_id)
         if _valid_sidebar(existing, root_id):
             assert existing is not None
             if tmux.pane_window(existing) != tmux.pane_window(target_pane):
                 tmux.move_pane(existing, target_pane, SIDEBAR_COLUMNS)
             return
-        from copse.providers import copse_invocation
+        _create_sidebar(db, root_id, ws, target_pane)
 
-        pane = tmux.split_left(target_pane, ws.path, [*copse_invocation(), "watch", "--sidebar"],
-                               workspaces.workspace_env(ws), columns=SIDEBAR_COLUMNS)
-        tmux.set_pane_tag(pane, SIDEBAR_TAG, root_id)
-        db.set_sidebar_pane(root_id, pane)
+
+def _create_sidebar(db: DB, root_id: str, ws: Workspace, target_pane: str) -> str:
+    """Start ``root_id``'s sidebar beside ``target_pane``. The caller holds
+    _sidebar_lock and has checked there's no valid one already."""
+    from copse.providers import copse_invocation
+
+    pane = tmux.split_left(target_pane, ws.path, [*copse_invocation(), "watch", "--sidebar"],
+                           workspaces.workspace_env(ws), columns=SIDEBAR_COLUMNS)
+    tmux.set_pane_tag(pane, SIDEBAR_TAG, root_id)
+    db.set_sidebar_pane(root_id, pane)
+    return pane
+
+
+def dismiss_sidebar(db: DB, pane: str | None) -> None:
+    """The person quit the sidebar in ``pane`` (`copse watch --sidebar`
+    returned normally): remember that, so sidebar_follow doesn't bring it
+    back on the next window switch. Only if ``pane`` is still its root's
+    recorded sidebar; a no-op for any other `copse watch`."""
+    if not pane:
+        return
+    root_id = tmux.get_pane_tag(pane, SIDEBAR_TAG)
+    if not root_id:
+        return
+    with _sidebar_lock(root_id):
+        if db.get_sidebar_pane(root_id) == pane:
+            db.set_sidebar_pane(root_id, SIDEBAR_DISMISSED)
 
 
 def sidebar_follow(db: DB, session: str) -> None:
     """Called from the session-window-changed / client-session-changed hooks
     tmux.apply_theme sets on every copse session: its active window just
     changed, or a client just switched into it, so make sure the sidebar is
-    there instead of wherever it used to be. Never creates one (see
-    _ensure_sidebar), and skips entirely once its root has been paused (a
-    tombstone pause() sets before it starts closing windows)."""
+    there instead of wherever it used to be.
+
+    A sidebar that has died since (it followed the person into a worker's
+    session that then closed, `copse watch` crashed, ...) is started again
+    here, so it never stays gone for longer than the next switch. Except
+    when the person quit it themselves (see dismiss_sidebar), or the root
+    never had one (`--no-watch`: no sidebars row at all). Skips entirely
+    once its root has been paused (a tombstone pause() sets before it
+    starts closing windows)."""
     ws = db.workspace_by_tmux_session(session)
     if ws is None:
         return
@@ -376,9 +424,14 @@ def sidebar_follow(db: DB, session: str) -> None:
         if root is None or root.status == "paused":
             return
         sidebar = db.get_sidebar_pane(root_id)
-        if not _valid_sidebar(sidebar, root_id):
+        if sidebar is None or sidebar == SIDEBAR_DISMISSED:
             return
-        assert sidebar is not None
+        if not _valid_sidebar(sidebar, root_id):
+            target_pane = tmux.agent_pane_in_window(window, None)
+            root_ws = db.get_workspace(root.workspace_id)
+            if target_pane and root_ws:
+                _create_sidebar(db, root_id, root_ws, target_pane)
+            return
         if tmux.pane_window(sidebar) == window:
             return  # already here
         target_pane = tmux.agent_pane_in_window(window, sidebar)

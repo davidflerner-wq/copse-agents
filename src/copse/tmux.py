@@ -248,16 +248,13 @@ def move_pane(pane: str, target: str, columns: int = 30) -> None:
     window, keeping focus on whatever's already active there. Re-points the
     window-resize pin (see split_left) at the new window and clears it from
     the old one, so a resize never tries to resize a pane that's moved on.
-    A no-op if ``pane`` is the only pane in its current window: join-pane
-    would leave that window with nothing in it, killing it."""
+    If ``pane`` is the only pane left in its window (whatever it sat beside
+    has exited), that window closes behind it: the pane itself moves and
+    keeps running, and a window holding nothing but the sidebar is no use to
+    anyone. Refusing instead would strand the sidebar there, out of sight."""
     old_window = pane_window(pane)
-    if old_window:
-        others = [p for p in _tmux("list-panes", "-t", old_window, "-F", "#{pane_id}",
-                                   check=False).stdout.split() if p != pane]
-        if not others:
-            return
     _tmux("join-pane", "-h", "-b", "-d", "-l", str(columns), "-s", pane, "-t", target, check=False)
-    if old_window:
+    if old_window and old_window != pane_window(pane):
         _tmux("set-hook", "-w", "-t", old_window, "-u", "window-resized", check=False)
     _tmux("set-hook", "-w", "-t", target, "window-resized",
           f"resize-pane -t {pane} -x {columns}", check=False)

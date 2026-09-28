@@ -535,6 +535,9 @@ def watch(
         typer.echo(watch_mod.print_once(DB(), repo_root, color=sys.stdout.isatty()))
         return
     watch_mod.run(repo_root)
+    if sidebar:
+        # Quit on purpose (a crash raises instead): keep it gone.
+        agents.dismiss_sidebar(DB(), os.environ.get("TMUX_PANE"))
 
 
 @app.command()
