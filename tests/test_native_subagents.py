@@ -185,7 +185,7 @@ def test_agent_entry_drops_running_subs_once_the_parent_is_not_running(db, ws):
 
 
 def test_snapshot_nests_running_and_recently_done_subagents_under_the_parent(db, ws, monkeypatch):
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)  # boss is actually running
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)  # boss is actually running
     fake_agent(db, ws, agent_id="boss", mode="interactive", status="processing")
     agents.handle_hook(db, "boss", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
     agents.handle_hook(db, "boss", "subagent-start", {"agent_id": "sub2", "agent_type": "Plan"})
