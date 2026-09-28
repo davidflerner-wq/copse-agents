@@ -515,7 +515,10 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None) ->
         tmux.paste(agent.tmux_window, text)
         return "delivered"
     db.enqueue(agent.id, text, sender_id)
+    pending = db.pending_count(agent.id)
     reconcile(db, agent)
+    if db.pending_count(agent.id) < pending:
+        return "delivered"  # the idle correction above already flushed it
     return "delivered" if flush(db, agent.id) else "queued"
 
 
@@ -536,9 +539,12 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
     didn't agree across samples.
 
     An 'idle' agent is only read with ``samples`` >= 2, and only moved to
-    'processing' when its provider sees the busy marker in the footer below
-    the input box (not just anywhere on screen, where a transcript can
-    quote it). A single cheap read, as the dashboard does, leaves it alone."""
+    'processing' when its provider sees the busy marker right by the input
+    box (not just anywhere on screen, where a transcript can quote it). A
+    single cheap read, as the dashboard does, leaves it alone. Moving an
+    agent to idle also delivers anything queued for it, but only when
+    ``samples`` >= 2: a single-sample read must never pop a message into a
+    terminal as a side effect of just rendering the dashboard."""
     provider = get_provider(agent.provider)
     if agent.headless or not provider.uses_hooks or agent.status not in ("idle", "processing", "waiting"):
         return None  # a headless pane shows output, not a TUI to read
@@ -563,7 +569,7 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
     if new and new != agent.status:
         db.set_status(agent.id, new, only_if=agent.status)
         agent.status = new
-        if new == "idle" and db.pending_count(agent.id):
+        if new == "idle" and samples >= 2 and db.pending_count(agent.id):
             try:
                 flush(db, agent.id)
             except tmux.TmuxError:
@@ -892,7 +898,9 @@ def tell_parent_unreported(db: DB, agent: Agent) -> None:
     try:
         send_message(db, agent.parent_id, body, agent.id)
     except (AgentError, tmux.TmuxError):
-        pass  # the parent is gone or can't take messages; nothing more to do
+        # The parent isn't running (or can't take messages): the notice is
+        # deliberately dropped here, since there's nothing left to tell.
+        pass
 
 
 def hook_main(db: DB, agent_id: str, event: str, stdin_text: str) -> str:

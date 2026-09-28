@@ -13,7 +13,12 @@ from copse import agents, autopilot, tmux, workspaces
 from copse.db import Agent
 
 CLAUDE_IDLE = "⏺ Done.\n\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
-CLAUDE_BUSY = "✶ Thinking… (12s)\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt\n"
+# Real Claude Code 2.1.283 layout: a spinner line above the input box while a
+# turn runs, e.g. "✻ Tomfoolering… (7m 22s · ↓ 35.0k tokens · thinking)".
+CLAUDE_BUSY = ("✻ Tomfoolering… (7m 22s · ↓ 35.0k tokens · thinking)\n\n"
+               "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n")
+CLAUDE_DONE = ("✻ Sautéed for 7m 49s · done 7:57 PM\n\n"
+              "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n")
 LONG_AGO = time.time() - autopilot.IDLE_GRACE_SECONDS - 1
 
 
@@ -318,11 +323,28 @@ def test_dashboard_never_sleeps_or_reads_idle_screens(db, root, monkeypatch):
 
 
 def test_idle_screen_quoting_the_busy_marker_stays_idle(db, root, monkeypatch):
+    # The spinner text appears in the transcript, scrolled well above the
+    # input box, not in the few lines right by it where a real spinner runs.
     _, ws = root
     add_agent(db, ws, "w1", status="idle")
-    quoted = ("⏺ The footer shows \"esc to interrupt\" while a turn runs.\n\n"
-              "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ? for shortcuts\n")
+    quoted = (
+        "⏺ The status line says \"Tomfoolering… (7m 22s · ↓ 35.0k tokens)\" while a turn runs.\n"
+        "\n"
+        "That was earlier in the conversation.\n"
+        "\n"
+        "Then some more output happened here.\n"
+        "\n"
+        "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ? for shortcuts\n"
+    )
     monkeypatch.setattr(tmux, "capture", lambda *a, **k: quoted)
+    assert agents.reconcile(db, db.get_agent("w1"), gap=0).status == "idle"
+    assert db.get_agent("w1").status == "idle"
+
+
+def test_done_spinner_layout_is_recognized_as_idle(db, root, monkeypatch):
+    _, ws = root
+    add_agent(db, ws, "w1", status="waiting")
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_DONE)
     assert agents.reconcile(db, db.get_agent("w1"), gap=0).status == "idle"
     assert db.get_agent("w1").status == "idle"
 
@@ -335,6 +357,39 @@ def test_reconciled_to_idle_delivers_queued_message(db, root, monkeypatch):
     monkeypatch.setattr(tmux, "paste", lambda target, text: pasted.append(text))
     agents.reconcile(db, db.get_agent("w1"), gap=0)
     assert pasted == ["hello"]
+    assert db.pending_count("w1") == 0
+
+
+def test_single_sample_reconcile_never_flushes_a_queued_message(db, root, monkeypatch):
+    # The dashboard reads with samples=1 (view.agent_entry): it may correct a
+    # stale status, but must never paste a queued message as a side effect of
+    # just being rendered.
+    _, ws = root
+    add_agent(db, ws, "w1", status="processing")
+    db.enqueue("w1", "hello", "boss")
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, text: pasted.append(text))
+    agents.reconcile(db, db.get_agent("w1"), samples=1, gap=0)
+    assert db.get_agent("w1").status == "idle"
+    assert pasted == []
+    assert db.pending_count("w1") == 1
+
+
+def test_send_message_delivered_when_reconcile_already_flushed_it(db, root, monkeypatch):
+    # The agent is "processing" in the DB but its screen already shows idle;
+    # reconcile's own idle correction flushes the message before send_message
+    # gets a chance to call flush itself, which must not read back "queued".
+    _, ws = root
+    add_agent(db, ws, "w1", status="processing")
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, text: pasted.append(text))
+    result = agents.send_message(db, "w1", "hello", sender_id="boss")
+    assert result == "delivered"
+    assert len(pasted) == 1
     assert db.pending_count("w1") == 0
 
 

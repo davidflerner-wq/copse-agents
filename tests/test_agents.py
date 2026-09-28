@@ -97,13 +97,34 @@ def test_developer_may_run_tests_and_builds_but_not_everything():
 
 
 CLAUDE_IDLE = "⏺ Done.\n\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
-CLAUDE_BUSY = "✶ Thinking… (12s)\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt\n"
+# Real Claude Code 2.1.283 layouts: the status line above the input box shows
+# a spinner while a turn runs, and a "done HH:MM" marker once it ends.
+# Older versions instead said "esc to interrupt" in the footer below the box.
+CLAUDE_BUSY = ("✻ Tomfoolering… (7m 22s · ↓ 35.0k tokens · thinking)\n\n"
+               "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n")
+CLAUDE_BUSY_BACKGROUND = ("· Gallivanting… (7m 22s · ↓ 31.7k tokens · thinking)\n"
+                          "  (ctrl+b ctrl+b (twice) to run in background)\n\n"
+                          "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n")
+CLAUDE_DONE = ("✻ Sautéed for 7m 49s · done 7:57 PM\n\n"
+              "────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n")
 CLAUDE_PROMPT = " Bash command\n   pytest\n This command requires approval\n\n Do you want to proceed?\n ❯ 1. Yes\n   4. No\n\n Esc to cancel\n"
 
 
-@pytest.mark.parametrize("screen,want", [(CLAUDE_IDLE, "idle"), (CLAUDE_BUSY, "busy"), (CLAUDE_PROMPT, "waiting"), ("", None)])
+@pytest.mark.parametrize("screen,want", [
+    (CLAUDE_IDLE, "idle"), (CLAUDE_DONE, "idle"),
+    (CLAUDE_BUSY, "busy"), (CLAUDE_BUSY_BACKGROUND, "busy"),
+    (CLAUDE_PROMPT, "waiting"), ("", None),
+])
 def test_claude_screen_state(screen, want):
     assert ClaudeCode().screen_state(screen) == want
+
+
+@pytest.mark.parametrize("screen,want", [
+    (CLAUDE_BUSY, True), (CLAUDE_BUSY_BACKGROUND, True),
+    (CLAUDE_IDLE, False), (CLAUDE_DONE, False),
+])
+def test_claude_busy_in_footer(screen, want):
+    assert ClaudeCode().busy_in_footer(screen) is want
 
 
 def test_reconcile_recovers_from_interrupted_turn(db, ws, monkeypatch):
