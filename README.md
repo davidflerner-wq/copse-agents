@@ -54,6 +54,26 @@ dashboard. Scroll it
 with the mouse wheel, PageUp/PageDown, or Home/End when there's more than fits;
 moving the ↑↓ selection scrolls to keep it in view.
 
+**Sidebar keys.** `?` shows them in the sidebar too. ◆ marks an agent that needs
+you: stuck on a prompt, a supervisor with a question, or (without autopilot) a
+worker whose branch is waiting for your review. Under autopilot, a reported worker shows
+a dim ◇ instead, because the supervisor reviews it.
+
+| Key | |
+|---|---|
+| `↑↓ j k` | move |
+| `PgUp/Dn` | page |
+| `Home/End` | top / bottom |
+| `⏎ a` | open the agent |
+| `p` | peek at its screen |
+| `x` | close (2× if busy) |
+| `n` | next needing you |
+| `Spc Tab` | fold group |
+| `/` | filter, Esc clears |
+| `r` | refresh |
+| `?` | this help |
+| `q` | quit |
+
 When an agent uses Claude Code's own Agent tool, its built-in subagents (Explore,
 Plan, ...) show up nested underneath it in the sidebar too, e.g. `↳ Explore ·
 running 1m`, so you can see what it's fanned out to without leaving copse.
@@ -101,7 +121,7 @@ things itself instead of starting workers.
 3. **Set `checks` in `.copse/config.json`** (usually your full test suite) so no
    branch merges red, and a `setup` if new worktrees need `npm install` or similar.
 4. **Watch the sidebar, not every window.** It flags agents waiting on you (◆);
-   ⏎ jumps to one, `p` peeks at it, `?` lists every key. Workers that need a
+   `n` jumps to the next one, ⏎ opens it, `p` peeks, `?` lists every key. Workers that need a
    decision surface through the supervisor's `need_user`.
 5. **Step away freely.** Quit the chat to pause everything; `copse continue`
    resumes the session, workers included. `copse history` shows what ran, what

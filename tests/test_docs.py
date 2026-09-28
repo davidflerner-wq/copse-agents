@@ -100,3 +100,12 @@ def test_command_help_has_no_hard_wraps():
 
     walk(typer.main.get_command(app), "")
     assert not ragged, f"summary paragraph spans lines in: {', '.join(ragged)}"
+
+
+@pytest.mark.parametrize("page", _pages(), ids=lambda p: p.name)
+def test_every_sidebar_key_is_documented(page):
+    from copse.watch import KEYS
+
+    text = _text(page)
+    missing = [k for k, _ in KEYS if k not in text]
+    assert not missing, f"{page.name} doesn't list sidebar keys: {', '.join(missing)}"
