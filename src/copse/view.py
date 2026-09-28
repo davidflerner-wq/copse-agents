@@ -121,14 +121,10 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
 
 
 def live_agents(db: DB, panes: dict[str, bool]) -> set[str]:
-    """Ids of every agent that is running. tmux reuses pane ids once its
-    server restarts (a reboot, `tmux kill-server`), so an old agent's stored
-    pane can now belong to a newer agent: only the newest agent recorded on a
-    pane can be the one running in it."""
-    everyone = db.list_agents()  # oldest first
-    owner = {a.tmux_window: a.id for a in everyone if a.tmux_window}
-    return {a.id for a in everyone
-            if agents.is_alive(a, panes) and (not a.tmux_window or owner[a.tmux_window] == a.id)}
+    """Ids of every agent that is running (see agents.owns_pane)."""
+    owners = agents.pane_owners(db)
+    return {a.id for a in db.list_agents()
+            if agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)}
 
 
 def _stopped_root(db: DB, a: Agent, alive: set[str], now: float) -> bool:

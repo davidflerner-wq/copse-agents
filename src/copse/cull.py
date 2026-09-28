@@ -5,7 +5,8 @@ A sweep, run by the sidebar every minute, when ``copse`` starts, and by
 
 1. Leftover processes. Any process belonging to an agent that shouldn't be
    running (paused, done, closed, forgotten, or whose tmux window is gone,
-   for instance after tmux itself went away) is stopped (see copse.procs). An
+   for instance after tmux itself went away, or now belongs to a newer agent:
+   see agents.owns_pane) is stopped (see copse.procs). An
    agent whose window vanished while it was marked running is recorded the
    way ``agents.pause`` would have: paused, so ``copse continue`` can still
    bring it back, or done if it had already reported.
@@ -58,7 +59,12 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     now = time.time() if now is None else now
     panes = tmux.list_panes()
     table = procs.table()
+    owners = agents.pane_owners(db)
     done: list[str] = []
+
+    def alive(a: Agent) -> bool:
+        # A pane id a newer agent has since been given isn't this one's.
+        return agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)
 
     # 1. Processes of agents that shouldn't be running.
     leftovers = []
@@ -66,7 +72,7 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
         a = db.get_agent(aid)
         if a is None or a.status in ("paused", "done") or a.dismissed_at is not None:
             leftovers.append(aid)
-        elif (agents.runs_process(a) and not agents.is_alive(a, panes)
+        elif (agents.runs_process(a) and not alive(a)
               and now - max(a.created_at, a.status_since or 0) > LAUNCH_GRACE):
             db.end_native_subagents(a.id)
             db.set_status(a.id, "done" if a.mode != "interactive" and a.result is not None
@@ -88,12 +94,12 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
         idle_for = now - max(a.created_at, a.status_since or 0)
         if limit <= 0 or idle_for <= limit:
             continue
-        alive = agents.is_alive(a, panes)
-        finished = alive and a.result is not None and a.status == "idle" and not db.pending_count(a.id)
+        running = alive(a)
+        finished = running and a.result is not None and a.status == "idle" and not db.pending_count(a.id)
         # A stopped worker of a paused session comes back with `copse
         # continue`; one whose session carried on without it won't.
         root = db.get_agent(_root(db, a))
-        gone = not alive and (a.status != "paused" or root is None or root.status != "paused")
+        gone = not running and (a.status != "paused" or root is None or root.status != "paused")
         if finished or gone:
             agents.close(db, a.id, panes)
             done.append(f"closed {'idle' if finished else 'stopped'} worker {a.id} "
@@ -121,10 +127,12 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     may be looking at its pane. The screen is read here too, since a trust
     dialog comes up before any hook runs to report it."""
     done = []
+    owners = agents.pane_owners(db)
     for a in db.list_agents():
         if (a.mode not in agents.REPORTING_MODES or not a.parent_id or a.result is not None
                 or a.dismissed_at is not None or a.status not in ("starting", "processing", "waiting")
-                or not agents.runs_process(a) or not agents.is_alive(a, panes)):
+                or not agents.runs_process(a) or not agents.is_alive(a, panes)
+                or not agents.owns_pane(db, a, owners)):
             continue
         if a.status != "waiting":
             agents.screen_status(db, a, samples=1)

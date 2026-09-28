@@ -110,9 +110,9 @@ def test_sweep_pauses_agents_whose_window_is_gone(db, ws, proc_cleanup):
 
 
 def test_sweep_closes_idle_reported_workers(db, ws, monkeypatch):
-    add(db, ws, "w1", result="done: added the flag")
-    add(db, ws, "w2")                                  # still working on it
-    add(db, ws, "w3", result="done", created_at=time.time())  # reported just now
+    add(db, ws, "w1", result="done: added the flag", tmux_window="@991")
+    add(db, ws, "w2", tmux_window="@992")              # still working on it
+    add(db, ws, "w3", result="done", tmux_window="@993", created_at=time.time())  # reported just now
     with db.tx() as c:
         c.execute("UPDATE agents SET status_since = created_at")
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
