@@ -81,6 +81,12 @@ class Provider:
         None when unsure. Only used to correct a status hooks left stale."""
         return None
 
+    def busy_in_footer(self, screen: str) -> bool:
+        """Whether the busy marker is in the footer below the input box, so
+        it can't be a transcript quoting it. Needed before an 'idle' status
+        is overridden to busy. Default: never sure."""
+        return False
+
 
 def claude_binary() -> str:
     """COPSE_CLAUDE_BIN, else `claude` on PATH."""
@@ -181,6 +187,16 @@ class ClaudeCode(Provider):
         if "? for shortcuts" in tail or "⏵⏵" in tail or "shift+tab to cycle" in tail:
             return "idle"
         return None
+
+    def busy_in_footer(self, screen: str) -> bool:
+        lines = screen.rstrip().splitlines()
+        box = [i for i, line in enumerate(lines) if line.lstrip().startswith("❯")]
+        if box:
+            footer = lines[box[-1] + 1:]
+        else:
+            bar = [i for i, line in enumerate(lines) if "⏵⏵" in line]
+            footer = lines[bar[-1]:] if bar else []
+        return any("esc to interrupt" in line for line in footer)
 
     def after_launch(self, target: str) -> None:
         # A fresh worktree is a folder Claude Code hasn't seen, so it asks

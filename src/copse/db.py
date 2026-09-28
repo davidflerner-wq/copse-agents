@@ -86,7 +86,9 @@ CREATE TABLE IF NOT EXISTS milestones (
     detail TEXT,
     status TEXT NOT NULL DEFAULT 'pending', -- pending | passed | failed
     checked_at REAL,
-    output TEXT                    -- the tail of the last check's output
+    output TEXT,                   -- the tail of the last check's output
+    checked_sha TEXT,              -- the checkout's HEAD when it was last checked
+    passed_sha TEXT                -- the checkout's HEAD when it last passed
 );
 -- A reviewer agent's verdict on a branch at one commit. A merge gate only
 -- accepts an approval of the commit it is about to merge.
@@ -171,6 +173,8 @@ class Milestone:
     status: str
     checked_at: float | None
     output: str | None
+    checked_sha: str | None = None
+    passed_sha: str | None = None
 
 
 @dataclass
@@ -232,6 +236,10 @@ class DB:
                           ("stop_blocked", "INTEGER"), ("headless", "INTEGER")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(milestones)")}
+        for col in ("checked_sha", "passed_sha"):
+            if col not in cols:
+                self.conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} TEXT")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -442,11 +450,15 @@ class DB:
         )
         return [_load(Milestone, r) for r in rows]
 
-    def record_check(self, milestone_id: int, passed: bool, output: str) -> None:
+    def record_check(self, milestone_id: int, passed: bool, output: str,
+                     sha: str | None = None, *, passed_sha: str | None = None) -> None:
+        """``passed_sha`` defaults to ``sha`` on a pass and is kept on a fail."""
         with self.tx() as c:
             c.execute(
-                "UPDATE milestones SET status=?, checked_at=?, output=? WHERE id=?",
-                ("passed" if passed else "failed", time.time(), output, milestone_id),
+                "UPDATE milestones SET status=?, checked_at=?, output=?, checked_sha=?, "
+                "passed_sha=COALESCE(?, passed_sha) WHERE id=?",
+                ("passed" if passed else "failed", time.time(), output, sha,
+                 passed_sha or (sha if passed else None), milestone_id),
             )
 
     # -- reviews -------------------------------------------------------------
