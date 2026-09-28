@@ -196,8 +196,9 @@ ANSI = {"bold": "1", "dim": "2", "busy": "36", "ok": "32", "alert": "1;33", "bad
 def print_once(db: DB, repo_root: str | None, color: bool) -> str:
     out = []
     width = shutil.get_terminal_size().columns - 1
-    for line in render(view.snapshot(db, repo_root), time.time(), width,
-                       view.autopilot_entry(db, repo_root)):
+    panes = tmux.list_panes()
+    for line in render(view.snapshot(db, repo_root, panes=panes), time.time(), width,
+                       view.autopilot_entry(db, repo_root, panes=panes)):
         code = ANSI.get(line.style) if color else None
         out.append(f"\033[{code}m{line.text}\033[0m" if code else line.text)
     return "\n".join(out)
@@ -381,8 +382,9 @@ def _loop(stdscr, repo_root: str | None) -> None:
     while True:
         h, w = stdscr.getmaxyx()
         if stale:
-            lines = render(view.snapshot(db, repo_root), time.time(), w - 1,
-                           view.autopilot_entry(db, repo_root))
+            panes = tmux.list_panes()
+            lines = render(view.snapshot(db, repo_root, panes=panes), time.time(), w - 1,
+                           view.autopilot_entry(db, repo_root, panes=panes))
             stale = False
         rows = [i for i, ln in enumerate(lines) if ln.agent]
         selected = max(0, min(selected, len(rows) - 1))

@@ -657,11 +657,18 @@ def runs_process(agent: Agent) -> bool:
     return provider is None or provider.launches_process
 
 
-def is_alive(agent: Agent) -> bool:
+def is_alive(agent: Agent, panes: dict[str, bool] | None = None) -> bool:
+    """``panes`` is a pre-fetched ``tmux.list_panes()`` result, shared by a
+    whole snapshot so callers don't each shell out for their own agent's
+    pane. Omit it to check this one agent's pane directly."""
     if not runs_process(agent):
         # No process to watch: it's at work until its result is recorded.
         return agent.result is None and agent.status not in ("paused", "done")
-    return bool(agent.tmux_window) and tmux.window_alive(agent.tmux_window)
+    if not agent.tmux_window:
+        return False
+    if panes is not None:
+        return panes.get(agent.tmux_window, False)
+    return tmux.window_alive(agent.tmux_window)
 
 
 def format_message(db: DB, body: str, sender_id: str | None) -> str:

@@ -166,6 +166,29 @@ def window_alive(target: str) -> bool:
     return proc.returncode == 0 and proc.stdout.strip() == "0"
 
 
+def list_panes() -> dict[str, bool]:
+    """Every pane's liveness across every session on this server, in one
+    call, keyed by pane id (and also by window id, for agents whose stored
+    ``tmux_window`` predates pane-id tracking -- a window counts as alive if
+    any of its panes are). A snapshot with several agents can share this
+    instead of one ``display-message`` per agent. Empty (not an error) when
+    there is no server running, or tmux isn't installed at all."""
+    try:
+        proc = _tmux("list-panes", "-a", "-F", "#{window_id} #{pane_id} #{pane_dead}", check=False)
+    except TmuxError:
+        return {}
+    if proc.returncode != 0:
+        return {}
+    result: dict[str, bool] = {}
+    for line in proc.stdout.splitlines():
+        window_id, _, rest = line.partition(" ")
+        pane_id, _, dead = rest.partition(" ")
+        alive = dead.strip() == "0"
+        result[pane_id] = alive
+        result[window_id] = result.get(window_id, False) or alive
+    return result
+
+
 def kill_window(target: str) -> None:
     _tmux("kill-window", "-t", target, check=False)
 
