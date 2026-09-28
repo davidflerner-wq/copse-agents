@@ -81,6 +81,11 @@ def clip(text: str, limit: int) -> str:
 
 def core_tools(cwd: str, bash_timeout: float = 300.0) -> list[Tool]:
     root = Path(cwd).resolve()
+    # Files the model has looked at (Read, or Edit, which reads to match).
+    # Write replaces a file whole, so on an existing file it's only allowed
+    # once the model has seen what it's replacing: a model that has lost the
+    # thread otherwise "creates" a file that was already there and wipes it.
+    seen: set[Path] = set()
 
     def resolve(raw: str) -> Path:
         p = (root / raw).resolve() if not os.path.isabs(raw) else Path(raw).resolve()
@@ -96,6 +101,7 @@ def core_tools(cwd: str, bash_timeout: float = 300.0) -> list[Tool]:
             lines = path.read_text(encoding="utf-8").splitlines()
         except UnicodeDecodeError:
             return ToolResult(f"{args.get('path')} isn't a text file", True)
+        seen.add(path)
         offset = max(int(args.get("offset") or 1), 1)
         limit = int(args.get("limit") or 2000)
         chunk = lines[offset - 1:offset - 1 + limit]
@@ -111,9 +117,13 @@ def core_tools(cwd: str, bash_timeout: float = 300.0) -> list[Tool]:
         content = args.get("content")
         if not isinstance(content, str):
             return ToolResult("content must be a string", True)
-        path.parent.mkdir(parents=True, exist_ok=True)
         existed = path.exists()
+        if existed and path not in seen:
+            return ToolResult(f"{args.get('path')} already exists and you haven't read it. Read it "
+                              "first, then Write to replace it whole, or use Edit to change part of it.", True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
+        seen.add(path)
         return ToolResult(f"{'updated' if existed else 'created'} {args.get('path')} ({len(content.splitlines())} lines)")
 
     def edit(args: dict) -> ToolResult:
@@ -127,6 +137,7 @@ def core_tools(cwd: str, bash_timeout: float = 300.0) -> list[Tool]:
         if not path.is_file():
             return ToolResult(f"no such file: {args.get('path')}", True)
         text = path.read_text(encoding="utf-8")
+        seen.add(path)
         count = text.count(old)
         if count == 0:
             hint = _near_miss(text, old)
