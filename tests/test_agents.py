@@ -106,6 +106,74 @@ def test_claude_screen_state(screen, want):
     assert ClaudeCode().screen_state(screen) == want
 
 
+CLAUDE_TYPING = "⏺ Done.\n\n────\n❯ half a message I'm still writ\n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
+CLAUDE_BACKGROUND = (
+    "Your conversation moved to the background — enter opens it · esc returns to it\n"
+    "────\n❯ describe a task for a new session\n────\n"
+)
+
+
+@pytest.mark.parametrize("screen,interactive,want", [
+    (CLAUDE_IDLE, True, None),
+    (CLAUDE_IDLE, False, None),
+    (CLAUDE_TYPING, True, "typing"),
+    (CLAUDE_TYPING, False, None),  # a worker's input box is never hand-typed
+    (CLAUDE_BACKGROUND, True, "background"),
+    (CLAUDE_BACKGROUND, False, "background"),  # workers can end up here too
+])
+def test_claude_paste_blocked(screen, interactive, want):
+    assert ClaudeCode().paste_blocked(screen, interactive) == want
+
+
+def test_flush_keeps_message_queued_when_user_is_mid_typing(db, ws, monkeypatch):
+    fake_agent(db, ws, status="idle")
+    db.enqueue("a1", "queued message", None)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_TYPING)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    assert agents.flush(db, "a1") is False
+    assert not pasted
+    assert db.get_agent("a1").status == "idle"
+    assert db.pending_count("a1") == 1
+
+
+def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, monkeypatch):
+    # A worker too: a blind paste there would start a NEW background session
+    # instead of reaching this one.
+    fake_agent(db, ws, status="idle", mode="assign")
+    db.enqueue("a1", "queued message", None)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_BACKGROUND)
+    sent, pasted = [], []
+    monkeypatch.setattr(tmux, "send_keys", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    assert agents.flush(db, "a1") is False
+    assert sent and sent[0][1] == "Escape"  # tried backing out before giving up
+    assert not pasted
+    assert db.pending_count("a1") == 1
+
+
+def test_flush_delivers_once_background_view_clears_after_escape(db, ws, monkeypatch):
+    fake_agent(db, ws, status="idle")
+    db.enqueue("a1", "queued message", None)
+    screens = iter([CLAUDE_BACKGROUND, CLAUDE_IDLE])
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: next(screens))
+    monkeypatch.setattr(tmux, "send_keys", lambda *a, **k: None)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    assert agents.flush(db, "a1") is True
+    assert pasted == ["queued message"]
+
+
+def test_flush_delivers_when_input_box_is_clear(db, ws, monkeypatch):
+    fake_agent(db, ws, status="idle")
+    db.enqueue("a1", "queued message", None)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    assert agents.flush(db, "a1") is True
+    assert pasted == ["queued message"]
+
+
 def test_reconcile_recovers_from_interrupted_turn(db, ws, monkeypatch):
     # Esc-interrupted turns run no Stop hook: status says waiting, screen says idle.
     fake_agent(db, ws, status="waiting")

@@ -47,6 +47,37 @@ def test_ago():
     assert [watch.ago(s) for s in (5, 125, 3720, 90000)] == ["5s", "2m", "1h02m", "1d"]
 
 
+def test_clamp_scroll_keeps_offset_in_bounds():
+    assert watch.clamp_scroll(0, total=10, visible=5) == 0
+    assert watch.clamp_scroll(-3, total=10, visible=5) == 0
+    assert watch.clamp_scroll(100, total=10, visible=5) == 5
+    # content that fits entirely: no scrolling at all
+    assert watch.clamp_scroll(3, total=4, visible=5) == 0
+
+
+def test_clamp_scroll_reclamps_when_content_shrinks():
+    # e.g. an agent finished and its lines disappeared from the render
+    assert watch.clamp_scroll(20, total=10, visible=5) == 5
+    assert watch.clamp_scroll(20, total=3, visible=5) == 0
+
+
+def test_scroll_into_view_scrolls_down_to_reveal_a_later_selection():
+    assert watch.scroll_into_view(0, index=12, visible=5, total=20) == 8
+
+
+def test_scroll_into_view_scrolls_up_to_reveal_an_earlier_selection():
+    assert watch.scroll_into_view(10, index=2, visible=5, total=20) == 2
+
+
+def test_scroll_into_view_leaves_offset_when_selection_already_visible():
+    assert watch.scroll_into_view(4, index=6, visible=5, total=20) == 4
+
+
+def test_scroll_into_view_clamps_to_content_bounds():
+    assert watch.scroll_into_view(0, index=19, visible=5, total=20) == 15
+    assert watch.scroll_into_view(0, index=0, visible=5, total=3) == 0
+
+
 def test_status_since_only_moves_on_change(tmp_path, monkeypatch):
     from copse.db import Agent
     db = DB(str(tmp_path / "t.db"))

@@ -46,6 +46,13 @@ who's waiting for your approval. Tell the supervisor what you want. It splits th
 work between workers, each on its own branch, then reviews and merges their
 branches. It starts in under a second.
 
+**The sidebar follows you.** There's one sidebar pane per repo, not one per
+window: switch to any other copse window or session (⏎ in the sidebar, `copse
+attach`, prefix-L back, clicking a pane) and it relocates there too, always
+beside whatever you're looking at, never spawning a second dashboard. Scroll it
+with the mouse wheel, PageUp/PageDown, or Home/End when there's more than fits;
+moving the ↑↓ selection scrolls to keep it in view.
+
 When an agent uses Claude Code's own Agent tool, its built-in subagents (Explore,
 Plan, ...) show up nested underneath it in the sidebar too, e.g. `↳ Explore ·
 running 1m`, so you can see what it's fanned out to without leaving copse.
@@ -322,6 +329,10 @@ add rules to `~/.gemini/antigravity-cli/settings.json`, for example:
   `copse _hook <event>`. The `Stop` hook also delivers queued messages: it
   returns `{"decision": "block", "reason": <message>}`, so Claude continues with
   the message as its next instruction and nothing is typed into a busy terminal.
+  A message queued for an *idle* agent is typed in instead, but only once copse
+  checks the screen and finds a clear chat input: not text you're still typing,
+  and not Claude Code's background-session launcher (which would otherwise
+  start a whole new session). Otherwise it stays queued for the next chance.
 - **Results are explicit.** Workers call the `report_result` MCP tool instead of
   having their output parsed from the screen. If a worker stops without
   reporting, the Stop hook reminds it once.

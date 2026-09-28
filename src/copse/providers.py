@@ -81,6 +81,12 @@ class Provider:
         None when unsure. Only used to correct a status hooks left stale."""
         return None
 
+    def paste_blocked(self, screen: str, interactive: bool) -> str | None:
+        """Why it's unsafe to type a queued message into this pane right now,
+        or None if it's clear. Default: always clear (most providers have no
+        screen state worth reading here)."""
+        return None
+
 
 def claude_binary() -> str:
     """COPSE_CLAUDE_BIN, else `claude` on PATH."""
@@ -180,6 +186,31 @@ class ClaudeCode(Provider):
             return "busy"
         if "? for shortcuts" in tail or "⏵⏵" in tail or "shift+tab to cycle" in tail:
             return "idle"
+        return None
+
+    # Claude Code's "background sessions" launcher: reachable from the chat
+    # (e.g. "← for agents") and shown after backgrounding a turn. It has its
+    # own "❯ describe a task for a new session" prompt, which looks just like
+    # an empty chat input but starts a brand-new session instead of reaching
+    # this one.
+    BACKGROUND_VIEW = re.compile(r"moved to the background|describe a task for a new session", re.I)
+    # `.` doesn't cross lines, but `\s` does: keep the capture off of it so a
+    # blank "❯ " line's trailing space can't slurp the newline and match into
+    # the box-drawing line below.
+    INPUT_LINE = re.compile(r"^\s*❯(.*)$", re.M)
+
+    def paste_blocked(self, screen: str, interactive: bool) -> str | None:
+        """None if it's safe to paste into this pane now, else why not:
+        'background' when the screen above is showing, or 'typing' when the
+        chat's input box already holds text someone is mid-typing (checked
+        only for interactive chats; a worker's input is never hand-typed)."""
+        tail = "\n".join(screen.rstrip().splitlines()[-25:])
+        if self.BACKGROUND_VIEW.search(tail):
+            return "background"
+        if interactive:
+            lines = self.INPUT_LINE.findall(tail)
+            if lines and lines[-1].strip():
+                return "typing"
         return None
 
     def after_launch(self, target: str) -> None:

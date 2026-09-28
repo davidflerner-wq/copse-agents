@@ -110,6 +110,14 @@ CREATE TABLE IF NOT EXISTS native_subagents (
     started_at REAL,
     ended_at REAL
 );
+-- The one `copse watch --sidebar` pane per repo (see agents.sidebar_follow):
+-- its tmux pane id, so any of the repo's sessions can find and relocate it
+-- instead of starting a second one.
+CREATE TABLE IF NOT EXISTS sidebars (
+    repo_root TEXT PRIMARY KEY,
+    pane TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -268,6 +276,12 @@ class DB:
 
     def workspace_by_path(self, path: str) -> Workspace | None:
         row = self.conn.execute("SELECT * FROM workspaces WHERE path=?", (path,)).fetchone()
+        return _load(Workspace, row) if row else None
+
+    def workspace_by_tmux_session(self, session: str) -> Workspace | None:
+        row = self.conn.execute(
+            "SELECT * FROM workspaces WHERE tmux_session=?", (session,)
+        ).fetchone()
         return _load(Workspace, row) if row else None
 
     def delete_workspace(self, ws_id: str) -> None:
@@ -506,6 +520,26 @@ class DB:
             "SELECT * FROM native_subagents WHERE parent_id=? ORDER BY started_at", (parent_id,)
         )
         return [_load(NativeSubagent, r) for r in rows]
+
+    # -- sidebar (one `copse watch --sidebar` pane per repo) -----------------
+
+    def get_sidebar_pane(self, repo_root: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT pane FROM sidebars WHERE repo_root=?", (repo_root,)
+        ).fetchone()
+        return row["pane"] if row else None
+
+    def set_sidebar_pane(self, repo_root: str, pane: str) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO sidebars (repo_root, pane, updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(repo_root) DO UPDATE SET pane=excluded.pane, updated_at=excluded.updated_at",
+                (repo_root, pane, time.time()),
+            )
+
+    def clear_sidebar_pane(self, repo_root: str) -> None:
+        with self.tx() as c:
+            c.execute("DELETE FROM sidebars WHERE repo_root=?", (repo_root,))
 
     def all_native_subagents(self) -> dict[str, list[NativeSubagent]]:
         """Every native subagent worth showing, grouped by parent id: one

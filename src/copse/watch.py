@@ -206,6 +206,25 @@ def print_once(db: DB, repo_root: str | None, color: bool) -> str:
 HELP = ["↑↓ ⏎ open  p peek  q quit"]
 HELP_IN_TMUX = [*HELP, "prefix L: back from agent"]
 
+# Wheel-down: ncurses only defines this when built with mouse version > 1
+# (not always true, e.g. some macOS builds); the bit value itself is stable
+# across ncurses versions, so fall back to it rather than dropping the key.
+BUTTON5_PRESSED = getattr(curses, "BUTTON5_PRESSED", 0x00200000)
+
+
+def clamp_scroll(offset: int, total: int, visible: int) -> int:
+    """Keep a scroll offset from running past the content or negative."""
+    return max(0, min(offset, max(0, total - visible)))
+
+
+def scroll_into_view(offset: int, index: int, visible: int, total: int) -> int:
+    """Adjust ``offset`` so row ``index`` is on screen, then clamp."""
+    if index < offset:
+        offset = index
+    elif visible and index >= offset + visible:
+        offset = index - visible + 1
+    return clamp_scroll(offset, total, visible)
+
 
 # PawDelta palette as xterm-256 colours (closest matches): indigo accent,
 # soft green / amber / rose for states, slate greys for secondary text.
@@ -321,8 +340,13 @@ def _loop(stdscr, repo_root: str | None) -> None:
     curses.curs_set(0)
     styles = _styles()
     stdscr.timeout(int(REFRESH_SECONDS * 1000))
+    try:
+        curses.mousemask(curses.BUTTON1_CLICKED | curses.BUTTON4_PRESSED | BUTTON5_PRESSED)
+    except curses.error:
+        pass
     db = DB()
     selected = 0
+    offset = 0
     lines: list[Line] = []
     stale = True
     while True:
@@ -336,9 +360,13 @@ def _loop(stdscr, repo_root: str | None) -> None:
 
         help_ = [t for text in (HELP_IN_TMUX if os.environ.get("TMUX") else HELP)
                  for t in _wrap(text, w - 1, "")]
+        top = (len(LOGO) + 1) if h >= 18 else 2
+        visible = max(0, h - top - 1 - len(help_))
+        offset = clamp_scroll(offset, len(lines), visible)
         stdscr.erase()
-        top = _draw_logo(stdscr, w, styles) if h >= 18 else _draw_compact_logo(stdscr, w, styles)
-        for y, (i, ln) in enumerate(enumerate(lines[: h - top - 1 - len(help_)]), start=top):
+        _draw_logo(stdscr, w, styles) if h >= 18 else _draw_compact_logo(stdscr, w, styles)
+        page = lines[offset:offset + visible]
+        for y, (i, ln) in enumerate(enumerate(page, start=offset), start=top):
             attr = styles.get(ln.style, curses.A_NORMAL)
             if rows and i == rows[selected]:
                 # A purple bar and a subtle highlight, not inverted colours.
@@ -347,19 +375,51 @@ def _loop(stdscr, repo_root: str | None) -> None:
                                styles["select"] | (attr & curses.A_BOLD))
                 continue
             stdscr.addnstr(y, 1, ln.text, w - 2, attr)
+        if visible > 0 and offset > 0:
+            text = "↑ more"
+            stdscr.addnstr(top, max(0, w - 1 - len(text)), text, w - 1, styles["dim"])
+        if visible > 0 and offset + visible < len(lines):
+            text = "↓ more"
+            stdscr.addnstr(top + visible - 1, max(0, w - 1 - len(text)), text, w - 1, styles["dim"])
         for y, text in enumerate(help_, start=h - len(help_)):
             stdscr.addnstr(y, 1, text, w - 2, styles["dim"])
         stdscr.refresh()
 
         key = stdscr.getch()
-        if key == -1 or key in (ord("r"), curses.KEY_RESIZE):
+        if key == curses.KEY_MOUSE:
+            try:
+                _, mx, my, _, bstate = curses.getmouse()
+            except curses.error:
+                bstate = 0
+            if bstate & curses.BUTTON4_PRESSED:
+                offset = clamp_scroll(offset - 3, len(lines), visible)
+            elif bstate & BUTTON5_PRESSED:
+                offset = clamp_scroll(offset + 3, len(lines), visible)
+            elif bstate & curses.BUTTON1_CLICKED and rows:
+                clicked = my - top + offset
+                if clicked in rows:
+                    selected = rows.index(clicked)
+                    offset = scroll_into_view(offset, rows[selected], visible, len(lines))
+        elif key == -1 or key in (ord("r"), curses.KEY_RESIZE):
             stale = True
         elif key in (ord("q"), 27):
             return
         elif key in (curses.KEY_UP, ord("k")):
-            selected -= 1
+            selected = max(0, selected - 1)
+            if rows:
+                offset = scroll_into_view(offset, rows[selected], visible, len(lines))
         elif key in (curses.KEY_DOWN, ord("j")):
-            selected += 1
+            selected = min(len(rows) - 1, selected + 1) if rows else selected
+            if rows:
+                offset = scroll_into_view(offset, rows[selected], visible, len(lines))
+        elif key == curses.KEY_NPAGE:
+            offset = clamp_scroll(offset + max(1, visible), len(lines), visible)
+        elif key == curses.KEY_PPAGE:
+            offset = clamp_scroll(offset - max(1, visible), len(lines), visible)
+        elif key == curses.KEY_HOME:
+            offset = 0
+        elif key == curses.KEY_END:
+            offset = clamp_scroll(len(lines), len(lines), visible)
         elif rows and key in (curses.KEY_ENTER, 10, 13, ord("a")):
             ln = lines[rows[selected]]
             _attach(ln.agent, ln.workspace, db)

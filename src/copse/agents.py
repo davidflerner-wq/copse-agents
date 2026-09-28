@@ -184,17 +184,51 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     db.update_agent(agent.id, tmux_window=target)
     agent.tmux_window = target
     if watch_pane:
-        # The dashboard for this repo, under the agent in the same window.
         # Best effort: a failed split must not fail the agent it sits beside.
-        from copse.providers import copse_invocation
-
         try:
-            tmux.split_left(target, ws.path, [*copse_invocation(), "watch", "--sidebar"],
-                            workspaces.workspace_env(ws))
+            _ensure_sidebar(db, ws, target)
         except tmux.TmuxError:
             pass
     tmux.apply_theme(ws.tmux_session)
     return target
+
+
+SIDEBAR_COLUMNS = 30
+
+
+def _ensure_sidebar(db: DB, ws: Workspace, target_pane: str) -> None:
+    """Make sure the repo's one `copse watch --sidebar` pane is beside
+    ``target_pane``: move it there if it already exists elsewhere (never
+    start a second one -- that would double the dashboard's 2s polling), or
+    create it fresh if it's dead or has never run."""
+    existing = db.get_sidebar_pane(ws.repo_root)
+    if existing and tmux.window_alive(existing):
+        if tmux.pane_window(existing) != tmux.pane_window(target_pane):
+            tmux.move_pane(existing, target_pane, SIDEBAR_COLUMNS)
+        return
+    from copse.providers import copse_invocation
+
+    pane = tmux.split_left(target_pane, ws.path, [*copse_invocation(), "watch", "--sidebar"],
+                           workspaces.workspace_env(ws), columns=SIDEBAR_COLUMNS)
+    db.set_sidebar_pane(ws.repo_root, pane)
+
+
+def sidebar_follow(db: DB, session: str) -> None:
+    """Called from the session-window-changed / client-session-changed hooks
+    tmux.apply_theme sets on every copse session: its active window just
+    changed, or a client just switched into it, so make sure the sidebar is
+    there instead of wherever it used to be."""
+    ws = db.workspace_by_tmux_session(session)
+    if ws is None:
+        return
+    window = tmux.active_window(session)
+    if not window:
+        return
+    sidebar = db.get_sidebar_pane(ws.repo_root)
+    target_pane = tmux.agent_pane_in_window(window, sidebar)
+    if not target_pane:
+        return
+    _ensure_sidebar(db, ws, target_pane)
 
 
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
@@ -398,6 +432,14 @@ def pause(db: DB, root_id: str) -> list[Agent]:
         tmux.kill_window(w)
     root = db.get_agent(root_id)
     root_ws = db.get_workspace(root.workspace_id) if root else None
+    if root_ws:
+        # The sidebar follows the person around, so it may not be sitting in
+        # any of the windows just closed: find it wherever it is and stop it
+        # too, rather than leaving it running with nothing left to show it.
+        sidebar = db.get_sidebar_pane(root_ws.repo_root)
+        if sidebar:
+            tmux.kill_pane(sidebar)
+            db.clear_sidebar_pane(root_ws.repo_root)
     for session in sessions:
         # The chat's own session always closes, so an attached terminal gets
         # its prompt back every time. Workers' sessions close once they hold
@@ -554,6 +596,11 @@ def flush(db: DB, agent_id: str) -> bool:
         return False  # its runner takes messages from the inbox itself
     if db.pending_count(agent_id) == 0 or not db.claim_idle(agent_id):
         return False
+    if _paste_blocked(agent):
+        # Leave it queued: the next flush (a later message, or a resumed
+        # session's start-up) gets another chance.
+        db.set_status(agent_id, "idle", only_if="processing")
+        return False
     msg = db.pop_pending(agent_id)
     if not msg:
         db.set_status(agent_id, "idle", only_if="processing")
@@ -562,6 +609,30 @@ def flush(db: DB, agent_id: str) -> bool:
     assert agent is not None
     tmux.paste(agent.tmux_window, msg.body)
     return True
+
+
+def _paste_blocked(agent: Agent) -> bool:
+    """Whether pasting into ``agent``'s pane right now would land somewhere
+    other than its chat: over text the person is mid-typing (interactive
+    only), or into Claude Code's background-session launcher (any mode -- a
+    blind paste there starts a new session instead of reaching this one).
+    A background view gets one Escape and a re-check before giving up."""
+    provider = get_provider(agent.provider)
+    interactive = agent.mode == "interactive"
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=40)
+    except tmux.TmuxError:
+        return False
+    reason = provider.paste_blocked(screen, interactive)
+    if reason == "background":
+        tmux.send_keys(agent.tmux_window, "Escape")
+        time.sleep(0.3)
+        try:
+            screen = tmux.capture(agent.tmux_window, lines=40)
+        except tmux.TmuxError:
+            return False
+        reason = provider.paste_blocked(screen, interactive)
+    return reason is not None
 
 
 # -- subagent provider -------------------------------------------------------------
