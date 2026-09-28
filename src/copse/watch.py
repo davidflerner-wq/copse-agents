@@ -383,7 +383,13 @@ def _draw_compact_logo(stdscr, w: int, styles: dict[str, int]) -> int:
     return 2
 
 
-def _loop(stdscr, repo_root: str | None) -> None:
+def quit_keys(sidebar: bool) -> tuple[int, ...]:
+    """Keys that close the dashboard. In the sidebar only `q` does: a stray
+    Esc (easy to hit after clicking into the pane) shouldn't dismiss it."""
+    return (ord("q"),) if sidebar else (ord("q"), 27)
+
+
+def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
     curses.curs_set(0)
     styles = _styles()
     stdscr.timeout(int(REFRESH_SECONDS * 1000))
@@ -456,7 +462,7 @@ def _loop(stdscr, repo_root: str | None) -> None:
                     offset = scroll_into_view(offset, rows[selected], visible, len(lines))
         elif key == -1 or key in (ord("r"), curses.KEY_RESIZE):
             stale = True
-        elif key in (ord("q"), 27):
+        elif key in quit_keys(sidebar):
             return
         elif key in (curses.KEY_UP, ord("k")):
             selected = max(0, selected - 1)
@@ -499,5 +505,9 @@ def _loop(stdscr, repo_root: str | None) -> None:
                 stale = True
 
 
-def run(repo_root: str | None) -> None:
-    curses.wrapper(_loop, repo_root)
+# Set by `copse watch --sidebar` (see cli.watch) when running as the sidebar.
+SIDEBAR = False
+
+
+def run(repo_root: str | None, sidebar: bool | None = None) -> None:
+    curses.wrapper(_loop, repo_root, SIDEBAR if sidebar is None else sidebar)

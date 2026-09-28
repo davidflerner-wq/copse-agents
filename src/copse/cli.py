@@ -525,6 +525,7 @@ def watch(
     """Live dashboard of workspaces and agents (highlights agents waiting on you)."""
     from copse import watch as watch_mod
 
+    watch_mod.SIDEBAR = sidebar
     repo_root = None
     if not all_repos:
         try:

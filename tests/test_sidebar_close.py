@@ -154,3 +154,22 @@ def test_x_confirmation_expires_and_is_per_row():
 
 def test_help_lists_the_close_key():
     assert "x close" in watch.HELP[0]
+
+
+def test_esc_does_not_quit_the_sidebar():
+    assert watch.quit_keys(sidebar=True) == (ord("q"),)
+    assert 27 in watch.quit_keys(sidebar=False) and ord("q") in watch.quit_keys(sidebar=False)
+
+
+def test_watch_sidebar_flag_reaches_the_loop(db, repo, monkeypatch):
+    import sys
+
+    seen = {}
+    monkeypatch.setattr(watch.curses, "wrapper", lambda fn, root, sidebar: seen.setdefault("sidebar", sidebar))
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(watch, "SIDEBAR", False)
+    monkeypatch.chdir(repo)
+    from copse.cli import watch as watch_cmd
+
+    watch_cmd(all_repos=False, once=False, sidebar=True)
+    assert seen["sidebar"] is True
