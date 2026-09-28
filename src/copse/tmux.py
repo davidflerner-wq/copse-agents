@@ -189,6 +189,12 @@ def list_panes() -> dict[str, bool]:
     return result
 
 
+def window_pids(target: str) -> list[int]:
+    """The process ids of the programs in ``target``'s panes."""
+    out = _tmux("list-panes", "-t", target, "-F", "#{pane_pid}", check=False).stdout
+    return [int(p) for p in out.split() if p.isdigit()]
+
+
 def kill_window(target: str) -> None:
     _tmux("kill-window", "-t", target, check=False)
 

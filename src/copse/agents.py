@@ -656,6 +656,11 @@ def pause(db: DB, root_id: str) -> list[Agent]:
             assert sidebar is not None
             tmux.kill_pane(sidebar)
             db.clear_sidebar_pane(root_id)
+    # Closing the windows doesn't stop sessions Claude Code's daemon hosts.
+    # Skipped for this process and its ancestors: this can run in the chat's pane.
+    from copse import procs
+
+    procs.stop([a.id for a in tree(db, root_id)], grace=2.0)
     root = db.get_agent(root_id)
     root_ws = db.get_workspace(root.workspace_id) if root else None
     for session in sessions:
@@ -1033,8 +1038,14 @@ def close_later(agent_id: str, delay: float = 5.0) -> None:
 
 
 def _stop(db: DB, agent: Agent) -> None:
+    """Stop an agent: its window, and every process of its that outlives the
+    window (Claude Code's daemon can host the real session; see copse.procs)."""
+    from copse import procs
+
+    pane_pids = tmux.window_pids(agent.tmux_window) if agent.tmux_window else []
     if agent.tmux_window:
         tmux.kill_window(agent.tmux_window)
+    procs.stop([agent.id], {agent.id: pane_pids})
     db.end_native_subagents(agent.id)
 
 
@@ -1054,6 +1065,10 @@ def close(db: DB, agent_id: str, panes: dict[str, bool] | None = None) -> Agent:
     if is_alive(agent, panes):
         _stop(db, agent)
         db.set_status(agent.id, "done" if agent.result is not None else "paused")
+    else:
+        from copse import procs
+
+        procs.stop([agent.id])  # anything left running after its window went
     db.update_agent(agent.id, dismissed_at=time.time())
     return agent
 

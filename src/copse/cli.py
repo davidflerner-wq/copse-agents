@@ -166,6 +166,7 @@ def start(
     ws = _here_or_scratch(db, reuse_scratch=False)
     _pause_running(db, ws)
     sessions.enforce(db, ws.repo_root)
+    _cull_detached()
     if autopilot is None:
         autopilot = agent == "supervisor" and _run(load_repo_config, ws.repo_root).autopilot
     a = _run(agents.spawn, db, ws, agent, prompt=prompt, provider_name=provider,
@@ -175,6 +176,15 @@ def start(
         _say_autopilot(db, a.id)
     if attach:
         _attach(ws, a.tmux_window)
+
+
+def _cull_detached() -> None:
+    """Clean up leftover agent processes and stale workers without making
+    the person wait for it (see copse.cull)."""
+    from copse.providers import copse_invocation
+
+    subprocess.Popen([*copse_invocation(), "_cull"], start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def _say_autopilot(db: DB, root_id: str) -> None:
@@ -293,6 +303,10 @@ def prune() -> None:
         pass
     removed = sessions.prune_scratch(db)
     typer.echo(f"dropped {dropped} paused session(s), removed {removed} old scratch session(s)")
+    from copse import cull
+
+    for line in cull.sweep(db):
+        typer.echo(line)
 
 
 def _here_or_scratch(db: DB, reuse_scratch: bool) -> Workspace:
@@ -853,6 +867,13 @@ def sidebar_follow_cmd(session: str) -> None:
         agents.sidebar_follow(DB(), session)
     except Exception:
         pass
+
+
+@app.command("_cull", hidden=True)
+def cull_cmd() -> None:
+    from copse import cull
+
+    cull.sweep_quietly(DB())
 
 
 @app.command("_flush", hidden=True)

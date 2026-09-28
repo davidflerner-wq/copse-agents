@@ -19,6 +19,17 @@ from copse import agents, tmux, view
 from copse.db import DB
 
 REFRESH_SECONDS = 2.0
+# How often a running dashboard culls leftover processes and stale workers
+# (see copse.cull), on a thread of its own so the screen never waits on it.
+CULL_SECONDS = 60.0
+
+
+def _cull_in_background() -> None:
+    import threading
+
+    from copse import cull
+
+    threading.Thread(target=lambda: cull.sweep_quietly(DB()), daemon=True).start()
 
 # Styles are names, mapped to curses attributes (or ANSI for --once) later.
 STATUS_STYLE = {
@@ -404,7 +415,11 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
     stale = True
     armed: tuple[str, float] | None = None
     notice, notice_until = "", 0.0
+    culled_at = 0.0
     while True:
+        if time.time() - culled_at >= CULL_SECONDS:
+            culled_at = time.time()
+            _cull_in_background()
         h, w = stdscr.getmaxyx()
         if stale:
             panes = tmux.list_panes()

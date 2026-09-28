@@ -223,6 +223,16 @@ The last three are for autopilot and merge gates:
 | `check_timeout` | `900` | seconds each check may take |
 | `usage_limit` | `90` | autopilot stops pushing on at this % of your Claude usage limit |
 | `graphify` | if the graph is there | point agents at the repo's [graphify](https://github.com/safishamsi/graphify) code map (`false` turns it off) |
+| `stale_after` | `30` | minutes before a worker that reported and sat idle is closed (`0`: never) |
+
+**Closing and cleaning up.** Press `x` on an agent in the sidebar (twice for one
+that's still running) or run `copse close <id>` to stop it and hide it. Stopping means
+every process of the agent, not just its window: Claude Code can host a session in its
+background daemon, where it would otherwise keep running. copse also cleans up on its
+own, from the sidebar every minute and whenever `copse` starts: it stops anything left
+running for agents that are paused, closed or whose window is gone, and closes workers
+that reported and have been idle for `stale_after` minutes. Closing never touches a
+worktree or branch, so unmerged work stays reviewable and mergeable.
 
 **Spending fewer tokens.** Workers run only the tests that cover their change while
 they work. The full suite runs once: as the repo's `checks` before a branch merges,
