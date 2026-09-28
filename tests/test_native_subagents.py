@@ -7,7 +7,7 @@ from dataclasses import replace
 
 import pytest
 
-from copse import agents, view, watch
+from copse import agents, tmux, view, watch
 from copse.db import DB, Agent
 from copse.profiles import load_profile
 from copse.providers import ClaudeCode, LaunchContext
@@ -94,6 +94,35 @@ def test_start_prunes_old_ended_rows_for_the_same_parent(db, ws, monkeypatch):
     assert [s.id for s in db.native_subagents("a1")] == ["new"]
 
 
+def test_start_also_prunes_abandoned_still_running_rows(db, ws, monkeypatch):
+    fake_agent(db, ws)
+    db.start_native_subagent("crashed", "a1", "Explore")  # never got a SubagentStop
+    later = time.time() + 3 * 3600
+    monkeypatch.setattr(time, "time", lambda: later)
+    db.start_native_subagent("new", "a1", "Plan")
+    assert [s.id for s in db.native_subagents("a1")] == ["new"]
+
+
+def test_end_native_subagents_ends_every_running_row_for_a_parent(db, ws):
+    fake_agent(db, ws)
+    db.start_native_subagent("sub1", "a1", "Explore")
+    db.start_native_subagent("sub2", "a1", "Plan")
+    db.end_native_subagents("a1")
+    assert all(s.ended_at is not None for s in db.native_subagents("a1"))
+
+
+def test_all_native_subagents_stays_bounded(db, ws, monkeypatch):
+    # A stale still-running row and a long-ended row that haven't been
+    # pruned yet must not show up in the snapshot query itself.
+    fake_agent(db, ws)
+    db.start_native_subagent("stale", "a1", "Explore")
+    db.start_native_subagent("old_done", "a1", "Plan")
+    db.stop_native_subagent("old_done")
+    later = time.time() + 3 * 3600
+    monkeypatch.setattr(time, "time", lambda: later)
+    assert db.all_native_subagents() == {}
+
+
 # -- kept out of agents-table-backed views -------------------------------------
 
 
@@ -113,10 +142,50 @@ def test_native_subagents_are_invisible_to_autopilot_worker_counts(db, ws):
     assert autopilot.active_workers(db, "boss") == []
 
 
+# -- a stopped parent never shows a subagent as still running -----------------
+
+
+def test_pausing_the_parent_ends_its_running_subagents(db, ws, monkeypatch):
+    monkeypatch.setattr(tmux, "kill_window", lambda w: None)
+    monkeypatch.setattr(tmux, "kill_session", lambda s: None)
+    monkeypatch.setattr(tmux, "windows", lambda s: [])
+    fake_agent(db, ws, agent_id="boss", mode="interactive", status="processing")
+    agents.handle_hook(db, "boss", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
+
+    agents.pause(db, "boss")
+    assert db.get_agent("boss").status == "paused"
+    [row] = db.native_subagents("boss")
+    assert row.ended_at is not None
+
+    [snap_ws] = view.snapshot(db, ws.repo_root)
+    [entry] = [a for a in snap_ws["agents"] if a["id"] == "boss"]
+    assert all(s["ended_at"] is not None for s in entry["subagents"])
+
+
+def test_killing_the_parent_ends_its_running_subagents(db, ws, monkeypatch):
+    monkeypatch.setattr(tmux, "kill_window", lambda w: None)
+    fake_agent(db, ws, agent_id="boss", mode="assign")
+    agents.handle_hook(db, "boss", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
+    agents.kill(db, "boss")
+    assert db.get_agent("boss") is None  # cascaded away with the parent
+
+
+def test_agent_entry_drops_running_subs_once_the_parent_is_not_running(db, ws):
+    # A parent's process can exit without ever going through agents.pause/kill
+    # (e.g. the person closed its terminal), so the view itself must not show
+    # a subagent as running once the parent's computed status says otherwise.
+    fake_agent(db, ws, agent_id="w1", mode="assign", status="processing")
+    agents.handle_hook(db, "w1", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
+    entry = view.agent_entry(db, db.get_agent("w1"), detail=True)
+    assert entry["status"] in view._PARENT_NOT_RUNNING  # no real tmux window: it reads as "exited"
+    assert entry["subagents"] == []
+
+
 # -- sidebar: snapshot and render ---------------------------------------------
 
 
-def test_snapshot_nests_running_and_recently_done_subagents_under_the_parent(db, ws):
+def test_snapshot_nests_running_and_recently_done_subagents_under_the_parent(db, ws, monkeypatch):
+    monkeypatch.setattr(agents, "is_alive", lambda a: True)  # boss is actually running
     fake_agent(db, ws, agent_id="boss", mode="interactive", status="processing")
     agents.handle_hook(db, "boss", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
     agents.handle_hook(db, "boss", "subagent-start", {"agent_id": "sub2", "agent_type": "Plan"})

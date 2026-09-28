@@ -385,6 +385,8 @@ def pause(db: DB, root_id: str) -> list[Agent]:
             sessions.add(ws.tmux_session)
         if a.tmux_window:
             windows.append(a.tmux_window)
+        # Its own SubagentStop hooks will never fire once its process stops.
+        db.end_native_subagents(a.id)
         if a.mode != "interactive" and a.result is not None:
             db.set_status(a.id, "done")
         else:
@@ -679,6 +681,7 @@ def kill(db: DB, agent_id: str) -> None:
     agent = get(db, agent_id)
     if agent.tmux_window:
         tmux.kill_window(agent.tmux_window)
+    db.end_native_subagents(agent.id)
     db.delete_agent(agent.id)
 
 

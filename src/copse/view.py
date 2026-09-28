@@ -7,14 +7,18 @@ import os
 import time
 
 from copse import agents, git
-from copse.db import DB, Agent, NativeSubagent, Workspace
+from copse.db import DB, NATIVE_SUBAGENT_STALE, Agent, NativeSubagent, Workspace
 
-# A crash can skip SubagentStop, so a subagent still "running" this long is
-# treated as stale and hidden rather than shown forever.
-NATIVE_SUBAGENT_STALE = 2 * 3600
-# A subagent that ended stays visible (showing "done") for a bit so it
-# doesn't just vanish from the sidebar the instant it finishes.
+# How long a *finished* native subagent still shows "done" in the sidebar
+# before disappearing entirely. Display-only, so it lives here rather than
+# with NATIVE_SUBAGENT_STALE/_PRUNE_AFTER in db.py, which govern the table
+# itself (when a "running" row counts as crashed, and when rows are dropped).
 NATIVE_SUBAGENT_LINGER = 30
+# Parent states where a subagent can never really be "running" any more:
+# a paused or killed parent's own SubagentStop hooks never fire, and
+# end_native_subagents (called from agents.pause/kill) may not have caught
+# up yet, so this is a display-side backstop.
+_PARENT_NOT_RUNNING = ("paused", "exited", "done")
 
 
 def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False,
@@ -72,6 +76,9 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
              "status": status, "mode": a.mode}
     if detail:
         subs = db.native_subagents(a.id) if native_subagents is None else native_subagents
+        visible = _visible_native_subagents(subs, now if now is not None else time.time())
+        if status in _PARENT_NOT_RUNNING:
+            visible = [s for s in visible if s["ended_at"] is not None]
         entry.update(
             parent_id=a.parent_id,
             status_since=a.status_since,
@@ -79,7 +86,7 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
             reported=a.result is not None,
             window=a.tmux_window,
             headless=bool(a.headless),
-            subagents=_visible_native_subagents(subs, now if now is not None else time.time()),
+            subagents=visible,
         )
     return entry
 
