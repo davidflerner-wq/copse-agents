@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
+import threading
 import time
 
 import pytest
@@ -178,6 +180,40 @@ def test_trust_leaves_a_missing_or_broken_config_alone(tmp_path, monkeypatch):
     (tmp_path / ".claude.json").write_text("{not json")
     assert trust_folder(str(tmp_path)) is False
     assert (tmp_path / ".claude.json").read_text() == "{not json"
+
+
+def test_trust_keeps_the_config_private(tmp_path, claude_config):
+    config = claude_config / ".claude.json"
+    config.chmod(0o600)
+    assert trust_folder(str(tmp_path)) is True
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+
+
+def test_trust_cleans_up_its_temp_file_when_the_write_fails(tmp_path, claude_config, monkeypatch):
+    config = claude_config / ".claude.json"
+    before = config.read_text()
+
+    def fail(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", fail)
+    assert trust_folder(str(tmp_path)) is False
+    assert config.read_text() == before
+    assert sorted(p.name for p in claude_config.iterdir()) == [".claude.json"]
+
+
+def test_concurrent_trusts_all_land(tmp_path, claude_config):
+    folders = [tmp_path / f"wt{i}" for i in range(8)]
+    for f in folders:
+        f.mkdir()
+    threads = [threading.Thread(target=trust_folder, args=(str(f),)) for f in folders]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    projects = json.loads((claude_config / ".claude.json").read_text())["projects"]
+    assert all(projects[os.path.realpath(f)]["hasTrustDialogAccepted"] is True for f in folders)
+    assert sorted(p.name for p in claude_config.iterdir()) == [".claude.json"]
 
 
 def test_trust_is_idempotent(tmp_path, claude_config):
