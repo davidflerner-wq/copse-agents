@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import time
 
-from copse import agents, git
+from copse import agents, git, status_cache, tmux
 from copse.db import DB, NATIVE_SUBAGENT_STALE, Agent, NativeSubagent, Workspace
 
 # How long a *finished* native subagent still shows "done" in the sidebar
@@ -23,11 +23,12 @@ _PARENT_NOT_RUNNING = ("paused", "exited", "done")
 
 def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False,
                     native_subagents: dict[str, list[NativeSubagent]] | None = None,
-                    now: float | None = None) -> dict:
+                    now: float | None = None,
+                    panes: dict[str, bool] | None = None) -> dict:
     ahead = behind = dirty = None
     if ws.base_branch and os.path.isdir(ws.path):
         try:
-            st = git.status(ws.path, ws.base_branch)
+            st = status_cache.cached_status(ws.path, ws.base_branch, now=now)
             ahead, behind, dirty = st.ahead, st.behind, len(st.dirty_files)
         except git.GitError:
             pass
@@ -43,7 +44,7 @@ def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False,
         "agents": [
             agent_entry(db, a, detail=detail,
                        native_subagents=None if native_subagents is None else native_subagents.get(a.id, []),
-                       now=now)
+                       now=now, panes=panes)
             for a in db.list_agents(ws.id)
         ],
     }
@@ -64,10 +65,11 @@ def _visible_native_subagents(subs: list[NativeSubagent], now: float) -> list[di
 
 def agent_entry(db: DB, a: Agent, *, detail: bool = False,
                 native_subagents: list[NativeSubagent] | None = None,
-                now: float | None = None) -> dict:
+                now: float | None = None,
+                panes: dict[str, bool] | None = None) -> dict:
     if not agents.runs_process(a):
         status = a.status  # a supervisor's own subagent: no terminal to check
-    elif agents.is_alive(a):
+    elif agents.is_alive(a, panes):
         a = agents.reconcile(db, a, samples=1)
         status = a.status
     else:
@@ -94,7 +96,8 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
 def snapshot(db: DB, repo_root: str | None) -> list[dict]:
     now = time.time()
     by_parent = db.all_native_subagents()
-    return [workspace_entry(db, ws, detail=True, native_subagents=by_parent, now=now)
+    panes = tmux.list_panes()
+    return [workspace_entry(db, ws, detail=True, native_subagents=by_parent, now=now, panes=panes)
             for ws in db.find_workspaces(repo_root)]
 
 

@@ -140,6 +140,21 @@ def window_alive(target: str) -> bool:
     return proc.returncode == 0 and proc.stdout.strip() == "0"
 
 
+def list_panes() -> dict[str, bool]:
+    """Every pane's liveness across every session on this server, in one
+    call, keyed by pane id. A snapshot with several agents can share this
+    instead of one ``display-message`` per agent. Empty (not an error) when
+    there is no server running yet."""
+    proc = _tmux("list-panes", "-a", "-F", "#{pane_id} #{pane_dead}", check=False)
+    if proc.returncode != 0:
+        return {}
+    result = {}
+    for line in proc.stdout.splitlines():
+        pane_id, _, dead = line.partition(" ")
+        result[pane_id] = dead.strip() == "0"
+    return result
+
+
 def kill_window(target: str) -> None:
     _tmux("kill-window", "-t", target, check=False)
 
