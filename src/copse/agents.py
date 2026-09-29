@@ -18,13 +18,14 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 
 from copse import git, tmux, workspaces
 from copse.config import RepoConfig
 from copse.db import DB, Agent, Workspace
-from copse.profiles import load_profile
+from copse.profiles import load_profile, missing_add_dirs
 from copse.providers import LaunchContext, get_provider
 
 log = logging.getLogger(__name__)
@@ -203,6 +204,10 @@ def spawn(
     # Headless is a Claude Code mode; other CLIs ignore the profile field.
     # copse's own loop (native) has no TUI at all, so it always runs that way.
     headless = bool(profile.headless and provider.name == "claude") or provider.name == "native"
+    missing = missing_add_dirs(profile) if provider.name == "claude" else []
+    if missing:
+        print(f"copse: add_dirs names {', '.join(missing)}, which do not exist; "
+              "Claude Code will ignore them", file=sys.stderr)
 
     # Stored as the agent's task: the raw text for a handoff/assign worker (so
     # a reviewer reading it later isn't given WORKER_FOOTER or the /goal
