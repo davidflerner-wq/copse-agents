@@ -415,7 +415,11 @@ common test/build commands: `pytest`, `uv run`, `npm/pnpm/yarn test|run`,
 `cargo`, `go`, `make`, `swift`, `xcodebuild`. It can't push or run arbitrary
 commands. Note that `npm run`, `make`, and `uv run` execute whatever the repo
 defines, so only point workers at repos you trust. Override the list in
-`.copse/agents/developer.md`.
+`.copse/agents/developer.md`. One thing Claude Code's rule matching does not
+say up front: a `Write(path)` allow rule is not consulted by file permission
+checks, only `Edit(path)` rules are, and an `Edit` rule covers every file-editing
+tool. So write `Edit(docs/**)`, not `Write(docs/**)`, to let a worker create and
+change files under a directory without prompts.
 
 ### Cheap workers
 
