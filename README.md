@@ -307,6 +307,7 @@ Autopilot, merge gates and cleanup:
 | `review_rounds` | `2` | fix-and-re-review rounds the pipeline runs before handing findings to the supervisor |
 | `overlap` | `"block"` | a task whose `files` overlap a running task's is refused (`"warn"` starts it with a warning) |
 | `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
+| `add_dirs` | `[]` | directories outside the worktree that Claude Code agents may use (`--add-dir`; full tool access, see "Directories outside the workspace") |
 
 **Closing and cleaning up.** Press `x` on an agent in the sidebar (twice for one
 that's still running) or run `copse close <id>` to stop it and hide it. Stopping means
@@ -429,7 +430,6 @@ Code only, all off by default) trim it:
 | `setting_sources: project,local` | `--setting-sources` | Skips your user settings (`~/.claude`: plugins, hooks, `CLAUDE.md`). copse's own hooks come through `--settings`, which is always applied. |
 | `effort: low` | `--effort` | `low`, `medium`, `high`, `xhigh` or `max`. |
 | `headless: true` | `claude -p` | No interactive TUI; each turn is one `claude -p` run (see below). |
-
 
 ```markdown
 ---
