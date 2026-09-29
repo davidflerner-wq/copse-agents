@@ -147,7 +147,11 @@ or put the goal in `.copse/goals.md`, and it works like a project manager:
 
 1. **Goal and milestones.** The goal is split into milestones, and each one has
    a check command that copse runs itself. A milestone is done only when its
-   check exits 0, so progress is verified, not just claimed.
+   check exits 0, so progress is verified, not just claimed. A milestone may also name a
+   `profile`: the worker profile to use for its tasks, so a small milestone can
+   run on a cheaper profile. `assign` and `handoff` called without an
+   `agent_profile` use the first unverified milestone's profile, else the repo's
+   `default_agent`.
 2. **Workers in parallel.** The supervisor splits each milestone into tasks
    and starts workers on their own branches, up to `max_agents` at once.
    Claude workers run the task as a Claude Code `/goal` with a finish line, so
@@ -190,6 +194,7 @@ check: uv run pytest tests/test_settings_api.py -q
 
 ## Settings UI
 check: npm test -- settings
+profile: developer-cheap
 ```
 
 `copse autopilot` shows progress, `copse autopilot check` runs the checks

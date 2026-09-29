@@ -8,3 +8,4 @@ graphify-out/
 .copse/agents/
 # private, kept local for now
 docs/
+.copse/config.local.json
