@@ -6,3 +6,5 @@ graphify-out/
 # copse local state that is not part of the repo
 .copse/*.log
 .copse/agents/
+# private, kept local for now
+docs/
