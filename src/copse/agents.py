@@ -692,7 +692,8 @@ def tree(db: DB, root_id: str) -> list[Agent]:
     return out
 
 
-def pause(db: DB, root_id: str, *, stop_procs: bool = True) -> list[Agent]:
+def pause(db: DB, root_id: str, *, stop_procs: bool = True,
+          stop_local_models: bool = True) -> list[Agent]:
     """Stop a supervisor and everything it started, keeping their work.
 
     Worktrees, branches, queued messages and each CLI's own session stay; the
@@ -700,7 +701,10 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True) -> list[Agent]:
     that already reported are left marked done. Returns the agents paused.
     Without ``stop_procs``, processes Claude Code's daemon hosts are left for
     a detached cull (see copse.cull), which stops those of paused agents,
-    rather than waiting here for them to exit.
+    rather than waiting here for them to exit. The Ollama server copse
+    started is stopped too once no other running session uses it (see
+    copse.native.serve.stop_unused); ``stop_local_models=False`` when
+    another session is about to start and would only start it again.
 
     Records every status first and closes windows last: this can run inside
     one of the windows it closes (see _pause_when_done)."""
@@ -753,7 +757,21 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True) -> list[Agent]:
         # nothing but the idle starter shell.
         if (root_ws and session == root_ws.tmux_session) or set(tmux.windows(session)) <= {"shell"}:
             tmux.kill_session(session)
+    if stop_local_models:
+        _stop_local_models(db)
     return paused
+
+
+def _stop_local_models(db: DB) -> None:
+    from copse.native import serve
+
+    try:
+        lines = serve.stop_unused(db)
+        if lines:
+            with open(serve.log_path(), "a", encoding="utf-8") as f:
+                f.writelines(f"== copse: {line}\n" for line in lines)
+    except Exception:  # noqa: BLE001 -- freeing memory must never break a pause
+        pass
 
 
 def latest_paused(db: DB, ws: Workspace) -> Agent | None:

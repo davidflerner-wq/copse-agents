@@ -39,6 +39,8 @@ def fake_ollama(monkeypatch):
         return (True, f"reachable; {endpoint.model} is available") if state["up"] else (False, "not reachable")
 
     class FakePopen:
+        pid = 4242
+
         def __init__(self, argv, env=None, **kw):
             state["popen"].append((argv, env))
             state["up"] = True  # the server comes up as soon as it's started
@@ -117,3 +119,137 @@ def test_repo_config_reads_local_models(repo):
     assert load_repo_config(str(repo)).local_models is False
     (repo / ".copse" / "config.json").write_text("{}")
     assert load_repo_config(str(repo)).local_models is True
+
+
+# -- Stopping the server copse started once no session uses it.
+
+SERVE = "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)"
+
+
+@pytest.fixture
+def fake_serve():
+    """A process whose command line reads like `ollama serve`, leading its own
+    process group with a child standing in for the model runner."""
+    import os
+    import signal
+    import subprocess
+    import sys
+
+    started = []
+
+    def launch():
+        p = subprocess.Popen([sys.executable, "-c", SERVE, "ollama", "serve"], start_new_session=True)
+        started.append(p)
+        return p
+
+    yield launch
+    for p in started:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _group_gone(pgid: int, timeout: float = 5.0) -> bool:
+    import subprocess
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        out = subprocess.run(["ps", "-A", "-o", "pgid=,stat="], capture_output=True, text=True).stdout
+        if not any(line.split()[0] == str(pgid) and not line.split()[1].startswith("Z")
+                   for line in out.splitlines() if line.strip()):
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_ensure_records_the_server_it_starts(repo, fake_ollama):
+    serve.ensure(str(repo), RepoConfig(), log=repo / "ollama.log")
+    assert serve.started_servers() == {"http://localhost:11434": 4242}
+
+
+def test_stop_unused_stops_the_server_and_its_runner_when_no_session_uses_it(db, monkeypatch, fake_serve):
+    p = fake_serve()
+    serve.record_started("http://localhost:11434", p.pid)
+    monkeypatch.setattr(serve, "hosts_in_use", lambda db: set())
+    lines = serve.stop_unused(db, grace=2.0)
+    assert len(lines) == 1 and f"pid {p.pid}" in lines[0]
+    p.wait(timeout=5)
+    assert _group_gone(p.pid)
+    assert serve.started_servers() == {}
+    assert not serve.pids_path().exists()
+
+
+def test_stop_unused_keeps_a_server_a_running_session_uses(db, monkeypatch, fake_serve):
+    p = fake_serve()
+    serve.record_started("http://localhost:11434", p.pid)
+    monkeypatch.setattr(serve, "hosts_in_use", lambda db: {"http://localhost:11434"})
+    assert serve.stop_unused(db) == []
+    assert p.poll() is None
+    assert serve.started_servers() == {"http://localhost:11434": p.pid}
+
+
+def test_stop_unused_forgets_a_pid_that_is_no_longer_ollama(db, monkeypatch):
+    import os
+
+    serve.record_started("http://localhost:11434", os.getpid())  # this test run, not ollama
+    monkeypatch.setattr(serve, "hosts_in_use", lambda db: set())
+    assert serve.stop_unused(db) == []
+    assert serve.started_servers() == {}
+
+
+def test_a_server_copse_did_not_start_is_never_stopped(db, monkeypatch):
+    monkeypatch.setattr(serve, "hosts_in_use", lambda db: set())
+    killed = []
+    monkeypatch.setattr(serve, "_stop_group", lambda pid, grace: killed.append(pid))
+    assert serve.stop_unused(db) == []
+    assert killed == []
+
+
+def _root_ws(db, repo):
+    import time
+
+    from copse.db import Workspace
+
+    ws = Workspace("ws000001", str(repo), "proj", "root", "main", None, str(repo), None,
+                   "copse-test-proj", time.time())
+    db.add_workspace(ws)
+    return ws
+
+
+def test_hosts_in_use_counts_only_live_or_just_started_session_roots(db, repo, monkeypatch):
+    import time
+
+    from copse.db import Agent
+
+    ws = _root_ws(db, repo)
+    old = time.time() - 3600
+
+    def root(agent_id, status, created):
+        db.add_agent(Agent(agent_id, ws.id, "supervisor", "claude", None, "interactive",
+                           status, "", None, created))
+
+    root("paused01", "paused", old)
+    root("gone0001", "idle", old)          # its window is gone
+    assert serve.hosts_in_use(db) == set()
+    root("fresh001", "idle", time.time())  # its window isn't recorded yet
+    assert serve.hosts_in_use(db) == {"http://localhost:11434"}
+
+
+def test_pausing_the_last_session_stops_the_server(db, repo, monkeypatch):
+    import time
+
+    from copse import agents
+    from copse.db import Agent
+
+    ws = _root_ws(db, repo)
+    db.add_agent(Agent("root0001", ws.id, "supervisor", "claude", None, "interactive",
+                       "idle", "", None, time.time() - 3600))
+    calls = []
+    monkeypatch.setattr(serve, "stop_unused", lambda db: calls.append(db) or [])
+    agents.pause(db, "root0001", stop_procs=False)
+    assert len(calls) == 1
+    db.set_status("root0001", "idle")
+    agents.pause(db, "root0001", stop_procs=False, stop_local_models=False)
+    assert len(calls) == 1

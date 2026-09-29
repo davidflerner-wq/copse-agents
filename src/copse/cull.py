@@ -17,6 +17,9 @@ A sweep, run by the sidebar every minute, when ``copse`` starts, and by
    whose window has been gone that long. Closing never touches its worktree
    or branch, so its supervisor can still review and merge the work.
 
+It also stops the Ollama server copse started once no running session uses
+it (see copse.native.serve.stop_unused).
+
 Interactive agents (supervisor chats) are never closed here; only their
 leftover processes are stopped.
 """
@@ -112,6 +115,12 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     removed = clean_locks(db, now)
     if removed:
         done.append(f"removed {removed} stale sidebar lock(s)")
+
+    # 5. The Ollama server copse started, once no running session uses it
+    # (a chat whose tmux went away never paused, so nothing else stops it).
+    from copse.native import serve
+
+    done.extend(serve.stop_unused(db))
     return done
 
 

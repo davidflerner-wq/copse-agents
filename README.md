@@ -583,6 +583,11 @@ loopback address is started; a remote endpoint is yours to run. `"local_models":
 false` in `.copse/config.json` turns this off, and a server you started yourself
 (with whatever settings) is left alone.
 
+A server copse started is stopped again, along with the model it holds in memory,
+when the last copse session that uses it ends: its chat is closed or paused, or
+its tmux goes away (the next cleanup sweep catches that). Starting a new session
+in the same checkout keeps it running for the new one.
+
 Then a supervisor can `assign` a task to `developer-local`, or the repo config
 can make the free model the reviewer: `"review_profile": "reviewer-local"`.
 Other endpoints, same fields:

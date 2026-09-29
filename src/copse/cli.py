@@ -232,7 +232,8 @@ def _pause_running(db: DB, ws: Workspace, stop_procs: bool = True) -> None:
     ``stop_procs=False`` when a detached cull follows (see agents.pause)."""
     for a in db.list_agents(ws.id):
         if a.mode == "interactive" and a.status not in ("paused", "done") and agents.is_alive(a):
-            agents.pause(db, a.id, stop_procs=stop_procs)
+            # A session starts here next: keep its local models loaded.
+            agents.pause(db, a.id, stop_procs=stop_procs, stop_local_models=False)
             typer.echo(f"Paused the session that was still running here ({a.id}); "
                        f"`copse continue {a.id}` brings it back.")
 

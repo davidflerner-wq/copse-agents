@@ -13,6 +13,11 @@ Only Ollama on a loopback address is started. A remote host, another
 server's port, or a machine without ``ollama`` on PATH is left alone: those
 are someone else's to run. ``"local_models": false`` in the repo config turns
 all of this off.
+
+A server copse started is copse's to stop: its pid is recorded, and once no
+running copse session uses it (the last chat closed or paused), it is stopped
+along with the model it holds in memory. A server that was already running
+when copse looked (the Ollama app, or one you started) is never stopped.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 import urllib.error
@@ -33,10 +39,12 @@ from copse.native.client import Endpoint
 from copse.profiles import Profile, list_profiles
 
 LOG_NAME = "ollama.log"
+PIDS_NAME = "ollama-pids.json"  # host -> pid of each `ollama serve` copse started
 KEEP_ALIVE = "30m"          # how long a warmed model stays in memory unused
 CONTEXT_HEADROOM = 8192     # what doctor adds over context_tokens for the reply
 START_TIMEOUT = 20.0        # seconds to wait for a fresh server to answer
 WARM_TIMEOUT = 300.0        # a large model can take minutes to load
+START_GRACE = 60.0          # a chat this new may not have its window recorded yet
 
 
 @dataclass
@@ -55,6 +63,34 @@ class Server:
 
 def log_path() -> Path:
     return copse_home() / LOG_NAME
+
+
+def pids_path() -> Path:
+    return copse_home() / PIDS_NAME
+
+
+def started_servers() -> dict[str, int]:
+    """The ``ollama serve`` processes copse started, by host."""
+    try:
+        data = json.loads(pids_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    return {h: p for h, p in data.items() if isinstance(p, int)} if isinstance(data, dict) else {}
+
+
+def _save_started(started: dict[str, int]) -> None:
+    path = pids_path()
+    if not started:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(started))
+
+
+def record_started(host: str, pid: int) -> None:
+    started = started_servers()
+    started[host] = pid
+    _save_started(started)
 
 
 def is_local(base_url: str) -> bool:
@@ -123,11 +159,13 @@ def start_ollama(server: Server, log: Path | None = None) -> subprocess.Popen:
     out.write(f"\n== copse: starting ollama serve for {', '.join(server.profiles)} "
               f"at {time.strftime('%Y-%m-%d %H:%M:%S')}\n".encode())
     out.flush()
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         ["ollama", "serve"], env=ollama_env(server),
         stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
         start_new_session=True,
     )
+    record_started(server.host, proc.pid)
+    return proc
 
 
 def wait_reachable(server: Server, timeout: float = START_TIMEOUT, step: float = 0.5) -> bool:
@@ -185,4 +223,77 @@ def ensure(repo_root: str | None, cfg: RepoConfig, *, log: Path | None = None) -
                 lines.append(f"{server.host}: {model} loaded (kept for {KEEP_ALIVE})")
             else:
                 lines.append(f"{server.host}: couldn't load {model}; is it pulled? `ollama pull {model}`")
+    return lines
+
+
+def _is_ollama_serve(pid: int) -> bool:
+    """Whether ``pid`` is still an ``ollama serve`` (not a reused pid)."""
+    try:
+        out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "ollama" in out and "serve" in out
+
+
+def _stop_group(pid: int, grace: float) -> None:
+    """SIGTERM the server's process group (it leads one: started with
+    ``start_new_session``, and its model runners share it), then SIGKILL
+    whatever is left after ``grace`` seconds."""
+    from copse import procs
+
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    deadline = time.monotonic() + grace
+    while time.monotonic() < deadline and procs.alive(pid):
+        time.sleep(0.1)
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def hosts_in_use(db) -> set[str]:
+    """The local hosts some running copse session's native profiles use: a
+    session root (a chat) that isn't paused or done and whose window is
+    alive, or that was started too recently to have one yet."""
+    from copse import agents, tmux
+
+    panes = tmux.list_panes()
+    now = time.time()
+    repos: set[str] = set()
+    for a in db.list_agents():
+        if a.mode != "interactive" or a.parent_id or a.status in ("paused", "done"):
+            continue
+        if agents.is_alive(a, panes) or now - a.created_at < START_GRACE:
+            ws = db.get_workspace(a.workspace_id)
+            if ws:
+                repos.add(ws.repo_root)
+    hosts: set[str] = set()
+    for repo in repos:
+        try:
+            hosts.update(s.host for s in local_servers(repo))
+        except (OSError, ValueError):
+            continue
+    return hosts
+
+
+def stop_unused(db, grace: float = 5.0) -> list[str]:
+    """Stop each ``ollama serve`` copse started that no running session uses,
+    freeing the model it holds. Returns one line per server stopped."""
+    started = started_servers()
+    if not started:
+        return []
+    in_use = hosts_in_use(db)
+    lines = []
+    for host, pid in list(started.items()):
+        if host in in_use:
+            continue
+        del started[host]
+        if _is_ollama_serve(pid):
+            _stop_group(pid, grace)
+            lines.append(f"stopped ollama serve at {host} (pid {pid}): no copse session uses it")
+    _save_started(started)
     return lines
