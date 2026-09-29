@@ -68,6 +68,9 @@ class RepoConfig:
     # already fast). 0 disables the pool.
     pool_size: int | None = None
     add_dirs: list[str] = field(default_factory=list)
+    # Start Ollama in the background when a native profile points at it on
+    # this machine and it isn't running (see copse.native.serve).
+    local_models: bool = True
 
 
 def _merge_commands(shared: list[str], local: object) -> list[str]:
@@ -102,7 +105,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
     for key in ("base_branch", "branch_prefix", "default_agent", "fetch", "autopilot", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "usage_limit", "pool_size", "graphify", "stale_after", "pipeline",
-                "review_rounds", "overlap"):
+                "review_rounds", "overlap", "local_models"):
         if key in local:
             setattr(cfg, key, local[key])
         elif key in shared:

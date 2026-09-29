@@ -177,10 +177,31 @@ def start(
     # which a freshly started tmux server hands out again from %0.
     _cull_detached(ws.repo_root)
     typer.echo(f"✓ {a.profile} agent {a.id} in {ws.id} ({ws.branch})")
+    _local_models_detached(ws.repo_root)
     if autopilot:
         _say_autopilot(db, a.id)
     if attach:
         _attach(ws, a.tmux_window)
+
+
+def _local_models_detached(repo_root: str) -> None:
+    """Start the local model server the native profiles need, if it isn't
+    running, without making the person wait (see copse.native.serve). Says so
+    on one line when there's something to start."""
+    from copse.config import load_repo_config
+    from copse.native import serve
+    from copse.providers import copse_invocation
+
+    try:
+        pending = serve.needed(repo_root, load_repo_config(repo_root))
+    except Exception:  # noqa: BLE001 -- a convenience; never block the start
+        return
+    if not pending:
+        return
+    who = ", ".join(sorted({n for s in pending for n in s.profiles}))
+    typer.echo(f"  local models: starting ollama in the background for {who} (log: {serve.log_path()})")
+    subprocess.Popen([*copse_invocation(), "_local-models", "--repo", repo_root], start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def _cull_detached(repo_root: str | None = None) -> None:
@@ -269,6 +290,7 @@ def continue_cmd(
     _pause_running(db, ws)
     resumed = _run(agents.resume, db, chosen.root.id)
     typer.secho(f"↺ continuing {_describe(chosen)} ({len(resumed)} agent(s) restarted)", fg="green")
+    _local_models_detached(ws.repo_root)
     if others:
         typer.echo("Other paused sessions (copse continue <id>):")
         for s in others:
@@ -934,6 +956,23 @@ def sidebar_follow_cmd(session: str) -> None:
     try:
         agents.sidebar_follow(DB(), session)
     except Exception:
+        pass
+
+
+@app.command("_local-models", hidden=True)
+def local_models_cmd(repo: Optional[str] = typer.Option(None, "--repo")) -> None:
+    """Start Ollama for the native profiles and load their models (detached
+    from `copse`; what happened goes to ~/.copse/ollama.log)."""
+    from copse.config import RepoConfig, load_repo_config
+    from copse.native import serve
+
+    try:
+        cfg = load_repo_config(repo) if repo else RepoConfig()
+        lines = serve.ensure(repo, cfg)
+        with open(serve.log_path(), "a", encoding="utf-8") as f:
+            for line in lines:
+                f.write(f"== copse: {line}\n")
+    except Exception:  # noqa: BLE001 -- detached: nobody to report to
         pass
 
 

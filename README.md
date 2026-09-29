@@ -313,6 +313,7 @@ Autopilot, merge gates and cleanup:
 | `overlap` | `"block"` | a task whose `files` overlap a running task's is refused (`"warn"` starts it with a warning) |
 | `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
 | `add_dirs` | `[]` | directories outside the worktree that Claude Code agents may use (`--add-dir`; full tool access, see "Directories outside the workspace") |
+| `local_models` | `true` | when a native profile points at Ollama on this machine and it isn't running, `copse` starts `ollama serve` in the background (with the context length the profiles need) and loads their models; `false` leaves it to you |
 
 **Closing and cleaning up.** Press `x` on an agent in the sidebar (twice for one
 that's still running) or run `copse close <id>` to stop it and hide it. Stopping means
@@ -568,10 +569,19 @@ Ollama with `qwen3-coder:30b` (19 GB; runs on a 32 GB machine). To use them:
 
 ```
 brew install ollama            # or https://ollama.com/download
-OLLAMA_CONTEXT_LENGTH=40960 ollama serve
 ollama pull qwen3-coder:30b
 copse doctor                   # "model qwen3-coder:30b ... is available"
 ```
+
+You don't need to run `ollama serve` yourself. When `copse` (or `copse continue`)
+starts and a native profile points at Ollama on this machine that isn't answering,
+copse starts it in the background with `OLLAMA_CONTEXT_LENGTH` set to the largest
+`context_tokens` any profile asks of it plus room for the reply (40960 for the
+built-ins), then loads each profile's model so the first task doesn't wait on the
+read from disk. Its output goes to `~/.copse/ollama.log`. Only Ollama on a
+loopback address is started; a remote endpoint is yours to run. `"local_models":
+false` in `.copse/config.json` turns this off, and a server you started yourself
+(with whatever settings) is left alone.
 
 Then a supervisor can `assign` a task to `developer-local`, or the repo config
 can make the free model the reviewer: `"review_profile": "reviewer-local"`.
