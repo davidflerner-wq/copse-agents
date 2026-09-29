@@ -26,16 +26,19 @@ def test_frontmatter_values_drop_trailing_comments():
 def test_lightweight_fields_parse_and_default_off():
     p = _parse(
         "---\nname: x\nstrict_mcp: true\nsetting_sources: project, local # skip user\n"
-        "headless: yes\nallowed_tools: [Edit, Bash(git commit:*)]\n---\n",
+        "headless: yes\nadd_dirs: /a, /b # shared cache\n"
+        "allowed_tools: [Edit, Bash(git commit:*)]\n---\n",
         "x",
     )
     assert p.strict_mcp is True and p.headless is True
     assert p.setting_sources == ["project", "local"]
+    assert p.add_dirs == ["/a", "/b"]
     assert p.allowed_tools == ["Edit", "Bash(git commit:*)"]
 
     plain = _parse("---\nname: y\nstrict_mcp: false\n---\n", "y")
     assert plain.strict_mcp is False and plain.headless is False
     assert plain.setting_sources is None and plain.effort is None
+    assert plain.add_dirs is None
 
 
 def test_builtin_profiles_keep_their_defaults():
@@ -45,4 +48,35 @@ def test_builtin_profiles_keep_their_defaults():
         if p.provider == "claude" and p.name != "reviewer":
             assert not p.strict_mcp and not p.headless
             assert p.setting_sources is None and p.effort is None
+            assert p.add_dirs is None
     assert load_profile("developer").permission_mode == "auto"
+
+
+def test_repo_add_dirs_apply_to_every_profile_and_a_profile_adds_to_them(tmp_path, capsys):
+    """The repo config is the primary home; a profile adds to it and never removes.
+
+    Relative entries resolve against the repo root, not the worktree the process
+    happens to be in, and a directory that is not there is reported rather than
+    dropped in silence, which is what Claude Code does with it.
+    """
+    from copse.profiles import load_profile
+
+    repo = tmp_path / "proj"
+    (repo / ".copse" / "agents").mkdir(parents=True)
+    (repo / "cache").mkdir()
+    (repo / "refs").mkdir()
+    (repo / ".copse" / "config.json").write_text('{"add_dirs": ["cache", "/opt/shared"]}')
+    (repo / ".copse" / "agents" / "worker.md").write_text(
+        "---\nname: worker\ndescription: d\nprovider: claude\nadd_dirs: refs\n---\nbody\n"
+    )
+
+    p = load_profile("worker", str(repo))
+    assert p.add_dirs == [str(repo / "cache"), "/opt/shared", str(repo / "refs")]
+    assert "/opt/shared" in capsys.readouterr().err
+
+    # A profile with none of its own still gets the repo's, and so does a built-in.
+    (repo / ".copse" / "agents" / "plain.md").write_text(
+        "---\nname: plain\ndescription: d\nprovider: claude\n---\nbody\n"
+    )
+    assert load_profile("plain", str(repo)).add_dirs[0] == str(repo / "cache")
+    assert load_profile("developer", str(repo)).add_dirs[0] == str(repo / "cache")

@@ -505,9 +505,18 @@ def test_chat_exit_closes_its_session_even_with_extra_windows(db, ws):
 
 def test_claude_command_defaults_are_unchanged():
     argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "do the thing"))
-    for flag in ("-p", "--strict-mcp-config", "--setting-sources", "--effort"):
+    for flag in ("-p", "--strict-mcp-config", "--setting-sources", "--effort", "--add-dir"):
         assert flag not in argv
     assert argv[:2] == ["claude", "--settings"]
+
+
+def test_claude_command_passes_one_add_dir_per_directory():
+    from dataclasses import replace
+
+    profile = replace(load_profile("developer"), add_dirs=["/srv/cache", "/srv/refs"])
+    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
+    pairs = [(argv[i], argv[i + 1]) for i, a in enumerate(argv) if a == "--add-dir"]
+    assert pairs == [("--add-dir", "/srv/cache"), ("--add-dir", "/srv/refs")]
 
 
 def test_claude_command_emits_lightweight_flags():
@@ -593,3 +602,17 @@ def test_claude_agents_are_told_what_vouches_for_a_message():
     argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "hi", mode="assign"))
     prompt = argv[argv.index("--append-system-prompt") + 1]
     assert DELIVERY_NOTE in prompt and load_profile("developer").prompt in prompt
+
+
+def test_add_dir_is_never_the_last_flag():
+    """--add-dir is variadic, so a flag must follow the last one.
+
+    If it were last, Claude Code would read the initial prompt as another
+    directory and the worker would start with no task and no error.
+    """
+    from dataclasses import replace
+
+    profile = replace(load_profile("developer"), add_dirs=["/srv/cache", "/srv/refs"])
+    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
+    last = max(i for i, a in enumerate(argv) if a == "--add-dir")
+    assert argv[last + 2].startswith("--"), argv[last:]

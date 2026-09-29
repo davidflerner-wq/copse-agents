@@ -14,6 +14,7 @@ built-in profiles shipped with copse.
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
@@ -43,6 +44,10 @@ class Profile:
     context_tokens: int | None = None        # the model's window, less room for its reply
     # Extra environment for the agent's process, from ``env.NAME: value`` lines.
     env: dict[str, str] = field(default_factory=dict)
+    # --add-dir. Full tool access, not read access: edits and Bash reach these too,
+    # and Claude Code loads any CLAUDE.md it finds in them. Added to the repo's own
+    # add_dirs rather than replacing it; see load_profile.
+    add_dirs: list[str] | None = None
 
 
 _COMMENT = re.compile(r"(?:^|\s)#.*$")
@@ -105,6 +110,7 @@ def _parse(text: str, fallback_name: str) -> Profile:
         allowed_tools=_list(meta.get("allowed_tools")),
         strict_mcp=_flag(meta.get("strict_mcp")),
         setting_sources=_list(meta.get("setting_sources")),
+        add_dirs=_list(meta.get("add_dirs")),
         effort=meta.get("effort") or None,
         tool_search=_bool(meta.get('tool_search')) if meta.get('tool_search') else None,
         headless=_flag(meta.get("headless")),
@@ -124,6 +130,47 @@ def _search_dirs(repo_root: str | None) -> list[Path]:
     return dirs
 
 
+def _with_repo_add_dirs(profile: Profile, repo_root: str | None) -> Profile:
+    """Union the repo's ``add_dirs`` with the profile's, resolved and checked.
+
+    The repo config is the primary home: a shared build cache or a folder of
+    profiles beside the repo is a property of the repository, so every profile
+    launched in it needs the same list and copies would drift. A profile adds to
+    that list for a role that needs more, and never removes from it, which keeps
+    the result easy to reason about.
+
+    Entries are resolved against the repo root rather than passed through, because
+    a worktree is the process's working directory and a relative path would
+    otherwise mean ``~/.copse/worktrees/<repo>/<branch>/<path>``. A missing
+    directory is reported: Claude Code ignores an ``--add-dir`` that does not
+    exist, so the failure would be the one this field exists to prevent, silently.
+    """
+    if repo_root is None:
+        return profile
+
+    from copse.config import load_repo_config
+
+    root = Path(repo_root)
+    merged: list[str] = []
+    for entry in [*load_repo_config(repo_root).add_dirs, *(profile.add_dirs or [])]:
+        entry = str(entry).strip()
+        if not entry:
+            continue
+        resolved = str(Path(entry) if Path(entry).is_absolute() else (root / entry).resolve())
+        if resolved not in merged:
+            merged.append(resolved)
+
+    missing = [d for d in merged if not Path(d).is_dir()]
+    if missing:
+        print(
+            "copse: add_dirs names "
+            + ", ".join(missing)
+            + ", which do not exist; Claude Code will ignore them",
+            file=sys.stderr,
+        )
+    return replace(profile, add_dirs=merged or None)
+
+
 def load_profile(name: str, repo_root: str | None = None) -> Profile:
     """The profile in ``<name>.md``. Its ``name`` is always ``name``, even if
     the file's frontmatter says otherwise (a copied profile whose name wasn't
@@ -132,10 +179,14 @@ def load_profile(name: str, repo_root: str | None = None) -> Profile:
     for d in _search_dirs(repo_root):
         f = d / f"{name}.md"
         if f.is_file():
-            return replace(_parse(f.read_text(encoding="utf-8"), name), name=name)
+            return _with_repo_add_dirs(
+                replace(_parse(f.read_text(encoding="utf-8"), name), name=name), repo_root
+            )
     builtin = resources.files("copse.builtin_agents").joinpath(f"{name}.md")
     if builtin.is_file():
-        return replace(_parse(builtin.read_text(encoding="utf-8"), name), name=name)
+        return _with_repo_add_dirs(
+            replace(_parse(builtin.read_text(encoding="utf-8"), name), name=name), repo_root
+        )
     raise KeyError(f"no agent profile named {name!r}")
 
 

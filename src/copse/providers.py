@@ -296,6 +296,17 @@ class ClaudeCode(Provider):
             argv += ["--setting-sources", ",".join(p.setting_sources)]
         if p.effort:
             argv += ["--effort", p.effort]
+        # A worktree is the agent's world, so anything shared between workspaces —
+        # a build cache, a checked-out reference repo, a directory of profiles kept
+        # outside the repo — is outside it and unreachable without this. Full tool
+        # access, not read access: edits and Bash reach these too.
+        #
+        # --add-dir is variadic, so another flag MUST follow the last one. Move this
+        # loop below --permission-mode or --resume and the initial prompt is eaten as
+        # a directory, leaving a worker with no task and no error. Guarded by
+        # test_add_dir_is_never_the_last_flag.
+        for directory in p.add_dirs or []:
+            argv += ["--add-dir", directory]
         argv += ["--append-system-prompt",
                  "\n\n".join(filter(None, [ctx.profile.prompt, DELIVERY_NOTE]))]
         if ctx.profile.model:
