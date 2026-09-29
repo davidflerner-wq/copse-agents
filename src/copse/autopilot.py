@@ -41,6 +41,7 @@ from pathlib import Path
 
 from copse.config import CONFIG_DIR, RepoConfig, copse_home, load_repo_config
 from copse.db import DB, Agent, Autopilot, Milestone, Workspace
+from copse.profiles import load_profile
 
 GOALS_FILE = "goals.md"
 MAX_NUDGES = 3
@@ -108,12 +109,13 @@ class AutopilotError(RuntimeError):
 class Plan:
     goal: str
     detail: str | None
-    milestones: list[tuple[str, str | None, str | None]]   # (title, check, detail)
+    milestones: list[tuple]   # (title, check, detail[, profile])
 
 
 def parse_goals(text: str) -> Plan | None:
     """``# Goal`` then ``## Milestone`` sections, each with an optional
-    ``check: <command>`` line. Returns None when there's no goal heading."""
+    ``check: <command>`` line and ``profile: <name>`` line. Returns None when
+    there's no goal heading."""
     goal, detail_lines = None, []
     milestones: list[list] = []
     for line in text.splitlines():
@@ -122,7 +124,12 @@ def parse_goals(text: str) -> Plan | None:
                 goal = m.group(1)
             continue
         if m := re.match(r"^##\s+(.+?)\s*$", line):
-            milestones.append([m.group(1), None, []])
+            milestones.append([m.group(1), None, [], None])
+            continue
+        if milestones and milestones[-1][3] is None and (
+            m := re.match(r"^\s*profile:\s*`?([\w.-]+)`?\s*$", line, re.I)
+        ):
+            milestones[-1][3] = m.group(1)
             continue
         if milestones and milestones[-1][1] is None and (
             m := re.match(r"^\s*check:\s*`?(.+?)`?\s*$", line, re.I)
@@ -133,7 +140,8 @@ def parse_goals(text: str) -> Plan | None:
     if not goal:
         return None
     clean = lambda lines: "\n".join(lines).strip() or None  # noqa: E731
-    return Plan(goal, clean(detail_lines), [(t, c, clean(d)) for t, c, d in milestones])
+    return Plan(goal, clean(detail_lines),
+                [(t, c, clean(d), *([p] if p else [])) for t, c, d, p in milestones])
 
 
 def load_goals_file(root: str) -> Plan | None:
@@ -184,9 +192,9 @@ def set_enabled(db: DB, root_id: str, on: bool) -> None:
 
 
 def set_goal(db: DB, root_id: str, goal: str,
-             milestones: list[tuple[str, str | None, str | None]], detail: str | None = None) -> None:
-    """Record the goal and its milestones. A milestone that keeps its title and
-    check keeps its last result."""
+             milestones: list[tuple], detail: str | None = None) -> None:
+    """Record the goal and its milestones, ``(title, check, detail[, profile])``.
+    A milestone that keeps its title and check keeps its last result."""
     if not goal.strip():
         raise AutopilotError("the goal needs a title")
     if not milestones:
@@ -200,6 +208,24 @@ def set_goal(db: DB, root_id: str, goal: str,
             db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
                             passed_sha=prev.passed_sha)
     db.bump_progress(root_id)
+
+
+def resolve_profile(db: DB, caller_id: str, repo_root: str, requested: str | None = None) -> str:
+    """The worker profile for a delegation: ``requested`` if given, else the
+    first unverified milestone's profile in the caller's session, else the
+    repo's ``default_agent``. Raises AutopilotError if it doesn't exist."""
+    name = (requested or "").strip()
+    if not name:
+        pending = next((m for m in db.milestones(root_of(db, caller_id)) if m.status != "passed"), None)
+        name = (pending.profile if pending else None) or load_repo_config(repo_root).default_agent
+    try:
+        load_profile(name, repo_root)
+    except KeyError:
+        raise AutopilotError(
+            f"no agent profile named {name!r}; see list_agent_profiles, "
+            "or pass agent_profile explicitly"
+        ) from None
+    return name
 
 
 def need_user(db: DB, root_id: str, question: str) -> None:
@@ -368,7 +394,8 @@ def progress(db: DB, root_id: str) -> str:
     for m in db.milestones(root_id):
         how = f"check: `{m.check_cmd}`" if m.check_cmd else "NO CHECK: propose one with set_goal"
         when = f", last checked {time.strftime('%H:%M', time.localtime(m.checked_at))}" if m.checked_at else ""
-        lines.append(f"  {MARK.get(m.status, '·')} {m.position}. {m.title} ({how}{when})")
+        who = f", profile: {m.profile}" if m.profile else ""
+        lines.append(f"  {MARK.get(m.status, '·')} {m.position}. {m.title} ({how}{who}{when})")
     if ap.state in ("blocked", "stalled") and ap.note:
         lines.append(f"{ap.state.capitalize()}: {ap.note}")
     return "\n".join(lines)

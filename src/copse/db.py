@@ -97,7 +97,8 @@ CREATE TABLE IF NOT EXISTS milestones (
     checked_at REAL,
     output TEXT,                   -- the tail of the last check's output
     checked_sha TEXT,              -- the checkout's HEAD when it was last checked
-    passed_sha TEXT                -- the checkout's HEAD when it last passed
+    passed_sha TEXT,               -- the checkout's HEAD when it last passed
+    profile TEXT                   -- default worker profile for assign
 );
 -- A reviewer agent's verdict on a branch at one commit. A merge gate only
 -- accepts an approval of the commit it is about to merge.
@@ -317,6 +318,7 @@ class Milestone:
     output: str | None
     checked_sha: str | None = None
     passed_sha: str | None = None
+    profile: str | None = None
 
 
 @dataclass
@@ -443,7 +445,7 @@ class DB:
         if "checking_since" not in cols:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN checking_since REAL")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(milestones)")}
-        for col in ("checked_sha", "passed_sha"):
+        for col in ("checked_sha", "passed_sha", "profile"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} TEXT")
         cache_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(usage_cache)")}
@@ -763,15 +765,15 @@ class DB:
         with self.tx() as c:
             c.execute("UPDATE autopilot SET progress=progress+1, nudges=0 WHERE root_id=?", (root_id,))
 
-    def set_milestones(self, root_id: str, items: list[tuple[str, str | None, str | None]]) -> None:
-        """Replace the session's milestones with ``(title, check_cmd, detail)`` items."""
+    def set_milestones(self, root_id: str, items: list[tuple]) -> None:
+        """Replace the session's milestones with ``(title, check_cmd, detail[, profile])`` items."""
         with self.tx() as c:
             c.execute("DELETE FROM milestones WHERE root_id=?", (root_id,))
-            for i, (title, check, detail) in enumerate(items, start=1):
+            for i, (title, check, detail, *rest) in enumerate(items, start=1):
                 c.execute(
-                    "INSERT INTO milestones (root_id, position, title, check_cmd, detail) "
-                    "VALUES (?,?,?,?,?)",
-                    (root_id, i, title, check, detail),
+                    "INSERT INTO milestones (root_id, position, title, check_cmd, detail, profile) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (root_id, i, title, check, detail, rest[0] if rest else None),
                 )
 
     def milestones(self, root_id: str) -> list[Milestone]:

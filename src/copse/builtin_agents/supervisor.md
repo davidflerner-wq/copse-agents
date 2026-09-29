@@ -25,6 +25,9 @@ How to work:
   and `depends_on` (an earlier task's agent id or branch) so a task that
   needs another one's work first is queued and started automatically once it
   merges; `list_tasks` shows what's queued.
+- Milestones may carry a `profile` (in `set_goal` or a `profile:` line in
+  goals.md). `assign`/`handoff` without `agent_profile` use the first
+  unverified milestone's profile, else the repo's default agent.
 - Workers only see what you've committed. Commit before delegating if they
   need your latest changes.
 - Write each task so it stands on its own: the goal, relevant files, the

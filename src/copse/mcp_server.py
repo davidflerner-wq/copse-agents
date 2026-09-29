@@ -104,11 +104,14 @@ def _await_worker(db: DB, worker_id: str, wait_seconds: int) -> str:
 
 @mcp.tool()
 async def handoff(
-    agent_profile: str, task: str, isolate: bool = True, branch: str | None = None,
+    agent_profile: str = "", task: str = "", isolate: bool = True, branch: str | None = None,
     wait_seconds: int = DEFAULT_WAIT_SECONDS, done_when: str | None = None,
     files: list[str] | None = None, depends_on: list[str] | None = None,
 ) -> str:
     """Give a task to a new worker agent and wait for its result.
+
+    agent_profile is optional: when empty, the current unverified milestone's
+    profile is used, else the repo's default agent.
 
     Waits up to wait_seconds (default 4 minutes). If the worker isn't done by
     then, this returns "still running": call wait_for_worker to keep waiting,
@@ -136,13 +139,19 @@ async def handoff(
     def run() -> str:
         db = DB()
         caller, ws = _caller(db)
+        if not task.strip():
+            return "Give the worker a task."
+        try:
+            profile = autopilot.resolve_profile(db, caller.id, ws.repo_root, agent_profile)
+        except autopilot.AutopilotError as e:
+            return str(e)
         try:
             unmet = tasks.unmet_dependencies(db, ws, depends_on)
         except agents.AgentError as e:
             return str(e)
         if unmet:
             t = tasks.enqueue(
-                db, caller, ws, agent_profile, task, "handoff", isolate=isolate, branch=branch,
+                db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on,
             )
             return f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
@@ -152,11 +161,11 @@ async def handoff(
                     "end in conflicts. Fold it into that worker's task (send_message), or pass "
                     "depends_on so it starts once that branch has merged.")
         worker, wws = agents.delegate(
-            db, caller, ws, agent_profile, task, "handoff", isolate=isolate, branch=branch,
+            db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
             done_when=done_when,
         )
         tasks.record_started(
-            db, ws, worker, agent_profile, task, "handoff", isolate=isolate, branch=branch,
+            db, ws, worker, profile, task,"handoff", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on,
         )
         if not agents.runs_process(worker):
@@ -180,11 +189,14 @@ async def wait_for_worker(agent_id: str, wait_seconds: int = DEFAULT_WAIT_SECOND
 
 @mcp.tool()
 async def assign(
-    agent_profile: str, task: str, isolate: bool = True, branch: str | None = None,
+    agent_profile: str = "", task: str = "", isolate: bool = True, branch: str | None = None,
     done_when: str | None = None, files: list[str] | None = None,
     depends_on: list[str] | None = None,
 ) -> str:
     """Start a worker agent on a task and return immediately.
+
+    agent_profile is optional: when empty, the current unverified milestone's
+    profile is used, else the repo's default agent.
 
     When it finishes, its result arrives in your conversation as a message.
     Isolation works as for handoff. Use this to run several workers in parallel.
@@ -203,13 +215,19 @@ async def assign(
     def run() -> str:
         db = DB()
         caller, ws = _caller(db)
+        if not task.strip():
+            return "Give the worker a task."
+        try:
+            profile = autopilot.resolve_profile(db, caller.id, ws.repo_root, agent_profile)
+        except autopilot.AutopilotError as e:
+            return str(e)
         try:
             unmet = tasks.unmet_dependencies(db, ws, depends_on)
         except agents.AgentError as e:
             return str(e)
         if unmet:
             t = tasks.enqueue(
-                db, caller, ws, agent_profile, task, "assign", isolate=isolate, branch=branch,
+                db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on,
             )
             return f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
@@ -219,11 +237,11 @@ async def assign(
                     "end in conflicts. Fold it into that worker's task (send_message), or pass "
                     "depends_on so it starts once that branch has merged.")
         worker, wws = agents.delegate(
-            db, caller, ws, agent_profile, task, "assign", isolate=isolate, branch=branch,
+            db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
             done_when=done_when,
         )
         tasks.record_started(
-            db, ws, worker, agent_profile, task, "assign", isolate=isolate, branch=branch,
+            db, ws, worker, profile, task,"assign", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on,
         )
         if not agents.runs_process(worker):
@@ -450,7 +468,9 @@ def _session(db: DB) -> tuple[str, Workspace] | str:
 @mcp.tool()
 def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = None) -> str:
     """Autopilot: record what we're building. milestones is an ordered list of
-    {"title": ..., "check": ..., "detail": ...}. Each check is a shell command
+    {"title": ..., "check": ..., "detail": ..., "profile": ...}. The optional
+    profile names the default worker profile for `assign` while that milestone
+    is the current one (e.g. a cheaper profile for a small milestone). Each check is a shell command
     copse runs from the root of your checkout; it must exit 0 only when that
     milestone is done (e.g. "uv run pytest tests/test_settings.py -q").
     Replaces any earlier goal; milestones that keep their title and check keep
@@ -466,7 +486,8 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
         if not title:
             return "Every milestone needs a title."
         check = str(m.get("check") or "").strip() or None
-        items.append((title, check, (str(m.get("detail") or "").strip() or None)))
+        items.append((title, check, (str(m.get("detail") or "").strip() or None),
+                      (str(m.get("profile") or "").strip() or None)))
     try:
         autopilot.set_goal(db, root_id, goal, items, detail)
     except autopilot.AutopilotError as e:
