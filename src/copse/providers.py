@@ -524,9 +524,15 @@ def codex_binary() -> str:
 
 class Codex(Provider):
     name = "codex"
+    # Status comes from Codex's `notify` command (turn complete); it has no
+    # ready or turn-start event, so after_launch says when it's ready.
+    uses_hooks = True
+    announces_start = False
 
     def command(self, ctx: LaunchContext) -> list[str]:
         spec = mcp_server_spec(ctx.agent_id)
+        # Codex appends the event's JSON as the last argument.
+        notify = [*copse_invocation(), "_hook", "codex-notify", "--agent", ctx.agent_id]
         argv = [
             codex_binary(),
             "-c", f"mcp_servers.copse.command={json.dumps(spec['command'])}",
@@ -537,6 +543,7 @@ class Codex(Provider):
             # Pre-approve copse's own tools (report_result, send_message, ...),
             # like --allowedTools mcp__copse for Claude Code. Nothing else.
             "-c", 'mcp_servers.copse.default_tools_approval_mode="approve"',
+            "-c", f"notify={json.dumps(notify)}",
         ]
         if ctx.profile.model:
             argv += ["--model", ctx.profile.model]

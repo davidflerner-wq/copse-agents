@@ -619,6 +619,10 @@ documents its own quirks (no prompt caching on most, smaller context windows),
 so prefer the native provider for open-weight models and keep this route for
 Claude itself behind a gateway.
 
+Codex agents report status through Codex's `notify` hook (copse passes
+`-c notify=[...]` at launch, leaving your own Codex config alone): a completed turn
+marks the agent idle and delivers any queued message.
+
 ## Google Antigravity
 
 copse runs Google Antigravity's terminal agent, `agy`, as well as Claude Code and

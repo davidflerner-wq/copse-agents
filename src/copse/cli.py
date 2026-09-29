@@ -829,7 +829,8 @@ def mcp() -> None:
 
 
 @app.command("_hook", hidden=True)
-def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent")) -> None:
+def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
+         payload: Optional[str] = typer.Argument(None)) -> None:
     if event.startswith("agy-"):
         from copse import antigravity
 
@@ -840,7 +841,9 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent")) -> No
     agent_id = agent or os.environ.get("COPSE_AGENT_ID")
     if not agent_id:
         return
-    out = agents.hook_main(DB(), agent_id, event, sys.stdin.read(), trusted=agent is not None)
+    # Codex's notify passes the JSON as an argument; Claude Code's hooks use stdin.
+    text = payload if payload is not None else sys.stdin.read()
+    out = agents.hook_main(DB(), agent_id, event, text, trusted=agent is not None)
     if out:
         typer.echo(out)
 

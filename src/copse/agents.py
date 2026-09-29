@@ -1619,6 +1619,13 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 db.set_status(agent_id, "processing")
                 return decision
         db.set_status(agent_id, "idle")
+    elif event == "codex-notify":
+        # Codex's notify command runs when a turn completes; it can't block the
+        # stop, so a queued message is typed into the pane instead.
+        if payload.get("type") == "agent-turn-complete":
+            db.set_status(agent_id, "idle")
+            if db.pending_count(agent_id) and not agent.headless:
+                flush(db, agent_id)
     elif event == "stop-failure":
         # The turn ended on an API error; no Stop hook follows.
         db.set_status(agent_id, "idle")

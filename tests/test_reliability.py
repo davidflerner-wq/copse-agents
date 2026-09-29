@@ -432,7 +432,7 @@ def test_worker_stopping_unreported_tells_a_hookless_parent(db, root, monkeypatc
     # A Codex supervisor has no Stop hook to hand over a queued message, so
     # it has to be typed in straight away.
     agent, ws = root
-    db.update_agent("boss", provider="codex", status="unknown")
+    db.update_agent("boss", provider="codex", status="idle")
     add_agent(db, ws, "w1", status="processing")
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
     pasted = []
