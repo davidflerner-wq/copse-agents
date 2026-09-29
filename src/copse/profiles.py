@@ -157,7 +157,15 @@ def _with_repo_add_dirs(profile: Profile, repo_root: str | None) -> Profile:
         entry = str(entry).strip()
         if not entry:
             continue
-        path = Path(entry).expanduser()
+        try:
+            path = Path(entry).expanduser()
+        except RuntimeError:
+            # An unknown user (a typo like ~typo/cache) or no home directory.
+            # Kept as written so missing_add_dirs reports it at launch; raising
+            # here would fail every load_profile, and with it every launch.
+            if entry not in merged:
+                merged.append(entry)
+            continue
         resolved = str(path if path.is_absolute() else (root / path).resolve())
         if resolved not in merged:
             merged.append(resolved)

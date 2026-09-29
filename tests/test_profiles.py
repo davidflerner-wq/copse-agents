@@ -97,3 +97,18 @@ def test_repo_add_dirs_expand_a_leading_tilde(tmp_path, monkeypatch):
     (repo / ".copse" / "config.json").write_text('{"add_dirs": ["~/cache"]}')
 
     assert load_profile("developer", str(repo)).add_dirs == [str(home / "cache")]
+
+
+def test_an_unknown_user_in_add_dirs_is_reported_not_raised(tmp_path):
+    """``~typo/cache`` makes expanduser raise. Kept as written instead, so
+    loading the profile (and every launch with it) still works and launch
+    reports the entry as missing."""
+    from copse.profiles import load_profile, missing_add_dirs
+
+    repo = tmp_path / "proj"
+    (repo / ".copse").mkdir(parents=True)
+    (repo / ".copse" / "config.json").write_text('{"add_dirs": ["~no-such-user-copse/cache"]}')
+
+    p = load_profile("developer", str(repo))
+    assert p.add_dirs == ["~no-such-user-copse/cache"]
+    assert missing_add_dirs(p) == ["~no-such-user-copse/cache"]

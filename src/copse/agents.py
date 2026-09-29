@@ -204,10 +204,6 @@ def spawn(
     # Headless is a Claude Code mode; other CLIs ignore the profile field.
     # copse's own loop (native) has no TUI at all, so it always runs that way.
     headless = bool(profile.headless and provider.name == "claude") or provider.name == "native"
-    missing = missing_add_dirs(profile) if provider.name == "claude" else []
-    if missing:
-        print(f"copse: add_dirs names {', '.join(missing)}, which do not exist; "
-              "Claude Code will ignore them", file=sys.stderr)
 
     # Stored as the agent's task: the raw text for a handoff/assign worker (so
     # a reviewer reading it later isn't given WORKER_FOOTER or the /goal
@@ -530,6 +526,12 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         db.set_status(agent.id, status)
         agent.status = status
         return
+    # Here rather than in spawn, so a resume checks too: a directory can be
+    # deleted between the first launch and a `copse continue`.
+    missing = missing_add_dirs(profile) if provider.name == "claude" else []
+    if missing:
+        print(f"copse: add_dirs names {', '.join(missing)}, which do not exist; "
+              "Claude Code will ignore them", file=sys.stderr)
     if agent.headless:
         _launch_headless(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane)
         return
