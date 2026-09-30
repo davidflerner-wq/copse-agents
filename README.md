@@ -63,6 +63,13 @@ you: stuck on a prompt, a supervisor with a question, or (without autopilot) a
 worker whose branch is waiting for your review. Under autopilot, a reported worker shows
 a dim ◇ instead, because the supervisor reviews it.
 
+**Copying chat text.** Drag with the mouse in the chat: the selection stays inside
+that pane and is copied to the system clipboard (`pbcopy`, `wl-copy` or `xclip`;
+`copse doctor` shows which). `h` in the sidebar hides it without quitting copse
+(the chat zooms; `Ctrl-b S` brings it back), and `Ctrl-b z` zooms the chat by hand.
+To keep the dashboard below the chat instead, set `"sidebar": "bottom"` in
+`.copse/config.json`.
+
 | Key | |
 |---|---|
 | `↑↓ j k` | move |
@@ -314,6 +321,7 @@ Autopilot, merge gates and cleanup:
 | `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
 | `add_dirs` | `[]` | directories outside the worktree that Claude Code agents may use (`--add-dir`; full tool access, see "Directories outside the workspace") |
 | `local_models` | `true` | when a native profile points at Ollama on this machine and it isn't running, `copse` starts `ollama serve` in the background (with the context length the profiles need) and loads their models; `false` leaves it to you |
+| `sidebar` | `"left"` | where the dashboard sits in each window: `"left"` of the chat, or `"bottom"` (full-width rows under it) |
 
 **Closing and cleaning up.** Press `x` on an agent in the sidebar (twice for one
 that's still running) or run `copse close <id>` to stop it and hide it. Stopping means
