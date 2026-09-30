@@ -310,6 +310,8 @@ Autopilot, merge gates and cleanup:
 | `stale_after` | `30` | minutes before a worker that reported and sat idle is closed (`0`: never) |
 | `pipeline` | `true` | copse reviews and merges reported branches itself; the supervisor gets one message per branch |
 | `review_rounds` | `2` | fix-and-re-review rounds the pipeline runs before handing findings to the supervisor |
+| `merge_into` | none | branch that worker branches are cut from and merge into, whatever branch the supervisor is on |
+| `auto_merge_default_branch` | `false` | let the pipeline merge into the repo's default branch (origin HEAD, else `main`/`master`) on its own; by default it sends a "needs you" message instead, and you run `merge_workspace` yourself (manual merges are never gated) |
 | `overlap` | `"block"` | a task whose `files` overlap a running task's is refused (`"warn"` starts it with a warning) |
 | `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
 | `add_dirs` | `[]` | directories outside the worktree that Claude Code agents may use (`--add-dir`; full tool access, see "Directories outside the workspace") |
