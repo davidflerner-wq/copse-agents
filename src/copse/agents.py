@@ -404,9 +404,19 @@ def _ensure_sidebar(db: DB, root_id: str, ws: Workspace, target_pane: str) -> No
         if _valid_sidebar(existing, root_id):
             assert existing is not None
             if tmux.pane_window(existing) != tmux.pane_window(target_pane):
-                tmux.move_pane(existing, target_pane, SIDEBAR_COLUMNS)
+                tmux.move_pane(existing, target_pane, SIDEBAR_COLUMNS, _sidebar_position(ws))
             return
         _create_sidebar(db, root_id, ws, target_pane)
+
+
+def _sidebar_position(ws: Workspace) -> str:
+    """"left" or "bottom": the repo's `sidebar` setting (anything else: left)."""
+    from copse.config import load_repo_config
+
+    try:
+        return "bottom" if load_repo_config(ws.repo_root).sidebar == "bottom" else "left"
+    except ValueError:  # unreadable config: the layout is not worth failing over
+        return "left"
 
 
 def _create_sidebar(db: DB, root_id: str, ws: Workspace, target_pane: str) -> str:
@@ -415,7 +425,8 @@ def _create_sidebar(db: DB, root_id: str, ws: Workspace, target_pane: str) -> st
     from copse.providers import copse_invocation
 
     pane = tmux.split_left(target_pane, ws.path, [*copse_invocation(), "watch", "--sidebar"],
-                           workspaces.workspace_env(ws), columns=SIDEBAR_COLUMNS)
+                           workspaces.workspace_env(ws), columns=SIDEBAR_COLUMNS,
+                           position=_sidebar_position(ws))
     tmux.set_pane_tag(pane, SIDEBAR_TAG, root_id)
     db.set_sidebar_pane(root_id, pane)
     return pane
@@ -512,7 +523,9 @@ def sidebar_follow(db: DB, session: str) -> None:
         target_pane = tmux.agent_pane_in_window(window, sidebar)
         if not target_pane:
             return
-        tmux.move_pane(sidebar, target_pane, SIDEBAR_COLUMNS)
+        root_ws = db.get_workspace(root.workspace_id)
+        tmux.move_pane(sidebar, target_pane, SIDEBAR_COLUMNS,
+                       _sidebar_position(root_ws) if root_ws else "left")
 
 
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
@@ -1354,7 +1367,10 @@ def delegate(
         raise AgentError(str(e)) from e
     if isolate:
         caller_ws = workspaces.refresh_branch(db, caller_ws)
-        base = caller_ws.branch
+        # merge_into applies to the supervisor's workers; a worker's own
+        # sub-workers still branch from (and merge back into) its branch.
+        merge_into = load_repo_config(caller_ws.repo_root).merge_into
+        base = merge_into if merge_into and not (caller and caller.parent_id) else caller_ws.branch
         branch = branch or _branch_from_task(profile, task, new_id()[:4])
         start = base if git.branch_exists(caller_ws.repo_root, base) else "HEAD"
         created = workspaces.create(

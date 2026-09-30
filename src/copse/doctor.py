@@ -61,6 +61,11 @@ def checks(repo_root: str | None) -> list[Check]:
     out.append(_tool("pre-commit", False, "only needed if the repo uses pre-commit hooks"))
     out.append(_tool("graphify", False, "only needed for the code map agents can query"))
 
+    clip = tmux.clipboard_command()
+    out.append(Check(OK if clip else WARN, "clipboard",
+                     f"{clip.split()[0]}: dragging in the chat copies to the clipboard" if clip else
+                     "no pbcopy, wl-copy or xclip: mouse selection copies only within tmux"))
+
     out.extend(native_checks(repo_root))
 
     home = config.copse_home()

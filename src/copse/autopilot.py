@@ -39,7 +39,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from copse.config import CONFIG_DIR, RepoConfig, copse_home, load_repo_config
+from copse.config import CONFIG_DIR, RepoConfig, config_root, copse_home, load_repo_config
 from copse.db import DB, Agent, Autopilot, Milestone, Workspace
 from copse.profiles import load_profile
 
@@ -145,7 +145,7 @@ def parse_goals(text: str) -> Plan | None:
 
 
 def load_goals_file(root: str) -> Plan | None:
-    path = Path(root) / CONFIG_DIR / GOALS_FILE
+    path = config_root(root) / CONFIG_DIR / GOALS_FILE
     if not path.is_file():
         return None
     return parse_goals(path.read_text(encoding="utf-8"))

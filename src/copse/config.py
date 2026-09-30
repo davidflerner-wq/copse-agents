@@ -60,7 +60,9 @@ class RepoConfig:
     stale_after: int = 30              # minutes before an idle, reported worker is closed; 0: never
     pipeline: bool = True              # copse reviews and merges reported branches itself (copse.pipeline)
     review_rounds: int = 2             # fix-and-re-review rounds the pipeline runs before asking the supervisor
-    overlap: str = "block"             # a task whose files overlap a running one: "block" or "warn"
+    merge_into: str | None = None      # branch worker branches are cut from and merge into (None: the supervisor's / default branch)
+    auto_merge_default_branch: bool = False  # let the pipeline merge into the repo's default branch on its own
+    overlap: str = "block"           # a task whose files overlap a running one: "block" or "warn"
     # Worktree pool: pre-built worktrees (checked out, files copied, setup run)
     # that `create` claims instead of doing that work live. None here means
     # "not set"; load_repo_config resolves it to 1 if the repo has `setup`
@@ -71,6 +73,7 @@ class RepoConfig:
     # Start Ollama in the background when a native profile points at it on
     # this machine and it isn't running (see copse.native.serve).
     local_models: bool = True
+    sidebar: str = "left"              # where the dashboard sits: "left" of the chat or "bottom"
 
 
 def _merge_commands(shared: list[str], local: object) -> list[str]:
@@ -93,8 +96,25 @@ def _read_json(path: Path) -> dict:
     return data
 
 
+def config_root(path: str | Path) -> Path:
+    """The directory whose ``.copse`` applies to ``path``: ``path`` itself when
+    it has one, else (for a linked git worktree, where the git-ignored config
+    isn't checked out) the main worktree found via ``git rev-parse
+    --git-common-dir`` (read from the ``.git`` file, so no git process runs)."""
+    path = Path(path)
+    if (path / CONFIG_DIR).is_dir():
+        return path
+    try:
+        gitdir = Path((path / ".git").read_text(encoding="utf-8").split("gitdir:", 1)[1].strip())
+        common = (gitdir / (gitdir / "commondir").read_text(encoding="utf-8").strip()).resolve()
+    except (OSError, IndexError):  # not a linked worktree: nothing to discover
+        return path
+    main = common.parent
+    return main if common.name == ".git" and (main / CONFIG_DIR).is_dir() else path
+
+
 def load_repo_config(repo_root: str | Path) -> RepoConfig:
-    base = Path(repo_root) / CONFIG_DIR
+    base = config_root(repo_root) / CONFIG_DIR
     shared = _read_json(base / CONFIG_FILE)
     local = _read_json(base / LOCAL_CONFIG_FILE)
 
@@ -105,7 +125,8 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
     for key in ("base_branch", "branch_prefix", "default_agent", "fetch", "autopilot", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "usage_limit", "pool_size", "graphify", "stale_after", "pipeline",
-                "review_rounds", "overlap", "local_models"):
+                "review_rounds", "overlap", "local_models", "merge_into",
+                "auto_merge_default_branch", "sidebar"):
         if key in local:
             setattr(cfg, key, local[key])
         elif key in shared:

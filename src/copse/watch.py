@@ -352,18 +352,26 @@ KEYS = [
 # In the sidebar, q quits copse itself: the session pauses, as when the chat
 # ends, and the person gets their prompt back.
 SIDEBAR_QUIT = ("q", "quit copse (2×)")
+# h hides the sidebar (the chat zooms; prefix S or prefix z brings it back).
+SIDEBAR_HIDE = ("h", "hide (prefix S)")
 KEY_COLUMN = 9
 
 
 def help_lines(width: int, in_tmux: bool = False, sidebar: bool = False) -> list[Line]:
     """The `?` overlay, drawn in place of the list."""
     keys = [SIDEBAR_QUIT if sidebar and k == "q" else (k, what) for k, what in KEYS]
+    if sidebar:
+        keys.insert(-1, SIDEBAR_HIDE)
     lines = [Line("Keys", "bold")]
     lines += [Line(fit(f"{k:<{KEY_COLUMN}}{what}", width)) for k, what in keys]
     lines += [Line(""), Line(fit("◆ needs you", width), "alert"),
               Line(fit("◇ autopilot will review", width), "dim")]
     if in_tmux:
         lines += [Line(t, "dim") for t in _wrap("prefix L: back from an agent", width, "")]
+        if sidebar:
+            lines += [Line(t, "dim") for t in _wrap(
+                "prefix S: show the sidebar again. To copy chat text: drag in the chat, "
+                "or prefix z zooms it", width, "")]
     lines += [Line(t, "dim") for t in _wrap("any key to go back", width, "")]
     return lines
 
@@ -535,6 +543,8 @@ def handle_key(state: NavState, key: int, lines: list[Line], visible: int,
         return "quit"
     if key == ord("r"):
         return "refresh"
+    if key == ord("h") and sidebar:
+        return "hide"
     if key == ord("?"):
         state.help = True
     elif key == ord("/"):
@@ -814,6 +824,9 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False) -> None:
             if go:
                 agents.quit_later(own_root)
                 return
+        elif action == "hide":
+            if sidebar and os.environ.get("TMUX_PANE"):
+                tmux.toggle_sidebar(os.environ["TMUX_PANE"])
         elif action == "attach" and selected is not None:
             _attach(lines[selected].agent, lines[selected].workspace, db)
             stdscr.clear()

@@ -307,6 +307,46 @@ def gh_pr_view(repo_path: str, number: int) -> dict:
         raise WorkspaceError(f"gh pr view {number}: unexpected output: {proc.stdout[:200]!r}") from e
 
 
+def checkout_for(db: DB, repo_path: str, *, branch: str | None = None,
+                 worktree: str | None = None) -> Workspace:
+    """The checkout a supervisor should run in for ``branch`` and/or
+    ``worktree`` (a path): the worktree where it already is, else a new one.
+    Created worktrees are copse's own (like ``copse new``) unless ``worktree``
+    names where to put it. The repo's ``.copse`` config applies there either
+    way (see ``config.config_root``)."""
+    repo_root = git.main_repo_root(repo_path)
+    if worktree:
+        path = Path(worktree).expanduser().resolve()
+        if (path / ".git").exists():
+            live = git.current_branch(path)
+            if branch and live != branch:
+                raise WorkspaceError(f"{path} has {live or 'a detached HEAD'} checked out, not {branch!r}")
+            return adopt_root(db, str(path))
+        if not branch:
+            raise WorkspaceError(f"{path} isn't a worktree yet; pass --branch to create one there")
+        cfg = load_repo_config(repo_root)
+        base = cfg.base_branch or git.default_branch(repo_root)
+        git.add_worktree(repo_root, path, branch, git.resolve_start_point(repo_root, base, cfg.fetch))
+        return adopt_root(db, str(path))
+    if not branch:
+        raise WorkspaceError("give a branch or a worktree path")
+    existing = git.worktree_for_branch(repo_root, branch)
+    if existing:
+        return adopt_root(db, existing)
+    return create(db, repo_path, branch, apply_prefix=False).workspace
+
+
+def checkout_for_target(db: DB, repo_path: str, target: str) -> Workspace:
+    """``checkout_for`` for one argument that is a worktree path (absolute,
+    starting with . or ~, or an existing directory; a new one is named for its
+    folder) or a branch name, which may contain slashes (``fix/foo``)."""
+    path = os.path.expanduser(target)
+    if not (os.path.isabs(path) or target.startswith((".", "~")) or os.path.exists(path)):
+        return checkout_for(db, repo_path, branch=target)
+    branch = None if os.path.exists(path) else git.sanitize_branch(os.path.basename(path.rstrip(os.sep)))
+    return checkout_for(db, repo_path, branch=branch, worktree=target)
+
+
 def create_from_pr(
     db: DB,
     repo_path: str,
@@ -384,9 +424,14 @@ class Removed:
     teardown: SetupResult | None
 
 
-def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool = False) -> Removed:
+def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool = False,
+           keep_session: bool = False) -> Removed:
+    """``keep_session`` leaves the workspace's tmux session running: for a
+    caller that itself runs in it (the pipeline's reviewer), which killing
+    the session would take down mid-cleanup."""
     if ws.kind == "main":
-        tmux.kill_session(ws.tmux_session)
+        if not keep_session:
+            tmux.kill_session(ws.tmux_session)
         db.delete_workspace(ws.id)
         return Removed(False, "existing checkout left untouched", None)
 
@@ -407,7 +452,8 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool = 
         if not teardown.ok and not force:
             raise WorkspaceError(f"teardown failed; fix it or pass --force:\n{teardown.log}")
 
-    tmux.kill_session(ws.tmux_session)
+    if not keep_session:
+        tmux.kill_session(ws.tmux_session)
     if exists:
         git.remove_worktree(ws.repo_root, ws.path, force=force)
     else:

@@ -111,6 +111,7 @@ def apply_theme(session: str) -> None:
         for win in _tmux("list-windows", "-t", f"={session}", "-F", "#{window_id}", check=False).stdout.split():
             _tmux("set-option", "-w", "-t", win, key, opts[key], check=False)
     set_follow_hooks(session)
+    bind_session_keys(session)
 
 
 # Fired whenever a copse session's active window changes (picking a different
@@ -138,20 +139,34 @@ def set_follow_hooks(session: str) -> None:
         _tmux("set-hook", "-t", session, hook, f"run-shell -b {shlex.quote(shell)}", check=False)
 
 
+SIDEBAR_BOTTOM_LINES = 12
+
+
+def _sidebar_geometry(position: str, size: int) -> tuple[list[str], str]:
+    """split/join-pane flags and the resize-pane flag for a sidebar at
+    ``position`` ("left", or "bottom" under the chat, full width)."""
+    if position == "bottom":
+        return ["-v", "-l", str(min(size, SIDEBAR_BOTTOM_LINES))], "-y"
+    return ["-h", "-b", "-l", str(size)], "-x"
+
+
 def split_left(target: str, cwd: str, command: list[str], env: dict[str, str],
-               columns: int = 30) -> str:
-    """Open a narrow pane to the LEFT of ``target`` running ``command``,
-    keeping focus on ``target``. Returns the new pane's id."""
+               columns: int = 30, position: str = "left") -> str:
+    """Open a narrow pane to the LEFT of ``target`` (or, for ``position``
+    "bottom", a short one under it) running ``command``, keeping focus on
+    ``target``. Returns the new pane's id."""
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
+    geometry, axis = _sidebar_geometry(position, columns)
     proc = _tmux(
-        "split-window", "-d", "-h", "-b", "-l", str(columns), "-P", "-F", "#{pane_id}",
+        "split-window", "-d", *geometry, "-P", "-F", "#{pane_id}",
         "-t", target, "-c", cwd, *env_args, "--", *command,
     )
     pane = proc.stdout.strip()
     # tmux grows every pane proportionally when a client attaches at a bigger
-    # size; keep the sidebar at its width whenever the window is resized.
+    # size; keep the sidebar at its size whenever the window is resized.
+    size = min(columns, SIDEBAR_BOTTOM_LINES) if position == "bottom" else columns
     _tmux("set-hook", "-w", "-t", target, "window-resized",
-          f"resize-pane -t {pane} -x {columns}", check=False)
+          f"resize-pane -t {pane} {axis} {size}", check=False)
     return pane
 
 
@@ -297,7 +312,7 @@ def agent_pane_in_window(window: str, sidebar: str | None) -> str | None:
     return others[0] if others else None
 
 
-def move_pane(pane: str, target: str, columns: int = 30) -> None:
+def move_pane(pane: str, target: str, columns: int = 30, position: str = "left") -> None:
     """Relocate ``pane`` (e.g. the sidebar) to sit at the left of ``target``'s
     window, keeping focus on whatever's already active there. Re-points the
     window-resize pin (see split_left) at the new window and clears it from
@@ -307,11 +322,57 @@ def move_pane(pane: str, target: str, columns: int = 30) -> None:
     keeps running, and a window holding nothing but the sidebar is no use to
     anyone. Refusing instead would strand the sidebar there, out of sight."""
     old_window = pane_window(pane)
-    _tmux("join-pane", "-h", "-b", "-d", "-l", str(columns), "-s", pane, "-t", target, check=False)
+    geometry, axis = _sidebar_geometry(position, columns)
+    _tmux("join-pane", "-d", *geometry, "-s", pane, "-t", target, check=False)
     if old_window and old_window != pane_window(pane):
         _tmux("set-hook", "-w", "-t", old_window, "-u", "window-resized", check=False)
+    size = min(columns, SIDEBAR_BOTTOM_LINES) if position == "bottom" else columns
     _tmux("set-hook", "-w", "-t", target, "window-resized",
-          f"resize-pane -t {pane} -x {columns}", check=False)
+          f"resize-pane -t {pane} {axis} {size}", check=False)
+
+
+def toggle_sidebar(pane: str) -> None:
+    """Hide or show the sidebar ``pane`` without ending it: zoom the chat
+    beside it (the sidebar keeps running, unseen), or unzoom. Same as the
+    ``prefix S`` binding (see bind_session_keys)."""
+    window = pane_window(pane)
+    if not window:
+        return
+    zoomed = _tmux("display-message", "-p", "-t", window, "#{window_zoomed_flag}", check=False)
+    if zoomed.stdout.strip() != "1":
+        _tmux("select-pane", "-t", f"{window}.+", check=False)  # off the sidebar
+    _tmux("resize-pane", "-Z", "-t", window, check=False)
+
+
+def clipboard_command() -> str | None:
+    """The tool that puts stdin on the system clipboard, if there is one."""
+    if shutil.which("pbcopy"):
+        return "pbcopy"
+    if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy"):
+        return "wl-copy"
+    if shutil.which("xclip"):
+        return "xclip -selection clipboard -i"
+    if shutil.which("wl-copy"):
+        return "wl-copy"
+    return None
+
+
+def bind_session_keys(session: str) -> None:
+    """Chat-friendly mouse selection and the sidebar toggle. Key tables are
+    server-wide in tmux, so every binding is guarded on the ``@copse`` session
+    option set here and falls back to tmux's own default for any other
+    session: only copse's sessions behave differently."""
+    _tmux("set-option", "-t", session, "@copse", "1", check=False)
+    clip = clipboard_command()
+    for table in ("copy-mode", "copy-mode-vi"):
+        default = "send-keys -X copy-pipe-and-cancel"
+        ours = f"send-keys -X copy-pipe-and-cancel {shlex.quote(clip)}" if clip else default
+        _tmux("bind-key", "-T", table, "MouseDragEnd1Pane",
+              "if-shell", "-F", "#{@copse}", ours, default, check=False)
+    # prefix S: hide/show the sidebar (unbound in stock tmux).
+    toggle = ("if-shell -F '#{window_zoomed_flag}' 'resize-pane -Z' "
+              "\"if-shell -F '#{@copse_sidebar}' 'select-pane -t :.+'; resize-pane -Z\"")
+    _tmux("bind-key", "S", "if-shell", "-F", "#{@copse}", toggle, "", check=False)
 
 
 def kill_server() -> None:

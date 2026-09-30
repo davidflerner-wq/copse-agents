@@ -273,10 +273,39 @@ def diff(path: str | Path, base: str, stat: bool = False) -> str:
     text = out(args, path)
     untracked = out(["ls-files", "--others", "--exclude-standard"], path).splitlines()
     if untracked:
-        text += ("\n" if text else "") + "Untracked files:\n" + "\n".join(
-            f"  {f}" for f in untracked
-        )
+        text += ("\n" if text else "") + summarize_untracked(untracked)
     return text
+
+
+# Directories that are never work product; an untracked one is collapsed to a count.
+NOISE_DIRS = {".venv", "venv", "node_modules", "__pycache__", ".tox", ".mypy_cache",
+              ".pytest_cache", ".ruff_cache", "dist", "build", ".git"}
+MAX_UNTRACKED_LISTED = 20
+
+
+def summarize_untracked(files: list[str]) -> str:
+    """Untracked files as a bounded listing: files at the top level are named,
+    everything under a directory is a per-directory count, and noise
+    directories (.venv, node_modules, ...) are collapsed however deep."""
+    loose: list[str] = []
+    dirs: dict[str, int] = {}
+    for f in files:
+        parts = f.split("/")
+        noise = next((i for i, p in enumerate(parts[:-1]) if p in NOISE_DIRS), None)
+        if noise is not None:
+            key = "/".join(parts[: noise + 1])
+            dirs[key] = dirs.get(key, 0) + 1
+        elif len(parts) == 1:
+            loose.append(f)
+        else:
+            dirs[parts[0]] = dirs.get(parts[0], 0) + 1
+    entries = [f"  {f}" for f in loose] + [
+        f"  {d}/ ({n} file{'s' if n != 1 else ''})" for d, n in sorted(dirs.items())
+    ]
+    shown = entries[:MAX_UNTRACKED_LISTED]
+    if len(entries) > len(shown):
+        shown.append(f"  ... and {len(entries) - len(shown)} more")
+    return f"Untracked files ({len(files)}):\n" + "\n".join(shown)
 
 
 def commit_all(path: str | Path, message: str) -> str | None:
