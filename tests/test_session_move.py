@@ -96,3 +96,9 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
     task = db.get_task("t1")
     assert task.caller_id == "new" and task.caller_ws_id == dest.id
     assert not db.get_autopilot("old").enabled
+
+
+def test_checkout_for_target_reads_a_slashed_name_as_a_branch(db, repo, monkeypatch):
+    monkeypatch.chdir(repo)
+    ws = workspaces.checkout_for_target(db, str(repo), "fix/handover")
+    assert ws.branch == "fix/handover" and not (repo / "fix").exists()

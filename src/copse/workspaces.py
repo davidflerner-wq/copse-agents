@@ -337,12 +337,12 @@ def checkout_for(db: DB, repo_path: str, *, branch: str | None = None,
 
 
 def checkout_for_target(db: DB, repo_path: str, target: str) -> Workspace:
-    """``checkout_for`` for one argument that is a worktree path (it has a
-    separator or starts with . or ~; a new one is named for its folder) or a
-    branch name."""
-    if os.sep not in target and not target.startswith((".", "~")):
-        return checkout_for(db, repo_path, branch=target)
+    """``checkout_for`` for one argument that is a worktree path (absolute,
+    starting with . or ~, or an existing directory; a new one is named for its
+    folder) or a branch name, which may contain slashes (``fix/foo``)."""
     path = os.path.expanduser(target)
+    if not (os.path.isabs(path) or target.startswith((".", "~")) or os.path.exists(path)):
+        return checkout_for(db, repo_path, branch=target)
     branch = None if os.path.exists(path) else git.sanitize_branch(os.path.basename(path.rstrip(os.sep)))
     return checkout_for(db, repo_path, branch=branch, worktree=target)
 

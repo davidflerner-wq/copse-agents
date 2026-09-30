@@ -82,3 +82,19 @@ def test_merge_into_puts_workers_on_that_branch_and_is_merged_there(db, repo, mo
         agents.delegate(db, db.get_agent("boss"), root, "developer", "do it", "assign")
     ws = [w for w in db.find_workspaces() if w.kind == "worktree"][0]
     assert ws.base_branch == "integration"
+
+
+def test_merge_into_leaves_a_workers_own_sub_workers_on_its_branch(db, repo, monkeypatch):
+    sh("git branch integration", repo)
+    sh("git branch topic", repo)
+    (repo / ".copse").mkdir()
+    (repo / ".copse" / "config.json").write_text(json.dumps({"merge_into": "integration"}))
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="processing")
+    mine = workspaces.create(db, str(repo), "topic", apply_prefix=False).workspace
+    add(db, mine, "dev", "assign", parent="boss", status="processing")
+    monkeypatch.setattr(agents, "spawn", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop")))
+    with pytest.raises(RuntimeError):
+        agents.delegate(db, db.get_agent("dev"), mine, "developer", "sub task", "assign")
+    ws = [w for w in db.find_workspaces() if w.kind == "worktree" and w.id != mine.id][0]
+    assert ws.base_branch == "topic"
