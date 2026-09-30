@@ -134,12 +134,18 @@ def fake_serve():
     import signal
     import subprocess
     import sys
+    import time
 
     started = []
 
     def launch():
         p = subprocess.Popen([sys.executable, "-c", SERVE, "ollama", "serve"], start_new_session=True)
         started.append(p)
+        # Until the child execs, ps shows the parent's command line (Linux
+        # especially), and copse rightly won't stop a process that isn't ollama.
+        deadline = time.monotonic() + 5
+        while not serve._is_ollama_serve(p.pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
         return p
 
     yield launch
