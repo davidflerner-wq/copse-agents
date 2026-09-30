@@ -155,15 +155,21 @@ def start(
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the copse watch dashboard in a pane under the agent."),
     autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="The supervisor drives toward a goal until it's verified (default: on, or `autopilot` in .copse/config.json)."),
+    branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Run in the worktree for this branch, creating the branch and worktree if needed."),
+    worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
 ) -> None:
     """Start a fresh chat with an agent here (default: a supervisor), with the dashboard alongside.
 
     A session still running here is paused first; `copse continue` brings
-    paused sessions back."""
+    paused sessions back. With --branch or --worktree it runs in that
+    worktree instead, which gets the repo's .copse config."""
     from copse.config import load_repo_config
 
     db = DB()
-    ws = _here_or_scratch(db, reuse_scratch=False)
+    if branch or worktree:
+        ws = _run(workspaces.checkout_for, db, os.getcwd(), branch=branch, worktree=worktree)
+    else:
+        ws = _here_or_scratch(db, reuse_scratch=False)
     # Nothing slow before the chat starts: the paused session's leftover
     # processes, old paused sessions' worktrees and the pool refill are all
     # handled by the detached cull.
@@ -416,6 +422,28 @@ def transfer(
     _do_transfer(db, s, dest, branch)
 
 
+@app.command()
+def handover(
+    to: str = typer.Option(..., "--to", help="Branch or worktree path for the new supervisor (created if needed)."),
+    note: Optional[str] = typer.Option(None, "--note", "-n", help="Handoff note: the new supervisor's first message includes it."),
+    attach: bool = typer.Option(True, "--attach/--no-attach"),
+) -> None:
+    """Hand this repo's supervisor session to a new supervisor on another branch or worktree.
+
+    The goal and milestones, workers, queued tasks and your note move to the
+    new supervisor; the old one is paused."""
+    from copse import sessions
+
+    db = DB()
+    root_id = _session_root(db)
+    dest = _run(workspaces.checkout_for_target, db, os.getcwd(), to)
+    new = _run(sessions.handover, db, root_id, dest, note)
+    typer.secho(f"✓ handed {root_id} over to {new.id} in {dest.id} ({dest.branch})", fg="green")
+    _cull_detached(dest.repo_root)
+    if attach:
+        _attach(dest, new.tmux_window)
+
+
 @app.callback(invoke_without_command=True)
 def default(
     ctx: typer.Context,
@@ -429,7 +457,7 @@ def default(
             continue_cmd(session_id=None, attach=True)
         else:
             start(agent="supervisor", prompt=None, provider=provider, attach=True, watch=True,
-                  autopilot=autopilot)
+                  autopilot=autopilot, branch=None, worktree=None)
 
 
 def _session_root(db: DB) -> str:

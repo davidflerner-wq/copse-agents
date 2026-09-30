@@ -11,7 +11,7 @@ import time
 
 from mcp.server.mcpserver import MCPServer
 
-from copse import agents, autopilot, codemap, gates, git, history, pipeline, tasks, workspaces
+from copse import agents, autopilot, codemap, gates, git, history, pipeline, sessions, tasks, workspaces
 from copse.config import RepoConfig, load_repo_config
 from copse.db import DB, Agent, Workspace
 from copse.profiles import list_profiles
@@ -549,6 +549,32 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
     except autopilot.AutopilotError as e:
         return str(e)
     return autopilot.progress(db, root_id)
+
+
+@mcp.tool()
+def handover(to: str, note: str | None = None) -> str:
+    """Hand this session over to a new supervisor on another branch or
+    worktree (`to`: a branch name, or a worktree path). The goal and milestones,
+    your workers, queued tasks and `note` (the rules, branch state, loose ends
+    the new supervisor needs) move across, and the new supervisor's first
+    message carries the note. Afterwards you have nothing left to supervise:
+    tell the user and stop."""
+    db = DB()
+    caller, _ = _caller(db)
+    if not caller:
+        return "Not running as a copse agent."
+    root_id = autopilot.root_of(db, caller.id)
+    root = db.get_agent(root_id)
+    ws = db.get_workspace(root.workspace_id) if root else None
+    if not ws:
+        return "No session to hand over."
+    try:
+        dest = workspaces.checkout_for_target(db, ws.path, to)
+        new = sessions.handover(db, root_id, dest, note, pause_old=False)
+    except (git.GitError, workspaces.WorkspaceError, agents.AgentError, ValueError) as e:
+        return f"Handover failed: {e}"
+    return (f"Handed the session over to {new.id} in {dest.id} ({dest.branch}). Your goal, workers and "
+            "queued tasks are now theirs; tell the user and stop.")
 
 
 @mcp.tool()
