@@ -424,9 +424,14 @@ class Removed:
     teardown: SetupResult | None
 
 
-def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool = False) -> Removed:
+def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool = False,
+           keep_session: bool = False) -> Removed:
+    """``keep_session`` leaves the workspace's tmux session running: for a
+    caller that itself runs in it (the pipeline's reviewer), which killing
+    the session would take down mid-cleanup."""
     if ws.kind == "main":
-        tmux.kill_session(ws.tmux_session)
+        if not keep_session:
+            tmux.kill_session(ws.tmux_session)
         db.delete_workspace(ws.id)
         return Removed(False, "existing checkout left untouched", None)
 
@@ -447,7 +452,8 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool = 
         if not teardown.ok and not force:
             raise WorkspaceError(f"teardown failed; fix it or pass --force:\n{teardown.log}")
 
-    tmux.kill_session(ws.tmux_session)
+    if not keep_session:
+        tmux.kill_session(ws.tmux_session)
     if exists:
         git.remove_worktree(ws.repo_root, ws.path, force=force)
     else:

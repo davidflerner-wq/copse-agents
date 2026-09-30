@@ -4,8 +4,10 @@ from ``COPSE_AGENT_ID`` (set in the agent's environment at spawn)."""
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
+import time
 
 from mcp.server.mcpserver import MCPServer
 
@@ -16,6 +18,8 @@ from copse.profiles import list_profiles
 from copse.providers import copse_invocation
 
 MAX_DIFF_CHARS = 60_000
+MAX_STAT_LINES = 60
+LAST_ACTIVITY_TAIL_BYTES = 65_536
 
 mcp = MCPServer(
     "copse",
@@ -58,11 +62,63 @@ def _summary(db: DB, ws: Workspace) -> str:
         return f"branch {ws.branch}"
     st = git.status(ws.path, base)
     stat = git.diff(ws.path, base, stat=True) or "(no changes)"
+    lines = stat.splitlines()
+    if len(lines) > MAX_STAT_LINES:
+        stat = "\n".join(lines[:MAX_STAT_LINES] + [f"... ({len(lines) - MAX_STAT_LINES} more lines)"])
     dirty = f", {len(st.dirty_files)} uncommitted file(s)" if st.dirty_files else ""
     return (
         f"workspace {ws.id} on branch {ws.branch}: {st.ahead} commit(s) ahead of {base}, "
         f"{st.behind} behind{dirty}\n{stat}"
     )
+
+
+def _ago(seconds: float) -> str:
+    s = max(int(seconds), 0)
+    if s < 90:
+        return f"{s}s ago"
+    if s < 90 * 60:
+        return f"{s // 60}m ago"
+    return f"{s // 3600}h ago"
+
+
+def _last_tool(transcript: str) -> str | None:
+    """Name of the last tool call in the tail of a session transcript (Claude
+    Code's or a native worker's JSONL). Reads only the last few KB."""
+    try:
+        with open(transcript, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(f.tell() - LAST_ACTIVITY_TAIL_BYTES, 0))
+            tail = f.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return None
+    for line in reversed(tail.splitlines()):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        blocks = (entry.get("message") or {}).get("content") if isinstance(entry.get("message"), dict) else None
+        for b in reversed(blocks if isinstance(blocks, list) else []):
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name"):
+                return str(b["name"])
+        calls = entry.get("tool_calls")
+        if isinstance(calls, list) and calls and isinstance(calls[-1], dict) and calls[-1].get("name"):
+            return str(calls[-1]["name"])
+    return None
+
+
+def _last_activity(a: Agent) -> str:
+    """`` last: WebFetch 40s ago`` from the agent's transcript (its mtime is
+    the last activity), or empty when it has none."""
+    if not a.transcript_path:
+        return ""
+    try:
+        age = time.time() - os.stat(a.transcript_path).st_mtime
+    except OSError:
+        return ""
+    tool = _last_tool(a.transcript_path)
+    return f" last: {tool + ' ' if tool else ''}{_ago(age)}"
 
 
 DEFAULT_WAIT_SECONDS = 240
@@ -309,7 +365,7 @@ def list_agents() -> str:
             parent = f" parent={a.parent_id}" if a.parent_id else ""
             lines.append(
                 f"{a.id}{me} {a.profile}/{a.provider} {a.status} mode={a.mode}{parent} "
-                f"ws={ws.id} branch={ws.branch}"
+                f"ws={ws.id} branch={ws.branch}{_last_activity(a)}"
             )
     return "\n".join(lines) or "No agents."
 

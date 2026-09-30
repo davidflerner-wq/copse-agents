@@ -1347,7 +1347,7 @@ def delegate(
         raise AgentError(str(e)) from e
     if isolate:
         caller_ws = workspaces.refresh_branch(db, caller_ws)
-        base = caller_ws.branch
+        base = load_repo_config(caller_ws.repo_root).merge_into or caller_ws.branch
         branch = branch or _branch_from_task(profile, task, new_id()[:4])
         start = base if git.branch_exists(caller_ws.repo_root, base) else "HEAD"
         created = workspaces.create(
