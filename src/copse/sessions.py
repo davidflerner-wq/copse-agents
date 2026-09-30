@@ -55,6 +55,64 @@ def paused(db: DB, repo_root: str) -> list[Session]:
     return sorted(out, key=lambda s: s.paused_at, reverse=True)
 
 
+HANDOVER = (
+    "[copse handover] You are taking over supervising this work from {old}, which ran on branch "
+    "{branch}. The goal and milestones, the workers below and any queued tasks are now yours; "
+    "call get_progress and list_agents first.{note}{workers}"
+)
+
+
+def handover_prompt(db: DB, old_root: Agent, note: str | None) -> str:
+    """What the new supervisor is told on start: the handoff note and the workers it inherits."""
+    ws = db.get_workspace(old_root.workspace_id)
+    lines = []
+    for w in db.children(old_root.id):
+        wws = db.get_workspace(w.workspace_id)
+        lines.append(f"- {w.id} ({w.profile}, {w.status}) on {wws.branch if wws else '?'}"
+                     f", based on {wws.base_branch if wws else '?'}")
+    return HANDOVER.format(
+        old=old_root.id, branch=ws.branch if ws else "?",
+        note=f"\n\nHandoff note:\n{note.strip()}" if note and note.strip() else "",
+        workers="\n\nWorkers you inherit:\n" + "\n".join(lines) if lines else "",
+    )
+
+
+def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None, *,
+             pause_old: bool = True) -> Agent:
+    """Hand a supervisor session to a new supervisor running in ``dest``.
+
+    Carries over the goal and milestones (with their last results), the
+    workers (their ``parent_id``), queued and started tasks, and a handoff note
+    that becomes the new supervisor's first message. The old supervisor's
+    autopilot is switched off and, with ``pause_old``, the old session paused
+    (not when the old supervisor itself is calling: it ends its own turn)."""
+    from copse import autopilot as pilot
+
+    old = db.get_agent(old_root_id)
+    if old is None:
+        raise agents.AgentError(f"no session {old_root_id}")
+    ap = db.get_autopilot(old_root_id)
+    prompt = handover_prompt(db, old, note)
+    new = agents.spawn(db, dest, old.profile, prompt=prompt, provider_name=old.provider,
+                       watch_pane=True, background_setup=True, autopilot=bool(ap and ap.enabled))
+    if ap and ap.enabled and ap.goal:
+        old_ms = db.milestones(old_root_id)
+        pilot.set_goal(db, new.id, ap.goal, [(m.title, m.check_cmd, m.detail, m.profile) for m in old_ms],
+                       ap.detail)
+        for prev, m in zip(old_ms, db.milestones(new.id)):
+            if prev.status != "pending":
+                db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
+                                passed_sha=prev.passed_sha)
+        db.update_autopilot(old_root_id, enabled=0)
+    with db.tx() as c:
+        c.execute("UPDATE agents SET parent_id=? WHERE parent_id=?", (new.id, old_root_id))
+        c.execute("UPDATE tasks SET caller_id=?, caller_ws_id=? WHERE caller_id=? "
+                  "AND state IN ('pending', 'started')", (new.id, dest.id, old_root_id))
+    if pause_old:
+        agents.pause(db, old_root_id, stop_local_models=False)
+    return new
+
+
 def _forget(db: DB, s: Session) -> None:
     """Drop a session: its records, and any of its workers' worktrees that are
     clean and not used by anything else. Branches and dirty worktrees stay."""

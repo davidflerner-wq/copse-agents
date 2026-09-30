@@ -93,8 +93,25 @@ def _read_json(path: Path) -> dict:
     return data
 
 
+def config_root(path: str | Path) -> Path:
+    """The directory whose ``.copse`` applies to ``path``: ``path`` itself when
+    it has one, else (for a linked git worktree, where the git-ignored config
+    isn't checked out) the main worktree found via ``git rev-parse
+    --git-common-dir`` (read from the ``.git`` file, so no git process runs)."""
+    path = Path(path)
+    if (path / CONFIG_DIR).is_dir():
+        return path
+    try:
+        gitdir = Path((path / ".git").read_text(encoding="utf-8").split("gitdir:", 1)[1].strip())
+        common = (gitdir / (gitdir / "commondir").read_text(encoding="utf-8").strip()).resolve()
+    except (OSError, IndexError):  # not a linked worktree: nothing to discover
+        return path
+    main = common.parent
+    return main if common.name == ".git" and (main / CONFIG_DIR).is_dir() else path
+
+
 def load_repo_config(repo_root: str | Path) -> RepoConfig:
-    base = Path(repo_root) / CONFIG_DIR
+    base = config_root(repo_root) / CONFIG_DIR
     shared = _read_json(base / CONFIG_FILE)
     local = _read_json(base / LOCAL_CONFIG_FILE)
 

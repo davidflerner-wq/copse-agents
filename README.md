@@ -215,7 +215,8 @@ your own status line prints, so what you see doesn't change.
 | `copse new BRANCH [-b BASE] [-a PROFILE] [-p PROMPT]` | worktree + branch + agent |
 | `copse continue [ID]` / `copse -c` | resume a paused session (default: the most recent) |
 | `copse sessions` / `copse prune` | list paused sessions / apply the retention rules now and remove merged worktrees and leftover tmux sessions |
-| `copse start [-a PROFILE] [-p PROMPT] [--no-watch] [--no-autopilot]` | the same, with options |
+| `copse start [-a PROFILE] [-p PROMPT] [--no-watch] [--no-autopilot] [-b BRANCH] [-w PATH]` | the same, with options; `-b`/`-w` run it in that branch's worktree (created if needed, or the one you already made), which gets the repo's `.copse` config |
+| `copse handover --to BRANCH\|PATH [-n NOTE]` | hand the session to a new supervisor there: goal and milestones, workers, queued tasks and your note move across; the old one is paused |
 | `copse autopilot [on\|off\|check]` | the goal's progress; turn autopilot on or off; run the checks now |
 | `copse transfer [REPO] [--from SESSION] [-b BRANCH]` | move a scratch session's work into a real repo |
 | `copse ls [--all]` | workspaces and agents |
@@ -254,6 +255,7 @@ knowing them helps when you tell the supervisor how to work.
 | `set_goal` / `get_progress` / `check_milestone` | supervisor | autopilot's goal, its progress, and running the checks |
 | `need_user` | supervisor | stop autopilot and ask you a question |
 | `transfer_to_repo` | supervisor | move a scratch session's work into a repository |
+| `handover` | supervisor | hand the session to a new supervisor on another branch or worktree, with a note |
 
 ## Token usage and history
 
@@ -277,6 +279,10 @@ history never blocks a report, merge or check: a failure there is logged and
 skipped.
 
 ## Repo config: `.copse/config.json`
+
+A linked git worktree you made yourself doesn't have the git-ignored parts of
+`.copse`; copse finds the config through the main worktree
+(`git rev-parse --git-common-dir`), so there's nothing to symlink.
 
 ```json
 {
