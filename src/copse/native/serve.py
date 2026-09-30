@@ -229,7 +229,7 @@ def ensure(repo_root: str | None, cfg: RepoConfig, *, log: Path | None = None) -
 def _is_ollama_serve(pid: int) -> bool:
     """Whether ``pid`` is still an ``ollama serve`` (not a reused pid)."""
     try:
-        out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+        out = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)],
                              capture_output=True, text=True, timeout=5).stdout
     except (OSError, subprocess.SubprocessError):
         return False
