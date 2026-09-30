@@ -248,7 +248,7 @@ def test_copse_start_returns_within_budget(db, repo, monkeypatch, detached, slow
     try:
         t0 = time.monotonic()
         cli.start(agent="supervisor", prompt=None, provider="shell", attach=False,
-                  watch=False, autopilot=False)
+                  watch=False, autopilot=False, branch=None, worktree=None)
         elapsed = time.monotonic() - t0
     finally:
         tmux.kill_session(ws.tmux_session)

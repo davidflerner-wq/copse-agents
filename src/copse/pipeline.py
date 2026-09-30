@@ -111,13 +111,31 @@ def on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: s
     report = worker.result or ""
     if approved:
         parent = db.get_agent(parent_id) if parent_id else None
-        text = merge(db, parent, ws)
-        if text.startswith("Merged"):
-            note = _remove(db, ws)
+        if not cfg.auto_merge_default_branch and ws.base_branch \
+                and ws.base_branch == git.default_branch(ws.repo_root):
             db.update_agent(worker.id, pipeline=None)
             _tell(db, parent_id,
-                  f"[copse pipeline] {text} {note}\n\nWorker's report:\n{report}\n\n"
+                  f"[copse pipeline] `{ws.branch}` was approved, but its base `{ws.base_branch}` "
+                  "is the repo's default branch, which copse doesn't merge into on its own. "
+                  f"This needs you: merge_workspace(\"{ws.id}\") when you're ready to merge it "
+                  "(set \"merge_into\" to another branch, or \"auto_merge_default_branch\": true, "
+                  f"in .copse/config.json to change this).\n\nWorker's report:\n{report}\n\n"
                   f"Review ({reviewer.id}): approved.\n{summary}", worker.id)
+            return True
+        text = merge(db, parent, ws)
+        if text.startswith("Merged"):
+            # This runs inside the reviewer's own process, and removing its
+            # workspace must not take that process down half way: record and
+            # announce everything first, then remove without killing the
+            # session the reviewer is in.
+            db.update_agent(worker.id, pipeline=None)
+            db.set_status(reviewer.id, "done")
+            _tell(db, parent_id,
+                  f"[copse pipeline] {text} Removing the worktree.\n\nWorker's report:\n{report}"
+                  f"\n\nReview ({reviewer.id}): approved.\n{summary}", worker.id)
+            note = _remove(db, ws, keep=reviewer)
+            if note.startswith("("):
+                _tell(db, parent_id, f"[copse pipeline] {ws.branch}: {note}", worker.id)
         else:
             db.update_agent(worker.id, pipeline=None)
             _tell(db, parent_id,
@@ -147,9 +165,17 @@ def on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool, summary: s
     return True
 
 
-def _remove(db: DB, ws: Workspace) -> str:
+def _remove(db: DB, ws: Workspace, keep: Agent | None = None) -> str:
+    """Remove ``ws`` while ``keep`` (the agent running this code) survives:
+    the other agents' windows are stopped, but the session ``keep`` is in is
+    left for its own close."""
     try:
-        removed = workspaces.remove(db, ws, force=False, delete_branch=False)
+        if keep is not None:
+            for a in db.list_agents(ws.id):
+                if a.id != keep.id and agents.is_alive(a):
+                    agents._stop(db, a)
+        removed = workspaces.remove(db, ws, force=False, delete_branch=False,
+                                    keep_session=keep is not None)
         return f"Worktree removed; {removed.branch_note or 'branch kept'}."
     except workspaces.WorkspaceError as e:
         return f"(worktree kept: {e})"

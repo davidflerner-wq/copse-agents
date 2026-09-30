@@ -21,7 +21,8 @@ def piped(db, repo, monkeypatch):
     """A supervisor in the checkout, a worker on a branch with a commit, and a
     reviewer that copse can start without a real process."""
     (repo / ".copse").mkdir()
-    (repo / ".copse" / "config.json").write_text(json.dumps({"review": True}))
+    (repo / ".copse" / "config.json").write_text(json.dumps(
+        {"review": True, "auto_merge_default_branch": True}))
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss", "interactive", "supervisor", status="processing")  # busy: messages queue
     ws = workspaces.create(db, str(repo), "feat").workspace
@@ -41,6 +42,7 @@ def piped(db, repo, monkeypatch):
     monkeypatch.setattr(agents, "warm_checks", lambda ws_: None)
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
     monkeypatch.setattr(pipeline, "_detach", lambda argv: None)
+    monkeypatch.setattr(agents, "_stop", lambda db_, a: None)
     return root, ws, started
 
 
